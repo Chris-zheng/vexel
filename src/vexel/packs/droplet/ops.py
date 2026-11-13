@@ -863,7 +863,7 @@ FLAG_REASONS = {
     "size_outlier": "粒径明显偏离其他液滴",
     "count_unstable": "细胞数在各帧之间不一致",
     "near_threshold": "荧光接近阴阳阈值",
-    "few_frames": "可见帧数少，测量依据少",
+    "few_frames": "在视野中停留的帧数少，测量依据少",
 }
 FLAG_COLUMNS = ["track_id", "frame", "centroid_y_px", "centroid_x_px", "diameter_px", "reasons", "reason_text"]
 
@@ -873,7 +873,7 @@ class FlagParams(Params):
     size_outlier_k: float = Field(4.0, gt=0, description="flag diameters this many robust standard deviations from the median")
     min_inclusion_agreement: float = Field(0.8, ge=0, le=1, description="flag cell counts that agree across fewer frames")
     threshold_margin: float = Field(0.1, ge=0, description="flag fluorescence within this share of the group gap from the threshold")
-    min_frames_fraction: float = Field(0.5, ge=0, le=1, description="flag droplets seen in fewer frames than this x the median")
+    min_frames_fraction: float = Field(0.5, ge=0, le=1, description="flag droplets in view (first to last frame) for less than this x the median")
 
 
 @register_op(
@@ -907,7 +907,13 @@ def flags(params: FlagParams, ctx: Context, *, table: pd.DataFrame, tracks: pd.D
             margin = table["call_margin"].to_numpy(dtype=np.float64)
             for i in np.nonzero(np.abs(margin) < params.threshold_margin)[0]:
                 reasons[i].append("near_threshold")
-        frames = table["n_frames"].to_numpy(dtype=np.float64)
+        # Judged on the span a droplet stayed in view (first to last frame), not on how many
+        # frames saw it: a stream that thins frames when it falls behind sees every droplet
+        # in fewer frames, which says nothing about the droplet.
+        if {"first_frame", "last_frame"} <= set(table.columns):
+            frames = table["last_frame"].to_numpy(dtype=np.float64) - table["first_frame"].to_numpy(dtype=np.float64) + 1
+        else:
+            frames = table["n_frames"].to_numpy(dtype=np.float64)
         for i in np.nonzero(frames < params.min_frames_fraction * float(np.median(frames)))[0]:
             reasons[i].append("few_frames")
 

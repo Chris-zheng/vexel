@@ -33,6 +33,29 @@ def _peaks2d(vectors: np.ndarray, radius: float) -> np.ndarray:
     return np.argwhere(is_max).astype(float) - r
 
 
+def displacements(prev: np.ndarray, cur: np.ndarray, search: float) -> np.ndarray:
+    """All (dy, dx) vectors from objects in ``prev`` to objects in ``cur`` no longer than ``search``."""
+    if not len(prev) or not len(cur):
+        return np.empty((0, 2))
+    d = (cur[None, :, :] - prev[:, None, :]).reshape(-1, 2)
+    return d[np.hypot(d[:, 0], d[:, 1]) <= search]
+
+
+def global_flow(vectors: np.ndarray, search: float) -> np.ndarray | None:
+    """The flow of a train of objects: the displacement peak smallest in magnitude (a
+    regular train also peaks at the true shift minus one spacing)."""
+    if not len(vectors):
+        return None
+    peaks = _peaks2d(vectors, search)
+    return peaks[np.argmin(np.hypot(peaks[:, 0], peaks[:, 1]))]
+
+
+def pair_shift(vectors: np.ndarray, flow: np.ndarray, max_distance: float) -> np.ndarray:
+    """One frame pair's shift: the median of the displacements within ``max_distance`` of ``flow``."""
+    close = vectors[np.hypot(*(vectors - flow).T) <= max_distance] if len(vectors) else vectors
+    return np.median(close, axis=0) if len(close) else np.asarray(flow, dtype=float)
+
+
 def estimate_flow(frame: np.ndarray, y: np.ndarray, x: np.ndarray, max_distance: float) -> dict[int, np.ndarray]:
     """Per-frame displacement (dy, dx) from frame t to t+1.
 
@@ -46,19 +69,14 @@ def estimate_flow(frame: np.ndarray, y: np.ndarray, x: np.ndarray, max_distance:
     pos = {t: np.column_stack([y[frame == t], x[frame == t]]) for t in frames}
     pairs: dict[int, np.ndarray] = {}
     for t in frames:
-        if t + 1 in pos and len(pos[t]) and len(pos[t + 1]):
-            d = (pos[t + 1][None, :, :] - pos[t][:, None, :]).reshape(-1, 2)
-            d = d[np.hypot(d[:, 0], d[:, 1]) <= search]
+        if t + 1 in pos:
+            d = displacements(pos[t], pos[t + 1], search)
             if len(d):
                 pairs[int(t)] = d
-    if not pairs:
+    flow = global_flow(np.concatenate(list(pairs.values())), search) if pairs else None
+    if flow is None:
         return {}
-    peaks = _peaks2d(np.concatenate(list(pairs.values())), search)
-    flow = peaks[np.argmin(np.hypot(peaks[:, 0], peaks[:, 1]))]
-    shifts: dict[int, np.ndarray] = {}
-    for t, d in pairs.items():
-        close = d[np.hypot(*(d - flow).T) <= max_distance]
-        shifts[t] = np.median(close, axis=0) if len(close) else flow
+    shifts = {t: pair_shift(d, flow, max_distance) for t, d in pairs.items()}
     keys = sorted(shifts)
     arr = np.array([shifts[k] for k in keys])
     from scipy.ndimage import median_filter

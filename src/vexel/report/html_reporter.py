@@ -174,6 +174,81 @@ def svg_scatter(x: np.ndarray, y: np.ndarray, positive: np.ndarray, threshold: f
 # -- methods ----------------------------------------------------------------------------------
 
 
+def svg_series(x: np.ndarray, y: np.ndarray, unit: str, label: str, marks: list[float] | None = None) -> str:
+    """A rolling statistic over the stream; vertical marks at alarm frames."""
+    x, y = np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
+    ok = np.isfinite(x) & np.isfinite(y)
+    x, y = x[ok], y[ok]
+    if x.size == 0:
+        return _svg(_text(W / 2, H / 2, "没有数据", "middle"), label)
+    x0, x1, y0, y1 = PAD_L, W - PAD_R, PAD_T, H - PAD_B
+    xlo, xhi = float(x.min()), float(x.max()) if x.max() > x.min() else float(x.min()) + 1
+    ylo, yhi = float(y.min()), float(y.max())
+    pad = (yhi - ylo) * 0.1 or abs(yhi) * 0.05 or 1.0
+    ylo, yhi = ylo - pad, yhi + pad
+
+    def px(v: float) -> float:
+        return x0 + (v - xlo) / (xhi - xlo) * (x1 - x0)
+
+    def py(v: float) -> float:
+        return y1 - (v - ylo) / (yhi - ylo) * (y1 - y0)
+
+    parts = [f'<line x1="{x0}" y1="{y1}" x2="{x1}" y2="{y1}" class="grid"/>']
+    for m in marks or []:
+        if xlo <= m <= xhi:
+            parts.append(f'<line x1="{px(m):.1f}" y1="{y0}" x2="{px(m):.1f}" y2="{y1}" class="threshold"/>')
+    pts = " ".join(f"{px(a):.1f},{py(b):.1f}" for a, b in zip(x, y))
+    parts.append(f'<polyline points="{pts}" fill="none" class="line"/>')
+    parts += [f'<circle cx="{px(a):.1f}" cy="{py(b):.1f}" r="2.5" class="dot"/>' for a, b in zip(x, y)]
+    parts.append(_text(x0, H - 12, f"第 {xlo:.0f} 帧"))
+    parts.append(_text(x1, H - 12, f"第 {xhi:.0f} 帧", "end"))
+    parts.append(_text(x0 - 6, y0 + 4, f"{yhi:.4g}", "end"))
+    parts.append(_text(x0 - 6, y1, f"{ylo:.4g}", "end"))
+    if unit:
+        parts.append(_text(x0, y0 - 8, unit, "start", "label"))
+    return _svg("".join(parts), label)
+
+
+def stream_section(run_dir: Path, prov: dict[str, Any], unit: str) -> list[str]:
+    """Throughput, frame drops, rolling statistics and alarms of a stream run."""
+    st = prov.get("stream") or {}
+    src = st.get("source") or {}
+    speed = src.get("speed")
+    pace = "不限速（测软件最大处理速度）" if speed is None else f"按原始帧率的 {speed:g} 倍回放"
+    out = [f'<h2>在线回放</h2><p class="meta">{_e(pace)}。计时不含相机读出与传输，是软件本身的速度，不是端到端延迟。</p><div class="cards">']
+    out.append(_card("处理速度", f"{_fmt(st.get('processing_fps'), 3)} 帧/秒", f"共 {_fmt(st.get('wall_s'), 3)} 秒"))
+    dropped = st.get("frames_dropped") or 0
+    detail = f"收到 {st.get('frames_received')} · 处理 {st.get('frames_processed')}"
+    if dropped:
+        detail += f"（抽样跳过 {st.get('frames_sampled_out', 0)}，队列满丢弃 {st.get('frames_lost_queue_full', 0)}）"
+    out.append(_card("丢帧", str(dropped), detail))
+    lat = st.get("latency_ms")
+    if lat:
+        out.append(_card("延迟", f"{lat['median']:.0f} ms", f"p95 {lat['p95']:.0f} ms · 最大 {lat['max']:.0f} ms"))
+    out.append(_card("警报", str(st.get("n_alarms", 0)), f"滚动统计 {st.get('n_rolling_updates', 0)} 次"))
+    out.append("</div>")
+    rolling = pd.read_csv(run_dir / "stream" / "rolling.csv") if (run_dir / "stream" / "rolling.csv").exists() else None
+    alarms = pd.read_csv(run_dir / "stream" / "alarms.csv") if (run_dir / "stream" / "alarms.csv").exists() else None
+    marks = alarms["frame"].tolist() if alarms is not None and not alarms.empty else []
+    if rolling is not None and not rolling.empty:
+        charts = []
+        for col, label, u in (("droplets.diameter_mean", "滚动平均粒径", unit), ("droplets.frequency", "滚动生成频率", ""),
+                              ("encapsulation.lambda", "滚动 λ", ""), ("positivity.positive_fraction", "滚动阳性比例", "")):  # fmt: skip
+            if col in rolling and rolling[col].notna().any():
+                charts.append((label, svg_series(rolling["frame"].to_numpy(), rolling[col].to_numpy(), u, label, marks)))
+        if charts:
+            out.append('<div class="charts">' + "".join(f"<figure><h3>{_e(t)}</h3>{svg}</figure>" for t, svg in charts) + "</div>")
+    if alarms is not None and not alarms.empty:
+        out.append("<h3>警报</h3><table><tr><th>帧</th><th>类型</th><th>内容</th><th>画面</th></tr>")
+        for r in alarms.itertuples(index=False):
+            img = run_dir / "stream" / str(r.image) if isinstance(r.image, str) and r.image else None
+            pic = f'<img class="event" src="{_png(img)}" alt="第 {int(r.frame)} 帧">' if img is not None and img.exists() else ""
+            kind = {"drift": "漂移", "qc": "质控"}.get(r.kind, r.kind)
+            out.append(f'<tr><td class="num">{int(r.frame)}</td><td>{_e(kind)}</td><td>{_e(r.message)}</td><td>{pic}</td></tr>')
+        out.append("</table>")
+    return out
+
+
 def methods_text(recipe: dict[str, Any], provenance: dict[str, Any]) -> list[str]:
     """A methods paragraph per step, generated from the frozen recipe."""
     out: list[str] = []
@@ -285,6 +360,8 @@ h3 { font-size:15px; margin:20px 0 8px; }
 svg { width:100%; height:auto; } svg .bar { fill:var(--accent); } svg .ref { fill:var(--ref); } svg .grid { stroke:var(--line); }
 svg .mean { stroke:var(--fg); stroke-dasharray:4 3; } svg .axis { fill:var(--muted); font-size:11px; } svg .label { fill:var(--fg); font-size:11px; }
 svg .pos { fill:var(--accent); fill-opacity:.8; } svg .neg { fill:var(--ref); fill-opacity:.8; }
+svg .line { stroke:var(--accent); stroke-width:2; } svg .dot { fill:var(--accent); } svg .threshold { stroke:var(--warn-fg); stroke-dasharray:3 3; }
+img.event { width:220px; max-width:100%; border-radius:6px; image-rendering:pixelated; }
 .review img { width:100%; border-radius:6px; margin:4px 0 2px; image-rendering:pixelated; } .cap { color:var(--muted); font-size:12px; margin-bottom:10px; }
 .gallery { display:grid; grid-template-columns:repeat(auto-fill, minmax(120px, 1fr)); gap:10px; }
 .gallery figure { margin:0; } .gallery img { width:100%; border-radius:6px; image-rendering:pixelated; } .gallery figcaption { font-size:12px; color:var(--muted); }
@@ -309,7 +386,10 @@ def build_report(run_dir: str | Path) -> str:
     s, enc, fluo, flg = parts["droplets"] or {}, parts["encapsulation"], parts["fluorescence"], parts["flags"]
     unit = _UNIT.get(s.get("length_unit", "px"), s.get("length_unit", "px"))
     inp = prov.get("input", {})
-    status = {"completed": "已完成", "stopped_by_qc": "被质控规则中止"}.get(prov.get("status"), prov.get("status"))
+    source_name = Path(str(inp["source"])).name if inp.get("source") else "内存中的数组"
+    status = {"completed": "已完成", "stopped_by_qc": "被质控规则中止", "stopped": "已停止"}.get(prov.get("status"), prov.get("status"))
+    if prov.get("mode") == "stream":
+        status = f"在线回放，{status}"
     try:  # stored in UTC; shown in the reader's local time
         started = datetime.fromisoformat(prov["started_at"]).astimezone().strftime("%Y-%m-%d %H:%M")
     except (KeyError, ValueError):
@@ -318,7 +398,7 @@ def build_report(run_dir: str | Path) -> str:
     body: list[str] = [
         "<header>",
         "<h1>液滴分析报告</h1>",
-        f'<div class="meta">{_e(Path(str(inp.get("source", ""))).name)} · 配方 {_e(recipe.get("name", ""))} · {_e(status)} · 分析时间 {_e(started)}</div>',
+        f'<div class="meta">{_e(source_name)} · 配方 {_e(recipe.get("name", ""))} · {_e(status)} · 分析时间 {_e(started)}</div>',
         "</header>",
     ]
     notes = run_notes(summaries, prov)
@@ -403,13 +483,16 @@ def build_report(run_dir: str | Path) -> str:
         else:
             body.append("</p>")
 
+    if prov.get("mode") == "stream":
+        body.extend(stream_section(run_dir, prov, unit))
+
     # methods
     body.append('<h2>方法</h2><div class="methods">' + "".join(f"<p>{_e(t)}</p>" for t in methods_text(recipe, prov)) + "</div>")
 
     # provenance
     sp = inp.get("spacing", {})
     rows = [
-        ("输入文件", inp.get("source")),
+        ("输入文件", inp.get("source") or "内存中的数组（无文件）"),
         ("SHA-256", inp.get("sha256", "未计算")),
         ("大小", f"{_fmt(inp.get('bytes'))} 字节" if inp.get("bytes") else "–"),
         ("尺寸 (TCZYX)", " × ".join(str(x) for x in inp.get("shape", []))),
@@ -439,7 +522,7 @@ def build_report(run_dir: str | Path) -> str:
     )
     body.append(f'<footer>由 Vexel 生成于 {datetime.now().strftime("%Y-%m-%d %H:%M")}。完整数据见同一文件夹下的 tables/、summary.json 与 provenance.json。</footer>')
 
-    title = f"液滴分析报告 · {Path(str(inp.get('source', ''))).name}"
+    title = f"液滴分析报告 · {source_name}"
     return (
         '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'

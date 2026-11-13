@@ -104,3 +104,46 @@ def test_wscnet_cells_per_droplet(wscnet_run):
     assert summary["frac_empty"] == pytest.approx(np.mean(all_truth == 0), abs=0.03)
     # Measured 1.49 against 1.57: the undercounts above (overlapping cells) bias lambda low.
     assert summary["lambda"] == pytest.approx(all_truth.mean(), rel=0.07)
+
+
+# -- the same recordings replayed through the stream executor -------------------------------
+
+
+def test_mov_replayed_online_counts_the_same_droplets(mov_run, tmp_path):
+    import imageio.v3 as iio
+
+    from vexel.engine import run_stream
+    from vexel.sources import ReplaySource
+
+    _, truth = mov_run
+    frames = iio.imread(DATA / "DropletMicrofluidics.mov", plugin="pyav").mean(-1).astype(np.float32)
+    px = truth["pixel_size_um"]
+    volume = SpatialVolume.from_array(frames, "TYX", spacing={"y": px, "x": px}, space_unit="um")
+    recipe = Recipe.load("droplet_basic")
+    result = run_stream(recipe, ReplaySource(volume, recipe.resolve().input.sources(), speed=None), tmp_path / "s", report=False)
+    table = _crossings(tmp_path / "s")
+    np.testing.assert_allclose(table["crossing_frame"], truth["crossing_frames"], atol=1.0)
+    assert result.summary["droplets.summary"]["diameter_mean"] == pytest.approx(truth["diameter_um"], rel=truth["diameter_tolerance"])
+
+
+def test_wscnet_replayed_online_matches_the_batch_run(wscnet_run, tmp_path):
+    from vexel.engine import run_stream
+    from vexel.sources import ReplaySource
+
+    out, truth = wscnet_run
+    images = {}
+    with zipfile.ZipFile(DATA / "WSCNet2-master.zip") as zf:
+        import imageio.v3 as iio
+
+        for name in zf.namelist():
+            m = re.search(r"examples/example-folder/(\d+)\.jpg$", name)
+            if m:
+                images[int(m.group(1))] = iio.imread(io.BytesIO(zf.read(name))).mean(-1)
+    volume = SpatialVolume.from_array(np.stack([images[k] for k in sorted(images)]).astype(np.float32), "TYX")
+    recipe = Recipe.load("droplet_encapsulation")
+    run_stream(recipe, ReplaySource(volume, recipe.resolve().input.sources(), speed=None), tmp_path / "s", report=False)
+    stream, batch = _crossings(tmp_path / "s"), _crossings(out)
+    assert len(stream) == len(batch) == len(truth["droplets"])
+    np.testing.assert_allclose(stream["crossing_frame"], batch["crossing_frame"], atol=0.1)
+    agree = (stream["n_inclusions"].to_numpy() == batch["n_inclusions"].to_numpy()).mean()
+    assert agree >= 0.95  # the online background differs slightly from the batch one

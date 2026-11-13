@@ -240,6 +240,61 @@ def cmd_gui(args: argparse.Namespace) -> int:
     return gui_main([args.input] if args.input else [])
 
 
+def _speed(text: str) -> float | None:
+    if text in ("max", "0"):
+        return None
+    value = float(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("speed must be positive, or 'max'")
+    return value
+
+
+def cmd_replay(args: argparse.Namespace) -> int:
+    from vexel.engine import Recipe, StreamSettings, run_stream
+    from vexel.readers import open_volume
+    from vexel.sources import ReplaySource
+
+    recipe = Recipe.load(args.recipe)
+    if args.set:
+        recipe = recipe.with_overrides(_parse_overrides(args.set))
+    resolved = recipe.resolve()
+    volume = open_volume(args.input, **_calibration(args))
+    source = ReplaySource(volume, resolved.input.sources(), resolved.input.z, speed=args.speed, max_frames=args.max_frames)
+    out = Path(args.out) if args.out else Path("runs") / f"{Path(args.input).name.split('.')[0]}-{recipe.name}-replay-{datetime.now():%Y%m%d-%H%M%S}"
+    if args.speed is None:
+        pace = "as fast as possible"
+    else:
+        fps = args.speed / source.frame_interval_s
+        pace = f"{args.speed:g}x real time: {fps:.4g} frames/s (recorded at {1 / source.frame_interval_s:.4g} frames/s)"
+    print(f"input   {args.input}  {source.n_frames} frames, replayed {pace}")
+    print(f"recipe  {recipe.name}")
+    settings = StreamSettings(queue_size=args.queue, update_every=args.update_every, window=args.window)
+
+    def show(snap: dict[str, Any]) -> None:
+        parts = [f"frame {snap['frame']:>6}", f"{_fmt(snap.get('fps'))} fps", f"dropped {snap['dropped']}"]
+        for key, label in (("droplets.n_droplets", "n"), ("droplets.diameter_mean", "d"), ("droplets.diameter_cv_percent", "CV%"),
+                           ("droplets.frequency", "f"), ("encapsulation.lambda", "lambda"), ("positivity.positive_fraction", "pos")):  # fmt: skip
+            if snap.get(key) is not None:
+                parts.append(f"{label} {_fmt(snap[key])}")
+        print("  " + "  ".join(parts))
+
+    result = run_stream(recipe, source, out, overwrite=args.overwrite, settings=settings, progress=print, on_update=show, workers=args.workers)
+    st = result.provenance["stream"]
+    print(f"\nreceived {st['frames_received']}  processed {st['frames_processed']}  dropped {st['frames_dropped']}"
+          f"  processing {_fmt(st['processing_fps'])} fps")  # fmt: skip
+    if st["latency_ms"]:
+        lat = st["latency_ms"]
+        print(f"latency  median {lat['median']:.1f} ms  p95 {lat['p95']:.1f} ms  max {lat['max']:.1f} ms (software only, no camera transfer)")
+    for ref, summary in result.summary.items():
+        print(f"\n{ref}")
+        for key, value in summary.items():
+            print(f"  {key:<24} {_fmt(value)}")
+    if len(result.alarms):
+        print(f"\n{len(result.alarms)} alarm(s), see {out / 'stream' / 'alarms.csv'}")
+    print(f"\noutput         {out}")
+    return 0
+
+
 # -- parser -----------------------------------------------------------------------------
 
 
@@ -268,6 +323,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--overwrite", action="store_true", help="replace a previous run in --out")
     _add_calibration(p)
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("replay", help="replay a recording frame by frame through the stream executor")
+    p.add_argument("input", help="TIFF / OME-TIFF, video, image-sequence folder, .npy or OME-Zarr")
+    p.add_argument("--recipe", "-r", required=True, help="recipe JSON file or built-in recipe name")
+    p.add_argument("--out", "-o", help="output directory (default: runs/<input>-<recipe>-replay-<timestamp>)")
+    p.add_argument("--set", action="append", default=[], metavar="STEP.PARAM=VALUE", help="override a recipe parameter (repeatable)")
+    p.add_argument("--speed", type=_speed, default=1.0, help="replay speed relative to the recording, or 'max' (default 1)")
+    p.add_argument("--queue", type=int, default=64, help="frames that may wait; further frames are dropped when paced")
+    p.add_argument("--update-every", type=int, default=50, help="frames between rolling updates")
+    p.add_argument("--window", type=int, default=500, help="frames covered by the rolling statistics")
+    p.add_argument("--max-frames", type=int, help="only replay the first N frames")
+    p.add_argument("--workers", type=int, help="threads for frames processed together")
+    p.add_argument("--overwrite", action="store_true", help="replace a previous run in --out")
+    _add_calibration(p)
+    p.set_defaults(func=cmd_replay)
 
     p = sub.add_parser("info", help="show metadata without reading pixels")
     p.add_argument("input")

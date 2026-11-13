@@ -116,13 +116,19 @@ class CirclesParams(Params):
 
 
 def _hough(edges: np.ndarray, radii: np.ndarray, min_score: float, min_dist: int, max_peaks: int):
-    from skimage.transform import hough_circle, hough_circle_peaks
+    """Circle candidates: for every pixel the best-supported radius, then local maxima of
+    that best score at least ``min_dist`` apart (one maximum filter instead of one per
+    radius)."""
+    from skimage.transform import hough_circle
 
     acc = hough_circle(edges, radii, normalize=True)
-    scores, cx, cy, r = hough_circle_peaks(
-        acc, radii, min_xdistance=min_dist, min_ydistance=min_dist, threshold=min_score, total_num_peaks=max_peaks
-    )
-    return scores, cx.astype(float), cy.astype(float), r.astype(float)
+    best = acc.max(axis=0)
+    which = acc.argmax(axis=0)
+    peaks = peak_local_max(best, min_distance=max(1, min_dist), threshold_abs=min_score, num_peaks=max_peaks, exclude_border=False)
+    if len(peaks) == 0:
+        return np.empty(0), np.empty(0), np.empty(0), np.empty(0)
+    cy, cx = peaks[:, 0], peaks[:, 1]
+    return best[cy, cx].astype(float), cx.astype(float), cy.astype(float), radii[which[cy, cx]].astype(float)
 
 
 def _suppress(scores, cx, cy, r, min_separation: float) -> np.ndarray:

@@ -1,7 +1,7 @@
 # Vexel
 
 智能体原生的科学图像分析平台：LLM 负责规划，确定性算子负责计算，每个结果可复核、可复现。
-使用说明见 [用户手册](docs/user_manual.md)，规划见 [vexel_roadmap_0.0.3.md](vexel_roadmap_0.0.3.md)。当前进度：**Phase 1（引擎与 CLI）**。
+使用说明见 [用户手册](docs/user_manual.md)，规划见 [vexel_roadmap_0.0.3.md](vexel_roadmap_0.0.3.md)。当前进度：Phase 1、2 完成；**Phase 3（流式执行）进行中**：回放、流式执行器、滚动统计与漂移报警已可用，实时看板与目录监视未做。
 
 ## 快速开始
 
@@ -18,6 +18,7 @@ uv run vexel gui
 uv run vexel synth data/demo                       # 合成液滴视频 + 精确真值
 uv run vexel run data/demo/droplets.ome.tif -r droplet_basic -o runs/demo
 uv run vexel validate runs/demo --truth data/demo/truth
+uv run vexel replay data/demo/droplets.ome.tif -r droplet_basic --speed 0.05   # 按 1/20 倍速在线回放
 uv run vexel synth data/cells --cells 1.0                # 液滴内按泊松分布放入细胞
 uv run vexel run data/cells/droplets.ome.tif -r droplet_encapsulation -o runs/cells
 uv run vexel synth data/fluo --fluo 0.7                  # 加荧光通道（数字检测：阴阳液滴）
@@ -45,6 +46,7 @@ uv run vexel run   my_video.avi -r my_recipe.json --set seg.min_score=0.5
 | `vexel gui` | 打开桌面界面 |
 | `vexel report` | 重新生成一次运行的 HTML 报告 |
 | `vexel run` | 在录好的数据上执行配方 |
+| `vexel replay` | 把录像按原始帧率（或倍速）逐帧送入流式执行器：滚动统计、漂移报警、处理帧率与丢帧 |
 | `vexel info` | 只读元数据，不读像素 |
 | `vexel ops` | 列出算子：作用范围、输入输出类型、参数 |
 | `vexel recipes` | 列出内置配方，`--show NAME` 打印 JSON |
@@ -53,7 +55,7 @@ uv run vexel run   my_video.avi -r my_recipe.json --set seg.min_score=0.5
 | `vexel convert` | 转为 OME-Zarr 多分辨率金字塔 |
 | `vexel licenses` | 已安装依赖的许可证清单，标出 GPL / 非商用项 |
 
-`batch`、`watch`、`replay` 属于后续阶段。
+`batch`、`watch` 属于后续阶段。
 
 ## 一次运行的产物
 
@@ -65,7 +67,8 @@ runs/demo/
 ├── review/*.png       # 分割轮廓叠加图，供人工复核
 ├── review/flags/      # 可疑液滴的放大裁切图
 ├── report.html        # 单文件 HTML 报告，可直接发送或打印
-└── provenance.json    # 输入哈希、配方哈希、依赖版本、各步耗时与质控指标、结果摘要
+├── provenance.json    # 输入哈希、配方哈希、依赖版本、各步耗时与质控指标、结果摘要
+└── stream/            # 仅 replay：rolling.csv 滚动统计，alarms.csv 警报，events/ 警报时的画面
 ```
 
 同一配方加同一数据得到相同的 `result_digest`。
@@ -76,10 +79,10 @@ runs/demo/
 src/vexel/
 ├── core/      SpatialVolume（惰性 TCZYX + 物理间距）、内存水位线、OME-Zarr 缓存
 ├── readers/   读取器插件：TIFF/OME-TIFF、图像序列、视频、npy、OME-Zarr
-├── sources/   文件数据源；相机仅接口
+├── sources/   文件数据源、回放数据源；相机仅接口
 ├── ops/       算子注册表（frame / window / volume 范围声明）与基础算子
 ├── packs/     领域分析包；droplet/ 含汇总算子、内置配方、真值校验
-├── engine/    配方、批式执行器、质控、溯源
+├── engine/    配方、批式执行器、流式执行器、质控、溯源
 ├── synthetic/ 合成样本生成器
 ├── ui/        桌面界面（PySide6，经 qtpy），只调用引擎
 └── cli.py
@@ -89,9 +92,9 @@ src/vexel/
 并在 `ops/registry.py` 的 `load_builtin_ops` 中导入所在模块。
 新增格式：继承 `readers.base.Reader` 并 `register_reader`。
 
-## Phase 1 的边界
+## 当前边界
 
-- 批式执行器处理 2D 时序（配方选定一个通道和一个 z 平面）；`volume` 范围算子可注册，尚不执行。
-- 质控规则已可写在配方里（`warn` / `stop`），完整质控门与 HTML 报告在 Phase 2。
+- 执行器处理 2D 时序（配方选定一个通道和一个 z 平面）；`volume` 范围算子可注册，尚不执行。
+- 流式执行器只接受逐帧算子、静态背景、一个追踪步骤和只读表格的算子；数据源目前只有回放，相机接入推迟到硬件对接阶段。
 - `vexel validate` 的默认容差是占位值，待与客户约定后替换。
 - 合成生成器放在包内（`vexel.synthetic`）以便 `vexel synth` 使用，而非路线图中的 `tests/synthetic/`。
