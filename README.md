@@ -22,7 +22,8 @@ uv run vexel synth data/cells --cells 1.0                # 液滴内按泊松分
 uv run vexel run data/cells/droplets.ome.tif -r droplet_encapsulation -o runs/cells
 uv run vexel synth data/fluo --fluo 0.7                  # 加荧光通道（数字检测：阴阳液滴）
 uv run vexel run data/fluo/droplets.ome.tif -r droplet_fluorescence -o runs/fluo
-uv run pytest
+uv run pytest                    # 常规测试
+uv run pytest -m benchmark       # 回归基准（约 2 分钟）
 ```
 
 对自己的数据：
@@ -42,6 +43,7 @@ uv run vexel run   my_video.avi -r my_recipe.json --set seg.min_area=200
 | 命令 | 作用 |
 | :--- | :--- |
 | `vexel gui` | 打开桌面界面 |
+| `vexel report` | 重新生成一次运行的 HTML 报告 |
 | `vexel run` | 在录好的数据上执行配方 |
 | `vexel info` | 只读元数据，不读像素 |
 | `vexel ops` | 列出算子：作用范围、输入输出类型、参数 |
@@ -61,6 +63,8 @@ runs/demo/
 ├── summary.json       # 汇总统计
 ├── tables/*.csv       # 每帧检测、追踪结果、每个液滴一行的表
 ├── review/*.png       # 分割轮廓叠加图，供人工复核
+├── review/flags/      # 可疑液滴的放大裁切图
+├── report.html        # 单文件 HTML 报告，可直接发送或打印
 └── provenance.json    # 输入哈希、配方哈希、依赖版本、各步耗时与质控指标、结果摘要
 ```
 

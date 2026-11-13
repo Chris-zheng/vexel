@@ -89,6 +89,8 @@ class Review(_Model):
     labels: str
     marks: str | None = None
     n_frames: int = Field(4, ge=1, le=64)
+    flags: str | None = None  # table with frame / centroid / diameter: a crop is written per row
+    max_flags: int = Field(48, ge=0, le=500)
 
 
 class Recipe(_Model):
@@ -170,6 +172,8 @@ class Recipe(_Model):
             refs = [(self.review.image, Kind.IMAGE), (self.review.labels, Kind.LABELS)]
             if self.review.marks is not None:
                 refs.append((self.review.marks, Kind.LABELS))
+            if self.review.flags is not None:
+                refs.append((self.review.flags, Kind.TABLE))
             for ref, kind in refs:
                 if available.get(ref) is not kind:
                     raise RecipeError(f"review: {ref!r} is not an available {kind.value}")

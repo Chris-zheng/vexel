@@ -38,7 +38,8 @@ packages = ["src/vexel"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q -m 'not benchmark'"
+markers = ["benchmark: slow regression benchmarks on fixed synthetic data (run with -m benchmark)"]
 filterwarnings = [
     # scikit-image internals on NumPy >= 2.5; not ours to fix
     "ignore:Setting the shape on a NumPy array:DeprecationWarning:skimage",

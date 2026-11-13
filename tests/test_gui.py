@@ -181,5 +181,29 @@ def test_fluorescence_option_channels_and_results(window, fluo_dataset):
     summary = json.loads((window.run_dir / "summary.json").read_text())["positivity.summary"]
     assert window.fluo_cards.isVisibleTo(window) and window.scatter_box.isVisibleTo(window)
     assert not window.enc_cards.isVisibleTo(window)
-    assert window.card_pos_n.value.text() == f"{summary['n_positive']} / {summary['n_droplets']}"
+    assert window.card_pos.detail.text().startswith(f"{summary['n_positive']} / {summary['n_droplets']}")
+    assert window.card_conc.value.text() not in ("", "–")
     assert window.scatter.x.size == summary["n_droplets"] and window.scatter.threshold == pytest.approx(summary["threshold"])
+
+
+def test_flags_volume_and_report_in_results(window, hard_run, monkeypatch):
+    opened = []
+    monkeypatch.setattr("vexel.ui.main_window.QDesktopServices.openUrl", lambda url: opened.append(url.toLocalFile()))
+    assert window.load_results(hard_run)
+    assert window.flag_box.isVisibleTo(window) and window.flag_strip.count() > 0
+    window._show_flag(window.flag_strip.item(0))
+    assert "轨迹" in window.viewer.caption.text() and window.viewer._extra is not None
+    window.viewer.show_index(0)
+    assert window.viewer._extra is None and "轨迹" not in window.viewer.caption.text()
+    assert "pL" in window.card_d.detail.text()
+    window._open_report()
+    assert opened and opened[-1].endswith("report.html")
+
+
+def test_channel_height_override(window, droplet_dataset):
+    window.open_path(droplet_dataset / "droplets.ome.tif")
+    window.height_edit.setText("40")
+    assert window.overrides() == {"droplets.channel_height_um": 40.0}
+    window.height_edit.setText("-3")
+    assert not window.start() and window.warnings[-1][0] == "标定有误"
+    window.height_edit.clear()

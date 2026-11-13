@@ -136,6 +136,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"  ! {v.message()}")
     print(f"\nresult digest  {result.result_digest}")
     print(f"output         {out}")
+    if (out / "report.html").exists():
+        print(f"report         {out / 'report.html'}")
     return 0
 
 
@@ -147,6 +149,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         args.diameter_tol,
         args.cv_tol,
         args.frequency_tol,
+        args.volume_tol,
         args.mismatch_tol,
         args.lambda_tol,
         args.fraction_tol,
@@ -221,6 +224,16 @@ def cmd_licenses(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_report(args: argparse.Namespace) -> int:
+    from vexel.report import write_report
+
+    run = Path(args.run)
+    if not (run / "summary.json").exists():
+        raise FileNotFoundError(f"{run} is not a run directory (no summary.json)")
+    print(f"wrote {write_report(run, args.out)}")
+    return 0
+
+
 def cmd_gui(args: argparse.Namespace) -> int:
     from vexel.ui.app import main as gui_main
 
@@ -233,6 +246,11 @@ def cmd_gui(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vexel", description="Vexel: recipe-driven, reproducible scientific image analysis.")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("report", help="(re)write the HTML report of a run")
+    p.add_argument("run", help="run directory")
+    p.add_argument("--out", help="output file (default: <run>/report.html)")
+    p.set_defaults(func=cmd_report)
 
     p = sub.add_parser("gui", help="open the desktop interface")
     p.add_argument("input", nargs="?", help="data to open on start")
@@ -272,6 +290,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--diameter-tol", type=float, default=0.02, help="allowed relative error of mean diameter")
     p.add_argument("--cv-tol", type=float, default=1.0, help="allowed absolute error of CV, percentage points")
     p.add_argument("--frequency-tol", type=float, default=0.02, help="allowed relative error of generation frequency")
+    p.add_argument("--volume-tol", type=float, default=0.06, help="allowed relative error of mean droplet volume")
     p.add_argument("--mismatch-tol", type=float, default=0.05, help="allowed share of droplets with a wrong cell count")
     p.add_argument("--lambda-tol", type=float, default=0.05, help="allowed relative error of lambda (mean cells per droplet)")
     p.add_argument("--fraction-tol", type=float, default=0.03, help="allowed absolute error of empty/single/multiple shares")

@@ -3,42 +3,109 @@
   "name": "droplet_basic",
   "description": "Brightfield droplets flowing through a straight channel: static background removal, threshold + watershed segmentation, sizing, tracking, and de-duplicated statistics at a virtual counting line.",
   "seed": 0,
-  "input": {"channel": 0, "z": 0},
+  "input": {
+    "channel": 0,
+    "z": 0
+  },
   "steps": [
     {
       "id": "bg",
       "op": "preprocess.static_background",
-      "inputs": {"image": "source"},
-      "params": {"mode": "absdiff", "max_frames": 64}
+      "inputs": {
+        "image": "source"
+      },
+      "params": {
+        "mode": "absdiff",
+        "max_frames": 64
+      }
     },
     {
       "id": "seg",
       "op": "segment.threshold_watershed",
-      "inputs": {"image": "bg.image"},
-      "params": {"smooth_sigma": 0.5, "method": "otsu", "min_threshold": 15.0, "fill_holes": true, "opening_radius": 2, "min_area": 100, "min_distance": 8},
-      "qc": [{"metric": "foreground_fraction.max", "max": 0.6, "on_fail": "warn"}]
+      "inputs": {
+        "image": "bg.image"
+      },
+      "params": {
+        "smooth_sigma": 0.5,
+        "method": "otsu",
+        "min_threshold": 15.0,
+        "fill_holes": true,
+        "opening_radius": 2,
+        "min_area": 100,
+        "min_distance": 8
+      },
+      "qc": [
+        {
+          "metric": "foreground_fraction.max",
+          "max": 0.6,
+          "on_fail": "warn"
+        }
+      ]
     },
     {
       "id": "measure",
       "op": "measure.regionprops",
-      "inputs": {"labels": "seg.labels", "intensity": "source"}
+      "inputs": {
+        "labels": "seg.labels",
+        "intensity": "source"
+      }
     },
     {
       "id": "track",
       "op": "track.link",
-      "inputs": {"table": "measure.table"},
-      "params": {"max_distance_px": 30.0, "max_gap_frames": 1}
+      "inputs": {
+        "table": "measure.table"
+      },
+      "params": {
+        "max_distance_px": 30.0,
+        "max_gap_frames": 1
+      }
     },
     {
       "id": "droplets",
       "op": "droplet.summary",
-      "inputs": {"table": "track.table"},
-      "params": {"flow_axis": "x", "count_line": 0.5, "min_track_frames": 3},
+      "inputs": {
+        "table": "track.table"
+      },
+      "params": {
+        "flow_axis": "x",
+        "count_line": 0.5,
+        "min_track_frames": 3
+      },
       "qc": [
-        {"metric": "n_droplets", "min": 2, "on_fail": "warn"},
-        {"metric": "circularity_median", "min": 0.8, "on_fail": "warn"}
+        {
+          "metric": "n_droplets",
+          "min": 2,
+          "on_fail": "warn"
+        },
+        {
+          "metric": "circularity_median",
+          "min": 0.8,
+          "on_fail": "warn"
+        }
+      ]
+    },
+    {
+      "id": "flags",
+      "op": "droplet.flags",
+      "inputs": {
+        "table": "droplets.droplets",
+        "tracks": "track.table"
+      },
+      "params": {},
+      "qc": [
+        {
+          "metric": "flagged_fraction",
+          "max": 0.1,
+          "on_fail": "warn"
+        }
       ]
     }
   ],
-  "review": {"image": "source", "labels": "seg.labels", "n_frames": 4}
+  "review": {
+    "image": "source",
+    "labels": "seg.labels",
+    "n_frames": 4,
+    "flags": "flags.table"
+  }
 }

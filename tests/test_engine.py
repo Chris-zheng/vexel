@@ -137,7 +137,7 @@ def droplet_run(droplet_dataset, tmp_path_factory):
 
 def test_droplet_pipeline_matches_ground_truth(droplet_dataset, droplet_run):
     checks = validate_run(droplet_run.out_dir, droplet_dataset / "truth")
-    assert [c.name for c in checks] == ["n_droplets", "diameter_mean", "diameter_cv_percent", "frequency"]
+    assert [c.name for c in checks] == ["n_droplets", "diameter_mean", "diameter_cv_percent", "frequency", "volume_mean"]
     assert all(c.passed for c in checks), checks
     assert not droplet_run.violations
 
@@ -159,9 +159,12 @@ def test_run_directory_and_provenance(droplet_dataset, droplet_run):
     assert len(p["input"]["sha256"]) == 64 and p["input"]["frames_used"] == 200
     assert p["input"]["space_unit"] == "um"
     assert {"numpy", "scikit-image", "laptrack"} <= set(p["environment"]["packages"])
-    assert [s["id"] for s in p["steps"]] == ["bg", "seg", "measure", "track", "droplets"]
+    assert [s["id"] for s in p["steps"]] == ["bg", "seg", "measure", "track", "droplets", "flags"]
     assert p["steps"][1]["scope"] == "frame" and "threshold.mean" in p["steps"][1]["qc"]
-    assert set(p["outputs"]) == {"summary.json", "tables/measure.table.csv", "tables/track.table.csv", "tables/droplets.droplets.csv"}
+    assert set(p["outputs"]) == {
+        "summary.json", "tables/measure.table.csv", "tables/track.table.csv", "tables/droplets.droplets.csv", "tables/flags.table.csv"
+    }  # fmt: skip
+    assert (out / "report.html").exists() and "report.html" not in p["outputs"]  # the report is a view, not a result
 
 
 def test_same_recipe_and_data_give_identical_results(droplet_dataset, droplet_run, tmp_path):

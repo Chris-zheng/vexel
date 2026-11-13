@@ -203,12 +203,44 @@ def _write_review(image: da.Array, labels: da.Array, n_frames: int, folder: Path
         img, lab = dask.compute(image[t], labels[t])
         img = np.asarray(img, dtype=np.float32)
         lo, hi = np.percentile(img, (1, 99))
-        gray = np.clip((img - lo) / max(hi - lo, 1e-6), 0, 1)
-        overlay = mark_boundaries(np.dstack([gray] * 3), np.asarray(lab), color=(1.0, 0.15, 0.15), mode="thick")
-        if marks is not None:
-            overlay = mark_boundaries(overlay, np.asarray(marks[t].compute()), color=(1.0, 0.85, 0.0), mode="outer")
+        overlay = _overlay(img, np.asarray(lab), np.asarray(marks[t].compute()) if marks is not None else None, lo, hi)
         path = folder / f"frame_{int(t):06d}.png"
         iio.imwrite(path, (overlay * 255).round().astype(np.uint8))
+        written.append(path)
+    return written
+
+
+def _overlay(img: np.ndarray, lab: np.ndarray, marks: np.ndarray | None, lo: float, hi: float) -> np.ndarray:
+    gray = np.clip((img.astype(np.float32) - lo) / max(hi - lo, 1e-6), 0, 1)
+    out = mark_boundaries(np.dstack([gray] * 3), lab, color=(1.0, 0.15, 0.15), mode="thick")
+    if marks is not None:
+        out = mark_boundaries(out, marks, color=(1.0, 0.85, 0.0), mode="outer")
+    return out
+
+
+def _write_flag_crops(
+    image: da.Array, labels: da.Array, marks: da.Array | None, flags: pd.DataFrame, limit: int, folder: Path
+) -> list[Path]:
+    """One enlarged crop per flagged object, centred on it, named by track and frame."""
+    if flags.empty or limit == 0:
+        return []
+    folder.mkdir(parents=True, exist_ok=True)
+    sample = np.asarray(image[:: max(1, image.shape[0] // 16)].compute(), dtype=np.float32)
+    lo, hi = np.percentile(sample, (1, 99))  # one contrast for all crops, so they compare
+    h, w = image.shape[1:]
+    written = []
+    for row in flags.head(limit).itertuples(index=False):
+        t = int(row.frame)
+        half = int(max(24, 1.2 * float(row.diameter_px)))
+        cy, cx = int(round(row.centroid_y_px)), int(round(row.centroid_x_px))
+        y0, y1, x0, x1 = max(0, cy - half), min(h, cy + half), max(0, cx - half), min(w, cx + half)
+        img, lab = dask.compute(image[t, y0:y1, x0:x1], labels[t, y0:y1, x0:x1])
+        mk = np.asarray(marks[t, y0:y1, x0:x1].compute()) if marks is not None else None
+        crop = _overlay(np.asarray(img), np.asarray(lab), mk, lo, hi)
+        scale = max(1, int(np.ceil(160 / max(crop.shape[:2]))))
+        crop = np.repeat(np.repeat(crop, scale, axis=0), scale, axis=1)
+        path = folder / f"track{int(row.track_id):05d}_frame{t:06d}.png"
+        iio.imwrite(path, (crop * 255).round().astype(np.uint8))
         written.append(path)
     return written
 
@@ -229,6 +261,7 @@ def run_recipe(
     hash_input: bool = True,
     progress: Progress | None = None,
     tick: Tick | None = None,
+    report: bool = True,
 ) -> RunResult:
     """Resolve and execute ``recipe`` on ``volume``; write tables, summary, review overlays
     and provenance into ``out_dir``."""
@@ -335,10 +368,15 @@ def run_recipe(
     files["summary.json"] = out_dir / "summary.json"
 
     review_files: list[Path] = []
+    flag_files: list[Path] = []
     rv = resolved.review
     if rv and rv.image in values and rv.labels in values:
         marks = values.get(rv.marks) if rv.marks else None
         review_files = _write_review(values[rv.image], values[rv.labels], rv.n_frames, out_dir / "review", marks)
+        if rv.flags and rv.flags in values:
+            flag_files = _write_flag_crops(
+                values[rv.image], values[rv.labels], marks, values[rv.flags], rv.max_flags, out_dir / "review" / "flags"
+            )
 
     if keep_intermediates:
         intermediates = sorted(p.name for p in scratch.iterdir())
@@ -373,10 +411,18 @@ def run_recipe(
         "steps": step_records,
         "outputs": per_file,
         "review": [p.name for p in review_files],
+        "review_flags": [p.name for p in flag_files],
         "intermediates": intermediates,
         "result_digest": result_digest,
     }
     prov.write_json(out_dir / "provenance.json", record)
+    if report:
+        from vexel.report import write_report
+
+        try:  # the report is a view of the files above; failing to draw it must not lose them
+            write_report(out_dir)
+        except Exception as e:  # noqa: BLE001
+            say(f"report not written: {type(e).__name__}: {e}")
     if stop_error is not None:
         raise stop_error
     return RunResult(out_dir, resolved, status, summary, tables, record, violations)

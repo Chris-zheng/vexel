@@ -1,0 +1,18 @@
+{
+  "_comment": "Fixed synthetic benchmarks. Each case must pass `vexel validate` and match baseline.json. Edit a case only together with its baseline (python tests/benchmarks/regression.py --update).",
+  "cases": {
+    "basic_default": {"synth": {"n_frames": 600, "seed": 101}, "recipe": "droplet_basic"},
+    "basic_hard": {"synth": {"n_frames": 600, "seed": 102, "noise_sigma": 8.0, "diameter_mean_um": 40.0, "diameter_cv": 0.05, "frequency_hz": 180.0}, "recipe": "droplet_basic"},
+    "basic_flattened": {"synth": {"n_frames": 600, "seed": 103}, "recipe": "droplet_basic", "overrides": {"droplets.channel_height_um": 40.0}},
+    "cells": {"synth": {"n_frames": 600, "seed": 104, "cell_lambda": 1.0}, "recipe": "droplet_encapsulation"},
+    "cells_low_contrast": {"synth": {"n_frames": 600, "seed": 105, "cell_lambda": 1.0, "cell_contrast": 15.0}, "recipe": "droplet_encapsulation"},
+    "fluo_clear": {"synth": {"n_frames": 1000, "seed": 106, "fluorescence": true, "fluo_lambda": 0.7}, "recipe": "droplet_fluorescence"},
+    "fluo_all_negative": {"synth": {"n_frames": 1000, "seed": 107, "fluorescence": true, "fluo_lambda": 0.0}, "recipe": "droplet_fluorescence"},
+    "fluo_overlap": {"synth": {"n_frames": 2000, "seed": 108, "fluorescence": true, "fluo_lambda": 0.7, "fluo_cv": 0.3}, "recipe": "droplet_fluorescence"},
+    "fluo_cells": {
+      "synth": {"n_frames": 600, "seed": 109, "fluorescence": true, "fluo_lambda": 0.7, "cell_lambda": 1.2, "cells_in": "fluorescence"},
+      "recipe": "droplet_fluorescence_encapsulation",
+      "overrides": {"input.channels.cells": 1, "inclusions.polarity": "bright", "droplets.channel_height_um": 40.0}
+    }
+  }
+}

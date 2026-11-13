@@ -118,11 +118,28 @@
           "on_fail": "warn"
         }
       ]
+    },
+    {
+      "id": "flags",
+      "op": "droplet.flags",
+      "inputs": {
+        "table": "positivity.droplets",
+        "tracks": "track.table"
+      },
+      "params": {},
+      "qc": [
+        {
+          "metric": "flagged_fraction",
+          "max": 0.1,
+          "on_fail": "warn"
+        }
+      ]
     }
   ],
   "review": {
     "image": "source.fluo",
     "labels": "seg.labels",
-    "n_frames": 4
+    "n_frames": 4,
+    "flags": "flags.table"
   }
 }

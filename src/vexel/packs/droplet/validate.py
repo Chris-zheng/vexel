@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from vexel.ops.stats import describe_values
-from vexel.packs.droplet.ops import crossing_frame
+from vexel.packs.droplet.ops import crossing_frame, droplet_volume_um3
 
 
 @dataclass(frozen=True)
@@ -23,6 +23,7 @@ class Tolerances:
     diameter_mean_rel: float = 0.02
     diameter_cv_abs: float = 1.0  # percentage points
     frequency_rel: float = 0.02
+    volume_rel: float = 0.06  # volume scales with diameter cubed: ~3x the diameter tolerance
     # encapsulation (checked only when the run has droplet.poisson output and the truth
     # has an ``n_cells`` column)
     inclusion_mismatch: float = 0.05  # share of droplets whose cell count is wrong
@@ -57,13 +58,16 @@ def truth_crossings(truth_dir: Path, count_line_px: float, n_frames: int) -> dic
     return crossings
 
 
-def truth_summary(truth_dir: Path, count_line_px: float, n_frames: int) -> dict[str, float | int | None]:
+def truth_summary(
+    truth_dir: Path, count_line_px: float, n_frames: int, channel_height_um: float | None = None
+) -> dict[str, float | int | None]:
     """Truth for the droplets that cross ``count_line_px`` within the first ``n_frames``."""
     droplets = pd.read_csv(truth_dir / "droplets.csv").set_index("droplet_id")
     config = json.loads((truth_dir / "config.json").read_text())
     crossings = truth_crossings(truth_dir, count_line_px, n_frames)
     ids = sorted(crossings, key=crossings.get)
     stats = describe_values(droplets.loc[ids, "diameter_um"].to_numpy(float))
+    volumes = droplet_volume_um3(droplets.loc[ids, "diameter_um"].to_numpy(float), channel_height_um) / 1000.0
     times = np.array([crossings[i] for i in ids]) * config["frame_interval_s"]
     frequency = (len(ids) - 1) / (times[-1] - times[0]) if len(ids) >= 2 else None
     return {
@@ -71,6 +75,7 @@ def truth_summary(truth_dir: Path, count_line_px: float, n_frames: int) -> dict[
         "diameter_mean": stats["mean"],
         "diameter_cv_percent": stats["cv_percent"],
         "frequency": frequency,
+        "volume_mean_pl": float(volumes.mean()) if len(ids) else None,
     }
 
 
@@ -92,13 +97,17 @@ def validate_run(run_dir: str | Path, truth_dir: str | Path, tol: Tolerances = T
         raise ValueError(f"{run_dir} contains no droplet.summary output")
     if measured["length_unit"] != "um":
         raise ValueError(f"run is in {measured['length_unit']!r}; truth diameters are in um - run with calibration")
-    truth = truth_summary(truth_dir, measured["count_line_px"], provenance["input"]["frames_used"])
+    truth = truth_summary(
+        truth_dir, measured["count_line_px"], provenance["input"]["frames_used"], measured.get("channel_height_um")
+    )
     checks = [
         _check("n_droplets", measured["n_droplets"], truth["n_droplets"], tol.count_abs, "abs"),
         _check("diameter_mean", measured["diameter_mean"], truth["diameter_mean"], tol.diameter_mean_rel, "rel"),
         _check("diameter_cv_percent", measured["diameter_cv_percent"], truth["diameter_cv_percent"], tol.diameter_cv_abs, "abs"),
         _check("frequency", measured["frequency"], truth["frequency"], tol.frequency_rel, "rel"),
     ]
+    if measured.get("volume_mean_pl") is not None:
+        checks.append(_check("volume_mean", measured["volume_mean_pl"], truth["volume_mean_pl"], tol.volume_rel, "rel"))
     encapsulation = next((s for s in summaries.values() if "lambda" in s and "frac_empty" in s), None)
     truth_droplets = pd.read_csv(truth_dir / "droplets.csv")
     frames = provenance["input"]["frames_used"]

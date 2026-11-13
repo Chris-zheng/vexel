@@ -29,3 +29,15 @@ def fluo_dataset(tmp_path_factory: pytest.TempPathFactory) -> Path:
     root = tmp_path_factory.mktemp("fluo")
     write_dataset(root, DropletSynthConfig(n_frames=300, seed=1, fluorescence=True, fluo_lambda=0.7))
     return root
+
+
+@pytest.fixture(scope="session")
+def hard_run(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A run with flagged droplets: faint cells in noisy video (unstable counts)."""
+    from vexel.engine import Recipe, run_recipe
+    from vexel.readers import open_volume
+
+    root = tmp_path_factory.mktemp("hard")
+    video = write_dataset(root, DropletSynthConfig(n_frames=300, seed=26, cell_lambda=1.0, cell_contrast=15.0, noise_sigma=6.0))
+    run_recipe(Recipe.load("droplet_encapsulation"), open_volume(video), root / "run", hash_input=False)
+    return root / "run"

@@ -8,7 +8,20 @@ from pathlib import Path
 import numpy as np
 from qtpy.QtCore import QPointF, QRectF, Qt, QUrl
 from qtpy.QtGui import QColor, QDesktopServices, QPainter, QPen, QPixmap
-from qtpy.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+from qtpy.QtCore import QSize
+from qtpy.QtGui import QIcon
+from qtpy.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QListView,
+    QListWidget,
+    QListWidgetItem,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 ACCENT = "#2563eb"
 MUTED = "#8a8f98"
@@ -144,6 +157,7 @@ class ReviewViewer(QWidget):
         layout.addLayout(nav)
 
         self.paths: list[Path] = []
+        self._extra: Path | None = None
         self.legend = "红线为分割轮廓"
         self.index = 0
         self._pixmap: QPixmap | None = None
@@ -153,6 +167,9 @@ class ReviewViewer(QWidget):
         self.show_index(0)
 
     def show_index(self, index: int) -> None:
+        if self._extra is not None:  # leaving a single image: resume the series where it was
+            self._extra = None
+            index = self.index
         n = len(self.paths)
         self.prev_btn.setEnabled(n > 1 and index > 0)
         self.next_btn.setEnabled(n > 1 and index < n - 1)
@@ -170,9 +187,20 @@ class ReviewViewer(QWidget):
         self.caption.setText(f"{self.index + 1} / {n}{frame} · {self.legend}")
         self._rescale()
 
+    def show_image(self, path: Path, caption: str) -> None:
+        """Show one image outside the review series (e.g. a flagged droplet); the
+        previous/next buttons return to the series."""
+        self._extra = Path(path)
+        self._pixmap = QPixmap(str(path))
+        self.caption.setText(caption)
+        self.prev_btn.setEnabled(bool(self.paths))
+        self.next_btn.setEnabled(bool(self.paths))
+        self._rescale()
+
     def open_current(self) -> None:
-        if self.paths:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.paths[self.index])))
+        target = self._extra if self._extra is not None else (self.paths[self.index] if self.paths else None)
+        if target is not None:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -321,3 +349,29 @@ class ScatterChart(QWidget):
         p.drawText(bottom, Qt.AlignmentFlag.AlignLeft, f"{x0:.4g}")
         p.drawText(bottom, Qt.AlignmentFlag.AlignHCenter, "横轴：粒径")
         p.drawText(bottom, Qt.AlignmentFlag.AlignRight, f"{x1:.4g} {self.x_unit}")
+
+
+class FlagStrip(QListWidget):
+    """Thumbnails of flagged droplets; the reason is under each one and in the tooltip."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setViewMode(QListView.ViewMode.IconMode)
+        self.setFlow(QListView.Flow.LeftToRight)
+        self.setWrapping(False)
+        self.setMovement(QListView.Movement.Static)
+        self.setIconSize(QSize(72, 72))
+        self.setFixedHeight(118)
+        self.setSpacing(4)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+    def set_flags(self, items: list[tuple[Path, str, str]]) -> None:
+        """items: (crop image, short label, full reason)."""
+        self.clear()
+        for path, label, reason in items:
+            item = QListWidgetItem(QIcon(str(path)), label)
+            item.setToolTip(reason)
+            item.setData(Qt.ItemDataRole.UserRole, (str(path), reason))
+            item.setSizeHint(QSize(96, 104))
+            self.addItem(item)

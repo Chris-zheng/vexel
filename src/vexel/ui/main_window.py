@@ -43,7 +43,8 @@ from qtpy.QtWidgets import (
 
 from vexel.engine import Recipe
 from vexel.readers import open_volume
-from vexel.ui.widgets import Card, CountChart, Histogram, ReviewViewer, ScatterChart, heading, muted
+from vexel.report.notes import pick_summaries, run_notes
+from vexel.ui.widgets import Card, CountChart, FlagStrip, Histogram, ReviewViewer, ScatterChart, heading, muted
 from vexel.ui.worker import RunWorker
 
 RECIPE = "droplet_basic"
@@ -67,6 +68,13 @@ ADVANCED: list[tuple[str, str, float, float, float, int, str, float, str]] = [
     ("inclusions.min_contrast", "细胞最低对比度", 0, 65535, 1, 1, "", 1, "细胞与液滴内部的最小灰度差。“自动”按每帧估计的噪声设定；漏数时调低，空液滴被数出细胞时调高"),
     ("positivity.threshold", "阳性阈值", 0, 1e9, 1, 1, "", 1, "液滴荧光（扣除背景后的平均值）高于此值判为阳性。“自动”在能分出阴阳两群时自动定阈值；用阴性对照确定阈值后可在此固定"),
 ]
+FLAG_SHORT = {
+    "low_circularity": "形状不圆",
+    "size_outlier": "粒径异常",
+    "count_unstable": "计数不稳",
+    "near_threshold": "近阈值",
+    "few_frames": "帧数少",
+}
 AUTO_KEYS = {"inclusions.min_contrast", "positivity.threshold"}  # 0 on the spin box means "automatic"
 
 
@@ -95,6 +103,13 @@ def _fmt(value: Any, digits: int = 4) -> str:
     if isinstance(value, float) and not math.isfinite(value):
         return "–"
     return f"{value:.{digits}g}"
+
+
+def _conc(value: float | None) -> str:
+    """Concentrations span many orders of magnitude: thousands separators, 3 significant digits below 100."""
+    if value is None or not math.isfinite(value):
+        return "–"
+    return f"{value:,.0f}" if value >= 100 else f"{value:.3g}"
 
 
 def _number_edit(placeholder: str) -> QLineEdit:
@@ -167,6 +182,9 @@ class MainWindow(QMainWindow):
         form.addRow("像素尺寸 (µm)", self.pixel_edit)
         form.addRow("帧间隔 (ms)", self.interval_edit)
         form.addRow("流动方向", self.flow_combo)
+        self.height_edit = _number_edit("可不填")
+        self.height_edit.setToolTip("流道高度。液滴直径大于它时按被压扁的形状换算体积；不填则按球形换算")
+        form.addRow("流道高度 (µm)", self.height_edit)
         self.channel_combo = QComboBox()
         self.channel_combo.setToolTip("在哪个通道里分割液滴（液滴轮廓最清楚的通道，通常是明场）")
         form.addRow("液滴通道", self.channel_combo)
@@ -290,6 +308,10 @@ class MainWindow(QMainWindow):
         titles.addWidget(self.result_title)
         titles.addWidget(self.result_path)
         top.addLayout(titles, 1)
+        self.report_btn = QPushButton("打开报告")
+        self.report_btn.setToolTip("单文件 HTML 报告，可直接发送或打印")
+        self.report_btn.clicked.connect(self._open_report)
+        top.addWidget(self.report_btn, 0, Qt.AlignmentFlag.AlignTop)
         self.open_dir_btn = QPushButton("打开结果文件夹")
         self.open_dir_btn.clicked.connect(self._open_run_dir)
         top.addWidget(self.open_dir_btn, 0, Qt.AlignmentFlag.AlignTop)
@@ -329,10 +351,10 @@ class MainWindow(QMainWindow):
         fl.setContentsMargins(0, 0, 0, 0)
         fl.setSpacing(12)
         self.card_pos = Card("阳性液滴")
-        self.card_pos_n = Card("阳性 / 总数")
         self.card_copies = Card("每滴平均拷贝数")
+        self.card_conc = Card("浓度（拷贝/µL）")
         self.card_sep = Card("阴阳分离度 D")
-        for c in (self.card_pos, self.card_pos_n, self.card_copies, self.card_sep):
+        for c in (self.card_pos, self.card_copies, self.card_conc, self.card_sep):
             fl.addWidget(c)
         self.fluo_cards.setVisible(False)
         pv.addWidget(self.fluo_cards)
@@ -340,6 +362,17 @@ class MainWindow(QMainWindow):
         pv.addWidget(heading("复核图"))
         self.viewer = ReviewViewer()
         pv.addWidget(self.viewer, 3)
+        self.flag_box = QWidget()
+        fb = QVBoxLayout(self.flag_box)
+        fb.setContentsMargins(0, 0, 0, 0)
+        fb.setSpacing(4)
+        self.flag_heading = heading("可疑液滴")
+        fb.addWidget(self.flag_heading)
+        self.flag_strip = FlagStrip()
+        self.flag_strip.itemClicked.connect(self._show_flag)
+        fb.addWidget(self.flag_strip)
+        self.flag_box.setVisible(False)
+        pv.addWidget(self.flag_box)
         charts = QHBoxLayout()
         charts.setSpacing(24)
         col = QVBoxLayout()
@@ -453,6 +486,12 @@ class MainWindow(QMainWindow):
         ):
             if key in defaults and combo.currentData() is not None and combo.currentData() != defaults[key]:
                 out[key] = combo.currentData()
+        try:
+            height = _parse_positive(self.height_edit.text())
+        except ValueError:
+            height = None  # start() reports the bad value
+        if height is not None and "droplets.channel_height_um" in defaults:
+            out["droplets.channel_height_um"] = height
         flow = self.flow_combo.currentData()
         if flow != defaults["droplets.flow_axis"]:
             out["droplets.flow_axis"] = flow
@@ -499,8 +538,9 @@ class MainWindow(QMainWindow):
         try:
             pixel = _parse_positive(self.pixel_edit.text())
             interval = _parse_positive(self.interval_edit.text())
+            _parse_positive(self.height_edit.text())
         except ValueError:
-            self.warn("标定有误", "像素尺寸和帧间隔必须是正数，或留空。")
+            self.warn("标定有误", "像素尺寸、帧间隔和流道高度必须是正数，或留空。")
             return False
         recipe = Recipe.load(self.recipe_name()).with_overrides(self.overrides())
         try:
@@ -576,7 +616,7 @@ class MainWindow(QMainWindow):
 
     def _set_running(self, running: bool) -> None:
         for w in (
-            self.open_btn, self.folder_btn, self.pixel_edit, self.interval_edit, self.flow_combo, self.channel_combo,
+            self.open_btn, self.folder_btn, self.pixel_edit, self.interval_edit, self.height_edit, self.flow_combo, self.channel_combo,
             self.cells_check, self.cells_channel_combo, self.polarity_combo, self.fluo_check, self.fluo_channel_combo,
             self.adv_box,
         ):  # fmt: skip
@@ -602,16 +642,20 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError) as e:
             self.warn("无法读取结果", f"{run_dir}\n\n{e}")
             return False
-        s = next((v for v in summaries.values() if isinstance(v, dict) and "count_line_px" in v), {})
-        enc = next((v for v in summaries.values() if isinstance(v, dict) and "frac_empty" in v), None)
-        fluo = next((v for v in summaries.values() if isinstance(v, dict) and "positive_fraction" in v), None)
+        parts = pick_summaries(summaries)
+        s, enc, fluo = parts["droplets"] or {}, parts["encapsulation"], parts["fluorescence"]
         unit = _UNIT_LABEL.get(s.get("length_unit", "px"), s.get("length_unit", "px"))
         freq_unit = s.get("frequency_unit", "")
         freq_unit = "次/帧" if freq_unit == "1/frame" else freq_unit
 
         n = s.get("n_droplets")
         self.card_n.set("–" if n is None else str(n), f"共追踪到 {s['n_tracks_total']} 条轨迹" if "n_tracks_total" in s else "")
-        self.card_d.set(f"{_fmt(s.get('diameter_mean'))} {unit}", f"标准差 {_fmt(s.get('diameter_std'), 3)} {unit}")
+        volume = s.get("volume_mean_pl")
+        shape = {"sphere": "按球形", "flattened": "按压扁形状"}.get(s.get("volume_model"), "")
+        self.card_d.set(
+            f"{_fmt(s.get('diameter_mean'))} {unit}",
+            f"标准差 {_fmt(s.get('diameter_std'), 3)} {unit}" + (f"\n体积 {_fmt(volume, 3)} pL（{shape}）" if volume is not None else ""),
+        )
         cv = s.get("diameter_cv_percent")
         self.card_cv.set("–" if cv is None else f"{cv:.2f} %", f"范围 {_fmt(s.get('diameter_min'))} – {_fmt(s.get('diameter_max'))} {unit}")
         self.card_f.set(f"{_fmt(s.get('frequency'))} {freq_unit}", f"平均间距 {_fmt(s.get('spacing_mean'))} {unit}")
@@ -624,46 +668,11 @@ class MainWindow(QMainWindow):
         self.viewer.set_images(sorted((run_dir / "review").glob("*.png")))
         self.viewer.legend = "红线为液滴轮廓，黄圈为检出的细胞" if enc is not None else "红线为分割轮廓"
         self.viewer.show_index(0)
+        self._show_flags(run_dir, parts["flags"])
         self._show_encapsulation(run_dir, enc)
         self._show_fluorescence(run_dir, fluo, unit)
 
-        notes = []
-        if preview:
-            notes.append(f"这是预览：只分析了前 {provenance['input'].get('frames_used')} 帧，结果不代表全部数据，也不会保存。")
-        if provenance.get("status") == "stopped_by_qc":
-            notes.append("运行被质控规则中止，结果不完整。")
-        if s and not s.get("calibrated", True):
-            notes.append("未标定：长度单位为像素。")
-        if n == 0:
-            notes.append("没有检测到液滴。先看复核图，再到“高级设置”里调整最低对比度或最小面积。")
-        if enc is not None and enc.get("n_droplets"):
-            if enc.get("chi2_p") is not None and enc["chi2_p"] < 0.05:
-                d = enc.get("dispersion_index")
-                trend = "，D > 1 提示细胞聚集或上样不均" if d and d > 1 else ("，D < 1 提示排布比随机更规则" if d else "")
-                notes.append(f"包裹分布与泊松分布差异显著（p = {enc['chi2_p']:.3g}，离散指数 D = {_fmt(d, 3)}{trend}）。")
-            if enc.get("n_low_agreement"):
-                notes.append(
-                    f"有 {enc['n_low_agreement']} 个液滴的细胞数在各帧之间不一致，计数可能不准，"
-                    "请在复核图中检查黄圈，必要时调整“细胞直径”或“细胞最低对比度”。"
-                )
-            if enc.get("n_excluded"):
-                notes.append(f"有 {enc['n_excluded']} 个液滴无法计数（内部区域太小），未计入包裹统计。")
-        if fluo is not None and fluo.get("n_droplets"):
-            if fluo.get("populations") == 1:
-                notes.append(
-                    f"荧光只发现一群液滴（未见明显的阴阳两群），已按离群值规则判读（阈值 {_fmt(fluo.get('threshold'))}）。"
-                    "若样本应含阳性，或全部液滴都是阳性，请用对照样本确定阈值，在“高级设置 › 阳性阈值”中填写。"
-                )
-            elif fluo.get("saturated"):
-                notes.append("所有液滴均为阳性，无法估计每滴拷贝数（已饱和），建议稀释后重测。")
-            d = fluo.get("separation_d")
-            if fluo.get("threshold_method") == "mixture" and d is not None and d < 4:
-                notes.append(f"阴阳两群有重叠（分离度 D = {d:.2f}），靠近阈值的液滴可能判错，请对照散点图确认。")
-        for step in provenance.get("steps", []):
-            for v in step.get("qc_violations", []):
-                bounds = "，".join(f"{k} {v[k]:g}" for k in ("min", "max") if v.get(k) is not None)
-                value = "缺失" if v.get("value") is None else f"{v['value']:.4g}"
-                notes.append(f"质控提示：{step['id']}.{v['metric']} = {value}（要求 {bounds}），请对照复核图确认。")
+        notes = run_notes(summaries, provenance, preview)
         self.notes.setText("\n".join(notes))
         self.notes.setVisible(bool(notes))
 
@@ -672,6 +681,30 @@ class MainWindow(QMainWindow):
         self.run_dir = run_dir
         self.stack.setCurrentIndex(1)
         return True
+
+    def _show_flags(self, run_dir: Path, summary: dict | None) -> None:
+        crops = run_dir / "review" / "flags"
+        table = next(
+            (p for p in sorted((run_dir / "tables").glob("*.csv")) if {"reason_text", "track_id"} <= set(p.open(encoding="utf-8").readline().strip().split(","))),
+            None,
+        )
+        items: list[tuple[Path, str, str]] = []
+        if table is not None and crops.is_dir():
+            for row in pd.read_csv(table).itertuples(index=False):
+                path = crops / f"track{int(row.track_id):05d}_frame{int(row.frame):06d}.png"
+                if path.exists():
+                    short = "/".join(FLAG_SHORT.get(code, code) for code in str(row.reasons).split(";"))
+                    items.append((path, short, f"轨迹 {int(row.track_id)} · 第 {int(row.frame)} 帧：{row.reason_text}"))
+        self.flag_strip.set_flags(items)
+        n = (summary or {}).get("n_flagged", 0) or 0
+        total = (summary or {}).get("n_droplets", 0) or 0
+        shown = f"，显示前 {len(items)} 个" if len(items) < n else ""
+        self.flag_heading.setText(f"可疑液滴（{n} / {total}{shown}）· 点击查看")
+        self.flag_box.setVisible(bool(items))
+
+    def _show_flag(self, item) -> None:
+        path, reason = item.data(Qt.ItemDataRole.UserRole)
+        self.viewer.show_image(Path(path), reason + " · 点“上一张/下一张”回到复核图")
 
     def _show_encapsulation(self, run_dir: Path, enc: dict | None) -> None:
         self.enc_cards.setVisible(enc is not None)
@@ -683,7 +716,12 @@ class MainWindow(QMainWindow):
             return "–" if enc.get(key) is None else f"{100 * enc[key]:.1f} %"
 
         lo, hi = enc.get("lambda_ci_low"), enc.get("lambda_ci_high")
-        self.card_lambda.set(_fmt(enc.get("lambda"), 3), f"95% 区间 {_fmt(lo, 3)} – {_fmt(hi, 3)}" if lo is not None else "")
+        per_ul = enc.get("inclusions_per_ul")
+        self.card_lambda.set(
+            _fmt(enc.get("lambda"), 3),
+            (f"95% 区间 {_fmt(lo, 3)} – {_fmt(hi, 3)}" if lo is not None else "")
+            + (f"\n约 {_conc(per_ul)} 个/µL" if per_ul is not None else ""),
+        )
         self.card_empty.set(share("frac_empty"), f"泊松预期 {share('poisson_empty')}")
         self.card_single.set(share("frac_single"), f"泊松预期 {share('poisson_single')}")
         self.card_multi.set(share("frac_multi"), f"泊松预期 {share('poisson_multi')}")
@@ -704,15 +742,23 @@ class MainWindow(QMainWindow):
         if fluo is None:
             return
         p, lo, hi = fluo.get("positive_fraction"), fluo.get("positive_fraction_ci_low"), fluo.get("positive_fraction_ci_high")
-        self.card_pos.set("–" if p is None else f"{100 * p:.1f} %", "" if lo is None else f"95% 区间 {100 * lo:.1f} – {100 * hi:.1f} %")
-        self.card_pos_n.set(f"{fluo.get('n_positive', 0)} / {fluo.get('n_droplets', 0)}", f"阈值 {_fmt(fluo.get('threshold'))}")
+        counts = f"{fluo.get('n_positive', 0)} / {fluo.get('n_droplets', 0)}"
+        self.card_pos.set(
+            "–" if p is None else f"{100 * p:.1f} %",
+            counts + ("" if lo is None else f" · 95% 区间 {100 * lo:.1f} – {100 * hi:.1f} %"),
+        )
+        conc, conc_lo, conc_hi = fluo.get("copies_per_ul"), fluo.get("copies_per_ul_ci_low"), fluo.get("copies_per_ul_ci_high")
+        self.card_conc.set(
+            _conc(conc),
+            f"95% 区间 {_conc(conc_lo)} – {_conc(conc_hi)}" if conc is not None else "需要像素标定才能换算体积",
+        )
         c, clo, chi = fluo.get("copies_per_droplet"), fluo.get("copies_ci_low"), fluo.get("copies_ci_high")
         self.card_copies.set(_fmt(c, 3), f"95% 区间 {_fmt(clo, 3)} – {_fmt(chi, 3)}" if c is not None else "已饱和或无数据")
         method = {"mixture": "自动分群", "outlier": "离群值规则", "fixed": "固定阈值", "otsu": "大津法"}.get(
             fluo.get("threshold_method"), fluo.get("threshold_method") or ""
         )
         d = fluo.get("separation_d")
-        self.card_sep.set("–" if d is None else ("∞" if not math.isfinite(d) else f"{d:.1f}"), method)
+        self.card_sep.set("–" if d is None else ("∞" if not math.isfinite(d) else f"{d:.1f}"), f"{method} · 阈值 {_fmt(fluo.get('threshold'))}")
         table = None
         for path in sorted((run_dir / "tables").glob("*.csv")):
             header = path.open(encoding="utf-8").readline().strip().split(",")
@@ -755,6 +801,20 @@ class MainWindow(QMainWindow):
                 self.load_results(Path(path))
             else:
                 self.warn("不是结果文件夹", "该文件夹里没有 summary.json。")
+
+    def _open_report(self) -> None:
+        if self.run_dir is None:
+            return
+        path = self.run_dir / "report.html"
+        if not path.exists():
+            from vexel.report import write_report
+
+            try:
+                write_report(self.run_dir)
+            except Exception as e:  # noqa: BLE001
+                self.warn("无法生成报告", str(e))
+                return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def _open_run_dir(self) -> None:
         if self.run_dir is not None:

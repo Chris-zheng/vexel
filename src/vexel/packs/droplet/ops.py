@@ -51,11 +51,35 @@ def crossing_frame(positions: np.ndarray, frames: np.ndarray, line: float) -> fl
     return float(f0 + (line - p0) / (p1 - p0) * (f1 - f0))
 
 
+_TO_UM = {"um": 1.0, "nm": 1e-3, "mm": 1e3}
+
+
+def droplet_volume_um3(diameter_um: np.ndarray, channel_height_um: float | None) -> np.ndarray:
+    """Droplet volume from its projected diameter D.
+
+    Without a channel height, or when D <= h, the droplet is a sphere: pi D^3 / 6. A
+    droplet squeezed between the channel floor and ceiling (D > h) is modelled as a
+    cylinder of height h and radius a = (D - h) / 2 with a half-torus rim of tube radius
+    h / 2 (Pappus): V = pi a^2 h + pi^2 h^2 a / 4 + pi h^3 / 6. Both forms agree at D = h.
+    """
+    d = np.asarray(diameter_um, dtype=np.float64)
+    sphere = np.pi * d**3 / 6.0
+    if channel_height_um is None:
+        return sphere
+    h = float(channel_height_um)
+    a = np.maximum(d - h, 0.0) / 2.0
+    flat = np.pi * a**2 * h + np.pi**2 * h**2 * a / 4.0 + np.pi * h**3 / 6.0
+    return np.where(d > h, flat, sphere)
+
+
 class DropletSummaryParams(Params):
     flow_axis: Literal["x", "y"] = Field("x", description="image axis along which droplets travel")
     count_line: float = Field(0.5, gt=0, lt=1, description="virtual counting line, as a fraction of the image extent along flow_axis")
     min_track_frames: int = Field(3, ge=2, description="ignore tracks shorter than this")
     min_circularity: float = Field(0.0, ge=0, le=1, description="ignore detections less circular than this when sizing")
+    channel_height_um: float | None = Field(
+        None, gt=0, description="channel height, um; droplets wider than it are treated as flattened. None: all spheres"
+    )
 
 
 def _mode(values: np.ndarray) -> tuple[int, float]:
@@ -152,6 +176,15 @@ def droplet_summary(
         droplets["n_inclusions"] = droplets["n_inclusions"].astype(np.int64)
 
     n = len(droplets)
+    to_um = _TO_UM.get(ctx.space_unit)
+    volume = {"mean": None, "cv_percent": None}
+    n_flattened = 0
+    if to_um is not None:
+        d_um = droplets["diameter"].to_numpy(dtype=np.float64) * to_um
+        droplets["volume_pl"] = droplet_volume_um3(d_um, params.channel_height_um) / 1000.0  # 1 pL = 1000 um^3
+        volume = describe_values(droplets["volume_pl"].to_numpy(dtype=np.float64))
+        if params.channel_height_um is not None:
+            n_flattened = int((d_um > params.channel_height_um).sum())
     diameter = describe_values(droplets["diameter"].to_numpy(dtype=np.float64))
     times = droplets["crossing_time"].to_numpy(dtype=np.float64)
     duration = float(times[-1] - times[0]) if n >= 2 else 0.0
@@ -179,6 +212,11 @@ def droplet_summary(
         "n_tracks_not_crossing": n_not_crossing,
         "n_tracks_unsized": n_unsized,
         "calibrated": ctx.space_unit != "px",
+        "volume_mean_pl": volume["mean"],
+        "volume_cv_percent": volume["cv_percent"],
+        "volume_model": None if to_um is None else ("flattened" if params.channel_height_um is not None else "sphere"),
+        "channel_height_um": params.channel_height_um,
+        "n_flattened": n_flattened,
     }
     qc = {
         "n_droplets": float(n),
@@ -345,6 +383,7 @@ def poisson(params: PoissonParams, ctx: Context, *, table: pd.DataFrame) -> OpRe
         "lambda", "lambda_ci_low", "lambda_ci_high", "variance", "dispersion_index",
         "frac_empty", "frac_single", "frac_multi", "poisson_empty", "poisson_single", "poisson_multi",
         "single_among_occupied", "chi2", "chi2_dof", "chi2_p",
+        "inclusions_per_ul", "inclusions_per_ul_ci_low", "inclusions_per_ul_ci_high",
     ]  # fmt: skip
     if n == 0:
         summary.update({k: None for k in empty_keys})
@@ -375,6 +414,9 @@ def poisson(params: PoissonParams, ctx: Context, *, table: pd.DataFrame) -> OpRe
             "chi2": chi2,
             "chi2_dof": dof,
             "chi2_p": p_value,
+            "inclusions_per_ul": per_microlitre(lam, table),
+            "inclusions_per_ul_ci_low": per_microlitre(float(sps.chi2.ppf(0.025, 2 * total) / 2 / n) if total > 0 else 0.0, table),
+            "inclusions_per_ul_ci_high": per_microlitre(float(sps.chi2.ppf(0.975, 2 * total + 2) / 2 / n), table),
         }
     )
     kmax = max(int(counts.max()), int(sps.poisson.ppf(0.999, lam)) if lam > 0 else 0, 2)
@@ -460,15 +502,20 @@ class PositivityParams(Params):
     column: str = Field("fluo_mean", description="per-droplet intensity column to classify")
     method: Literal["auto", "otsu", "outlier", "fixed"] = Field(
         "auto",
-        description="auto: split into two populations only when all three tests agree (two-population Gaussian "
-        "mixture has a clearly lower BIC, the density has a real dip between them, Ashman's D >= min_separation), "
-        "otherwise treat all droplets as one population and use the outlier rule; otsu: always split at the best "
-        "Otsu gap; outlier: median + outlier_k x robust spread; fixed: use 'threshold'",
+        description="auto: split into two populations only when a two-population Gaussian mixture has a clearly "
+        "lower BIC and the groups are separated (a density dip below max_dip_ratio with Ashman's D >= min_separation, "
+        "or a dip below strong_max_dip_ratio with D >= strong_separation); otherwise treat all droplets as one "
+        "population and use the outlier rule; otsu: always split at the best Otsu gap; outlier: median + outlier_k x "
+        "robust spread; fixed: use 'threshold'",
     )
     threshold: float | None = Field(None, description="intensity threshold for method='fixed'")
     min_bic_gain: float = Field(10.0, ge=0, description="auto: how much lower the two-population BIC must be")
     max_dip_ratio: float = Field(0.6, gt=0, le=1, description="auto: density at the dip / density of the lower peak")
     min_separation: float = Field(3.0, gt=0, description="auto: minimum Ashman's D between the two populations")
+    strong_separation: float = Field(
+        3.6, gt=0, description="auto: with at least this D, a shallower dip (up to strong_max_dip_ratio) is enough"
+    )
+    strong_max_dip_ratio: float = Field(0.8, gt=0, le=1, description="auto: dip limit for strongly separated populations")
     outlier_k: float = Field(6.0, gt=0, description="outlier rule: robust standard deviations above the median")
     min_droplets: int = Field(10, ge=2, description="auto: below this many droplets, use the outlier rule")
 
@@ -552,6 +599,18 @@ def _mixture_threshold(v: np.ndarray) -> tuple[float, float, float]:
     return threshold, bic1, bic2
 
 
+def per_microlitre(value: float | None, table: pd.DataFrame, column: str = "volume_pl") -> float | None:
+    """Convert a per-droplet mean (e.g. lambda) to a concentration per microlitre using the
+    mean droplet volume (1 pL = 1e-6 uL). None without volumes."""
+    if value is None or column not in table.columns:
+        return None
+    volume = table[column].to_numpy(dtype=np.float64)
+    volume = volume[np.isfinite(volume)]
+    if volume.size == 0 or volume.mean() <= 0:
+        return None
+    return float(value) / (float(volume.mean()) * 1e-6)
+
+
 def _copies(p: float | None) -> float | None:
     """Mean copies per droplet from the positive fraction (Poisson): -ln(1 - p)."""
     if p is None or not math.isfinite(p) or p >= 1.0:
@@ -599,10 +658,11 @@ def positivity(params: PositivityParams, ctx: Context, *, table: pd.DataFrame) -
                 mixture_t, bic1, bic2 = _mixture_threshold(v)
                 dip = dip_ratio(v, mixture_t)
                 d = _ashman_d(v[v <= mixture_t], v[v > mixture_t])
+                separated = d is None or d >= params.min_separation  # None: a one-droplet population
+                strong = d is None or d >= params.strong_separation
                 if (
                     bic2 + params.min_bic_gain < bic1
-                    and dip < params.max_dip_ratio
-                    and (d is None or d >= params.min_separation)  # None: a one-droplet population
+                    and ((dip < params.max_dip_ratio and separated) or (dip < params.strong_max_dip_ratio and strong))
                     and (v > mixture_t).any()
                     and (v <= mixture_t).any()
                 ):
@@ -613,6 +673,12 @@ def positivity(params: PositivityParams, ctx: Context, *, table: pd.DataFrame) -
     out = table.copy()
     out["positive"] = (values > threshold) if threshold is not None else False
     out.loc[~finite, "positive"] = False
+    if threshold is not None and n:
+        hi_v, lo_v = v[v > threshold], v[v <= threshold]
+        scale = float(hi_v.mean() - lo_v.mean()) if (hi_v.size and lo_v.size) else params.outlier_k * max(spread, 1e-9)
+        # signed distance to the threshold in units of the gap between the two groups;
+        # values near 0 are the uncertain calls
+        out["call_margin"] = (values - threshold) / max(scale, 1e-9)
     k = int(out.loc[finite, "positive"].sum())
     p = k / n if n else None
     lo, hi = _wilson(k, n) if n else (None, None)
@@ -628,6 +694,11 @@ def positivity(params: PositivityParams, ctx: Context, *, table: pd.DataFrame) -
         "copies_per_droplet": _copies(p),
         "copies_ci_low": _copies(lo),
         "copies_ci_high": _copies(hi),
+        # concentration in the droplets, from the mean droplet volume; the interval reflects
+        # counting statistics only, not volume uncertainty
+        "copies_per_ul": per_microlitre(_copies(p), table),
+        "copies_per_ul_ci_low": per_microlitre(_copies(lo), table),
+        "copies_per_ul_ci_high": per_microlitre(_copies(hi), table),
         "threshold": threshold,
         "threshold_method": method_used,
         "separation_d": separation,
@@ -645,3 +716,94 @@ def positivity(params: PositivityParams, ctx: Context, *, table: pd.DataFrame) -
         "separation_d": float(separation) if separation is not None and math.isfinite(separation) else float("nan"),
     }
     return OpResult({"droplets": out, "summary": summary}, qc)
+
+
+# -- review flags ----------------------------------------------------------------------------
+
+FLAG_REASONS = {
+    "low_circularity": "形状不圆，可能是粘连或碎片",
+    "size_outlier": "粒径明显偏离其他液滴",
+    "count_unstable": "细胞数在各帧之间不一致",
+    "near_threshold": "荧光接近阴阳阈值",
+    "few_frames": "可见帧数少，测量依据少",
+}
+FLAG_COLUMNS = ["track_id", "frame", "centroid_y_px", "centroid_x_px", "diameter_px", "reasons", "reason_text"]
+
+
+class FlagParams(Params):
+    min_circularity: float = Field(0.85, ge=0, le=1, description="flag droplets whose median circularity is below this")
+    size_outlier_k: float = Field(4.0, gt=0, description="flag diameters this many robust standard deviations from the median")
+    min_inclusion_agreement: float = Field(0.8, ge=0, le=1, description="flag cell counts that agree across fewer frames")
+    threshold_margin: float = Field(0.1, ge=0, description="flag fluorescence within this share of the group gap from the threshold")
+    min_frames_fraction: float = Field(0.5, ge=0, le=1, description="flag droplets seen in fewer frames than this x the median")
+
+
+@register_op(
+    "droplet.flags",
+    scope=Scope.WINDOW,
+    inputs={"table": Kind.TABLE, "tracks": Kind.TABLE},
+    outputs={"table": Kind.TABLE, "summary": Kind.SUMMARY},
+    params=FlagParams,
+)
+def flags(params: FlagParams, ctx: Context, *, table: pd.DataFrame, tracks: pd.DataFrame) -> OpResult:
+    """List droplets whose result deserves a human look (odd shape or size, unstable cell
+    count, fluorescence near the threshold, few frames), with the frame and position to
+    inspect: the whole-droplet frame closest to the counting line."""
+    n = len(table)
+    reasons: dict[int, list[str]] = {i: [] for i in range(n)}
+    if n:
+        circ = table["circularity"].to_numpy(dtype=np.float64)
+        for i in np.nonzero(circ < params.min_circularity)[0]:
+            reasons[i].append("low_circularity")
+        d = table["diameter"].to_numpy(dtype=np.float64)
+        med = float(np.median(d))
+        spread = 1.4826 * float(np.median(np.abs(d - med)))
+        if spread > 0:
+            for i in np.nonzero(np.abs(d - med) > params.size_outlier_k * spread)[0]:
+                reasons[i].append("size_outlier")
+        if "inclusion_agreement" in table.columns:
+            agree = table["inclusion_agreement"].to_numpy(dtype=np.float64)
+            for i in np.nonzero(agree < params.min_inclusion_agreement)[0]:
+                reasons[i].append("count_unstable")
+        if "call_margin" in table.columns:
+            margin = table["call_margin"].to_numpy(dtype=np.float64)
+            for i in np.nonzero(np.abs(margin) < params.threshold_margin)[0]:
+                reasons[i].append("near_threshold")
+        frames = table["n_frames"].to_numpy(dtype=np.float64)
+        for i in np.nonzero(frames < params.min_frames_fraction * float(np.median(frames)))[0]:
+            reasons[i].append("few_frames")
+
+    rows = []
+    by_track = {tid: g for tid, g in tracks.groupby("track_id")} if "track_id" in tracks.columns else {}
+    for i, why in reasons.items():
+        if not why:
+            continue
+        r = table.iloc[i]
+        g = by_track.get(int(r["track_id"]))
+        if g is None or g.empty:
+            continue
+        whole = g[~g["touches_border"].astype(bool)] if "touches_border" in g.columns else g
+        pick = (whole if len(whole) else g).iloc[
+            int(np.argmin(np.abs((whole if len(whole) else g)["frame"].to_numpy(dtype=np.float64) - float(r["crossing_frame"]))))
+        ]
+        rows.append(
+            {
+                "track_id": int(r["track_id"]),
+                "frame": int(pick["frame"]),
+                "centroid_y_px": float(pick["centroid_y_px"]),
+                "centroid_x_px": float(pick["centroid_x_px"]),
+                "diameter_px": float(pick["diameter_px"]),
+                "reasons": ";".join(why),
+                "reason_text": "；".join(FLAG_REASONS[w] for w in why),
+            }
+        )
+    out = pd.DataFrame(rows, columns=FLAG_COLUMNS)
+    counts = {k: int(sum(k in w for w in reasons.values())) for k in FLAG_REASONS}
+    flagged = int(sum(bool(w) for w in reasons.values()))
+    summary = {
+        "n_droplets": n,
+        "n_flagged": flagged,
+        "flagged_fraction": flagged / n if n else None,
+        **{f"n_{k}": v for k, v in counts.items()},
+    }
+    return OpResult({"table": out, "summary": summary}, {"flagged_fraction": flagged / n if n else 0.0, "n_flagged": float(flagged)})

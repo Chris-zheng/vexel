@@ -138,7 +138,7 @@ def test_basic_recipe_is_unchanged_by_the_encapsulation_feature(droplet_dataset,
     """droplet_basic must not grow encapsulation columns, and its result must not depend on them."""
     r = run_recipe(Recipe.load("droplet_basic"), open_volume(droplet_dataset / "droplets.ome.tif"), tmp_path / "r", hash_input=False)
     assert "n_inclusions" not in r.tables["droplets.droplets"].columns
-    assert set(r.summary) == {"droplets.summary"}
+    assert set(r.summary) == {"droplets.summary", "flags.summary"}
 
 
 def test_match_droplets_pairs_closest_crossings_once():
