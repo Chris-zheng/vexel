@@ -75,7 +75,7 @@ def droplet_volume_um3(diameter_um: np.ndarray, channel_height_um: float | None)
 class DropletSummaryParams(Params):
     flow_axis: Literal["x", "y"] = Field("x", description="image axis along which droplets travel")
     count_line: float = Field(0.5, gt=0, lt=1, description="virtual counting line, as a fraction of the image extent along flow_axis")
-    min_track_frames: int = Field(3, ge=2, description="ignore tracks shorter than this")
+    min_track_frames: int = Field(3, ge=2, description="ignore tracks spanning fewer frames than this (first to last detection)")
     min_circularity: float = Field(0.0, ge=0, le=1, description="ignore detections less circular than this when sizing")
     channel_height_um: float | None = Field(
         None, gt=0, description="channel height, um; droplets wider than it are treated as flattened. None: all spheres"
@@ -131,7 +131,10 @@ def droplet_summary(
     rows = []
     n_short = n_not_crossing = n_unsized = 0
     for track_id, g in table.sort_values("frame").groupby("track_id", sort=True):
-        if len(g) < params.min_track_frames:
+        # the span the track covers, not how many frames saw it (a stream that thins frames
+        # when behind sees every droplet in fewer frames); at least two detections
+        span = int(g["frame"].iloc[-1]) - int(g["frame"].iloc[0]) + 1
+        if len(g) < 2 or span < params.min_track_frames:
             n_short += 1
             continue
         frames = g["frame"].to_numpy(dtype=np.float64)

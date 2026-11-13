@@ -249,8 +249,14 @@ def _speed(text: str) -> float | None:
     return value
 
 
+def cmd_live(args: argparse.Namespace) -> int:
+    from vexel.ui.live import main as live_main
+
+    return live_main([args.input] if args.input else [])
+
+
 def cmd_replay(args: argparse.Namespace) -> int:
-    from vexel.engine import Recipe, StreamSettings, run_stream
+    from vexel.engine import Recipe
     from vexel.readers import open_volume
     from vexel.sources import ReplaySource
 
@@ -268,6 +274,14 @@ def cmd_replay(args: argparse.Namespace) -> int:
         pace = f"{args.speed:g}x real time: {fps:.4g} frames/s (recorded at {1 / source.frame_interval_s:.4g} frames/s)"
     print(f"input   {args.input}  {source.n_frames} frames, replayed {pace}")
     print(f"recipe  {recipe.name}")
+    _stream_and_print(recipe, source, out, args)
+    print(f"\noutput         {out}")
+    return 0
+
+
+def _stream_and_print(recipe: Any, source: Any, out: Path, args: argparse.Namespace) -> Any:
+    from vexel.engine import StreamSettings, run_stream
+
     settings = StreamSettings(queue_size=args.queue, update_every=args.update_every, window=args.window)
 
     def show(snap: dict[str, Any]) -> None:
@@ -291,7 +305,40 @@ def cmd_replay(args: argparse.Namespace) -> int:
             print(f"  {key:<24} {_fmt(value)}")
     if len(result.alarms):
         print(f"\n{len(result.alarms)} alarm(s), see {out / 'stream' / 'alarms.csv'}")
-    print(f"\noutput         {out}")
+    return result
+
+
+def cmd_watch(args: argparse.Namespace) -> int:
+    from vexel.engine import Recipe, run_recipe
+    from vexel.readers import open_volume
+    from vexel.sources.watch import WatchSource
+
+    recipe = Recipe.load(args.recipe)
+    if args.set:
+        recipe = recipe.with_overrides(_parse_overrides(args.set))
+    resolved = recipe.resolve()
+    folder = Path(args.folder)
+    out = Path(args.out) if args.out else Path("runs") / f"{folder.name}-{recipe.name}-watch-{datetime.now():%Y%m%d-%H%M%S}"
+    source = WatchSource(
+        folder, resolved.input.sources(), pixel_size=args.pixel_size, space_unit=args.unit, frame_interval_s=args.frame_interval,
+        poll_s=args.poll, idle_timeout_s=args.idle_timeout, include_existing=not args.new_only, max_frames=args.max_frames,
+        zarr_path=None if args.no_zarr else out / "frames.zarr",
+    )  # fmt: skip
+    print(f"watching {folder}  (ends after {args.idle_timeout:g} s without a new image, or when a file named STOP appears)")
+    print(f"recipe   {recipe.name}")
+    result = _stream_and_print(recipe, source, out, args)
+    print(f"\nended by       {source.ended_by}  ({len(source.files)} image(s))")
+    if source.zarr_path is not None and source.files:
+        print(f"frames         {source.zarr_path}")
+        if not args.no_final:
+            print("\nfinal pass: batch analysis of the whole acquisition")
+            final = run_recipe(recipe, open_volume(source.zarr_path), out / "final", hash_input=False, progress=None)
+            online = result.summary.get("droplets.summary", {}).get("n_droplets")
+            batch = final.summary.get("droplets.summary", {}).get("n_droplets")
+            if online is not None:
+                print(f"  droplets online {online}, final {batch}")
+            print(f"  final results  {out / 'final'}")
+    print(f"output         {out}")
     return 0
 
 
@@ -310,6 +357,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("gui", help="open the desktop interface")
     p.add_argument("input", nargs="?", help="data to open on start")
     p.set_defaults(func=cmd_gui)
+
+    p = sub.add_parser("live", help="open the live dashboard (replay a recording or watch an acquisition folder)")
+    p.add_argument("input", nargs="?", help="recording to replay, or folder to watch")
+    p.set_defaults(func=cmd_live)
 
     p = sub.add_parser("run", help="run a recipe on a recorded acquisition")
     p.add_argument("input", help="TIFF / OME-TIFF, video, image-sequence folder, .npy or OME-Zarr")
@@ -338,6 +389,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--overwrite", action="store_true", help="replace a previous run in --out")
     _add_calibration(p)
     p.set_defaults(func=cmd_replay)
+
+    p = sub.add_parser("watch", help="analyse images as an acquisition writes them into a folder")
+    p.add_argument("folder", help="folder the acquisition software writes one image per frame into")
+    p.add_argument("--recipe", "-r", required=True, help="recipe JSON file or built-in recipe name")
+    p.add_argument("--out", "-o", help="output directory (default: runs/<folder>-<recipe>-watch-<timestamp>)")
+    p.add_argument("--set", action="append", default=[], metavar="STEP.PARAM=VALUE", help="override a recipe parameter (repeatable)")
+    p.add_argument("--idle-timeout", type=float, default=10.0, help="stop after this many seconds without a new image")
+    p.add_argument("--poll", type=float, default=0.2, help="seconds between folder checks")
+    p.add_argument("--new-only", action="store_true", help="ignore images already in the folder when watching starts")
+    p.add_argument("--no-zarr", action="store_true", help="do not store the frames as OME-Zarr (implies --no-final)")
+    p.add_argument("--no-final", action="store_true", help="skip the batch analysis of the whole acquisition at the end")
+    p.add_argument("--queue", type=int, default=64, help="images that may wait; further images are thinned or dropped")
+    p.add_argument("--update-every", type=int, default=50, help="images between rolling updates")
+    p.add_argument("--window", type=int, default=500, help="images covered by the rolling statistics")
+    p.add_argument("--max-frames", type=int, help="stop after N images")
+    p.add_argument("--workers", type=int, help="threads for images processed together")
+    p.add_argument("--overwrite", action="store_true", help="replace a previous run in --out")
+    _add_calibration(p)
+    p.set_defaults(func=cmd_watch)
 
     p = sub.add_parser("info", help="show metadata without reading pixels")
     p.add_argument("input")

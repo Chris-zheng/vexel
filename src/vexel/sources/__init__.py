@@ -4,6 +4,6 @@ integration."""
 
 from vexel.sources.camera import CameraSource
 from vexel.sources.file import FileSource, FrameSource
-from vexel.sources.replay import Frame, ReplaySource
+from vexel.sources.replay import Frame, ReplaySource, StreamSource
 
-__all__ = ["CameraSource", "FileSource", "Frame", "FrameSource", "ReplaySource"]
+__all__ = ["CameraSource", "FileSource", "Frame", "FrameSource", "ReplaySource", "StreamSource"]

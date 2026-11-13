@@ -243,7 +243,7 @@ def stream_section(run_dir: Path, prov: dict[str, Any], unit: str) -> list[str]:
         for r in alarms.itertuples(index=False):
             img = run_dir / "stream" / str(r.image) if isinstance(r.image, str) and r.image else None
             pic = f'<img class="event" src="{_png(img)}" alt="第 {int(r.frame)} 帧">' if img is not None and img.exists() else ""
-            kind = {"drift": "漂移", "qc": "质控"}.get(r.kind, r.kind)
+            kind = {"drift": "漂移", "qc": "质控", "throughput": "处理能力"}.get(r.kind, r.kind)
             out.append(f'<tr><td class="num">{int(r.frame)}</td><td>{_e(kind)}</td><td>{_e(r.message)}</td><td>{pic}</td></tr>')
         out.append("</table>")
     return out

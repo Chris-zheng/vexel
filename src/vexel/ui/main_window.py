@@ -163,6 +163,10 @@ class MainWindow(QMainWindow):
         row.addWidget(self.open_btn)
         row.addWidget(self.folder_btn)
         v.addLayout(row)
+        self.live_btn = QPushButton("在线监控（回放录像 / 监视采集文件夹）…")
+        self.live_btn.setToolTip("边采集（或边回放）边分析：滚动统计、漂移报警、处理帧率与丢帧")
+        self.live_btn.clicked.connect(self.open_live)
+        v.addWidget(self.live_btn)
         self.file_label = QLabel("未选择数据")
         self.file_label.setObjectName("fileName")
         self.file_label.setWordWrap(True)
@@ -837,7 +841,17 @@ class MainWindow(QMainWindow):
         if urls:
             self.open_path(urls[0].toLocalFile())
 
+    def open_live(self) -> None:
+        from vexel.ui.live import LiveWindow
+
+        if getattr(self, "live_window", None) is None:
+            self.live_window = LiveWindow()
+        self.live_window.show()
+        self.live_window.raise_()
+
     def closeEvent(self, event) -> None:  # noqa: N802
+        if getattr(self, "live_window", None) is not None:
+            self.live_window.close()
         if self._worker is not None:
             self._worker.cancel()
         if self._thread is not None:

@@ -179,3 +179,111 @@ def test_thinned_frames_do_not_flag_droplets_as_seen_too_briefly(cells_dataset, 
     result = run_stream(recipe, source, tmp_path / "s", settings=StreamSettings(queue_size=16), report=False, workers=2)
     assert result.provenance["stream"]["frames_sampled_out"] > 0
     assert result.summary["flags.summary"]["n_few_frames"] == 0
+
+
+# -- watched acquisition folders ------------------------------------------------------------
+
+
+def _write_frames(folder, video, delay=0.0, start=0):
+    import time
+
+    import tifffile
+
+    for i, f in enumerate(video, start):
+        tmp = folder / f".img_{i}.tif"  # written under a hidden name, then renamed, like many cameras
+        tifffile.imwrite(tmp, f)
+        tmp.rename(folder / f"img_{i}.tif")
+        if delay:
+            time.sleep(delay)
+
+
+def test_watch_takes_files_as_they_arrive_in_name_order(tmp_path):
+    import threading
+
+    from vexel.core.cache import read_ome_zarr
+    from vexel.sources.watch import WatchSource
+
+    folder = tmp_path / "acq"
+    folder.mkdir()
+    frames = [np.full((12, 16), i, np.uint16) for i in range(12)]
+    writer = threading.Thread(target=_write_frames, args=(folder, frames, 0.03))
+    writer.start()
+    source = WatchSource(folder, {"source": 0}, idle_timeout_s=0.6, poll_s=0.02, zarr_path=tmp_path / "f.zarr",
+                         pixel_size=2.0, frame_interval_s=0.01)  # fmt: skip
+    got = [(fr.index, int(fr.images["source"][0, 0])) for fr in source]
+    writer.join()
+    assert got == [(i, i) for i in range(12)]  # img_10 after img_9: natural order
+    assert source.ended_by == "idle timeout"
+    stored = read_ome_zarr(tmp_path / "f.zarr")
+    assert stored.sizes["T"] == 12 and stored.spacing["x"] == 2.0 and stored.space_unit == "um"
+    assert source.volume.sizes["T"] == 12 and source.volume.sizes["Y"] == 12
+
+
+def test_watch_ends_on_a_stop_file_and_can_ignore_existing_images(tmp_path):
+    from vexel.sources.watch import WatchSource
+
+    folder = tmp_path / "acq"
+    folder.mkdir()
+    _write_frames(folder, [np.zeros((8, 8), np.uint8)] * 3)
+    source = WatchSource(folder, {"source": 0}, idle_timeout_s=30, poll_s=0.02, include_existing=False)
+    _write_frames(folder, [np.ones((8, 8), np.uint8)] * 2, start=3)
+    (folder / "STOP").write_text("")
+    assert [int(fr.images["source"][0, 0]) for fr in source] == []  # STOP is seen before the new files settle
+    assert source.ended_by == "STOP file"
+    (folder / "STOP").unlink()
+    source = WatchSource(folder, {"source": 0}, idle_timeout_s=0.3, poll_s=0.02, include_existing=False)
+    _write_frames(folder, [np.full((8, 8), 7, np.uint8)] * 2, start=5)
+    assert [int(fr.images["source"][0, 0]) for fr in source] == [7, 7]
+
+
+def test_watch_rejects_missing_channels(tmp_path):
+    from vexel.sources.watch import WatchSource
+
+    folder = tmp_path / "acq"
+    folder.mkdir()
+    _write_frames(folder, [np.zeros((8, 8), np.uint8)])
+    with pytest.raises(ValueError, match="channel"):
+        list(WatchSource(folder, {"source": 0, "source.fluo": 1}, idle_timeout_s=0.2, poll_s=0.02))
+
+
+def test_watch_command_streams_then_runs_a_final_batch_pass(tmp_path, capsys):
+    import json as _json
+    import threading
+
+    from vexel.cli import main
+    from vexel.synthetic.droplets import DropletSynthConfig, generate
+
+    folder = tmp_path / "acq"
+    folder.mkdir()
+    (folder / "vexel.json").write_text(_json.dumps({"pixel_size": 2.0, "frame_interval": 0.001}))
+    video, _, _ = generate(DropletSynthConfig(n_frames=160, seed=9, cell_lambda=1.0))
+    writer = threading.Thread(target=_write_frames, args=(folder, video, 0.01))
+    writer.start()
+    out = tmp_path / "out"
+    code = main(["watch", str(folder), "-r", "droplet_encapsulation", "-o", str(out), "--idle-timeout", "1.5", "--poll", "0.05"])
+    writer.join()
+    assert code == 0
+    text = capsys.readouterr().out
+    assert "ended by       idle timeout  (160 image(s))" in text and "final pass" in text
+    online = _json.loads((out / "summary.json").read_text())
+    final = _json.loads((out / "final" / "summary.json").read_text())
+    assert online["droplets.summary"]["n_droplets"] == final["droplets.summary"]["n_droplets"] > 5
+    assert online["encapsulation.summary"]["lambda"] == final["encapsulation.summary"]["lambda"]
+    p = _json.loads((out / "provenance.json").read_text())
+    assert p["stream"]["source"]["kind"] == "watch" and p["input"]["shape"][-2:] == [256, 768]
+
+
+def test_frames_lost_with_a_full_queue_raise_a_throughput_alarm(droplet_dataset, tmp_path):
+    recipe = Recipe.load("droplet_basic")
+    source = _replay(droplet_dataset / "droplets.ome.tif", recipe, speed=0.5)  # 500 frames/s
+    settings = StreamSettings(queue_size=4, max_stride=1, update_every=20)  # no thinning: the queue overflows
+    result = run_stream(recipe, source, tmp_path / "s", settings=settings, report=False, workers=1)
+    assert result.provenance["stream"]["frames_lost_queue_full"] > 0
+    alarms = result.alarms[result.alarms["kind"] == "throughput"]
+    assert (alarms["metric"] == "frames_lost").any()
+
+
+def test_steady_replay_that_keeps_up_raises_no_throughput_alarm(droplet_dataset, tmp_path):
+    recipe = Recipe.load("droplet_basic")
+    result = run_stream(recipe, _replay(droplet_dataset / "droplets.ome.tif", recipe), tmp_path / "s", report=False)
+    assert not (result.alarms["kind"] == "throughput").any()

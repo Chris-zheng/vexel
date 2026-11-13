@@ -23,6 +23,7 @@ instead, which measures the software's own throughput.
 from __future__ import annotations
 
 import dataclasses
+import itertools
 import math
 import os
 import queue
@@ -47,7 +48,7 @@ from vexel.engine.qc import Violation, aggregate_frames, evaluate
 from vexel.engine.recipe import SOURCE, Recipe
 from vexel.ops.registry import Context, Kind, Scope, get_op
 from vexel.ops.track import LinkParams, displacements, global_flow, pair_shift
-from vexel.sources.replay import Frame, ReplaySource
+from vexel.sources.replay import Frame, StreamSource
 
 _BACKGROUND = "preprocess.static_background"
 _TRACK = "track.link"
@@ -148,6 +149,7 @@ class _Tracker:
         self.step = 0  # frames processed so far; gaps are counted in processed frames
         self.shifts: list[np.ndarray] = []
 
+
     def learn_flow(self, tables: list[pd.DataFrame]) -> None:
         """Global flow from the warm-up frames (needs at least one consecutive pair)."""
         if not self.params.estimate_shift:
@@ -191,6 +193,7 @@ class _Tracker:
                 k = self.next_id
                 self.next_id += 1
                 self.active[k] = {"rows": [], "first_t": t}
+
             tr = self.active[k]
             tr["rows"].append({**rec, "track_id": k})
             tr["pos"] = moving[j]
@@ -246,6 +249,7 @@ class _Plan:
         self.frame_steps, self.table_steps = [], []
         self.background: list[str] = []
         self.track: str | None = None
+        self.summary_min_frames = 0
         streamed: set[str] = set(recipe.input.sources())  # values that exist per frame
         for step in recipe.steps:
             spec = get_op(step.op)
@@ -268,6 +272,8 @@ class _Plan:
                 streamed.update(f"{step.id}.{o}" for o in spec.outputs)
             elif spec.scope is Scope.WINDOW and all(k in (Kind.TABLE, Kind.SUMMARY) for k in in_kinds):
                 self.table_steps.append(step)
+                if spec.name == "droplet.summary":
+                    self.summary_min_frames = int(step.params.get("min_track_frames", 3))
             else:
                 raise NotImplementedError(f"step {step.id!r} ({spec.name}) cannot run on a stream")
 
@@ -285,7 +291,7 @@ def _numeric(summary: dict[str, Any]) -> dict[str, float]:
 
 def run_stream(
     recipe: Recipe,
-    source: ReplaySource,
+    source: StreamSource,
     out_dir: str | Path,
     *,
     overwrite: bool = False,
@@ -295,10 +301,14 @@ def run_stream(
     should_stop: Callable[[], bool] | None = None,
     report: bool = True,
     workers: int | None = None,
+    on_frame: Callable[[int, np.ndarray, np.ndarray, np.ndarray | None], None] | None = None,
 ) -> StreamResult:
     """Run ``recipe`` on the frames ``source`` delivers; write the same deliverables as a
     batch run plus ``stream/rolling.csv`` (rolling statistics), ``stream/alarms.csv`` and
-    ``stream/events/`` (an overlay of the frame at each alarm)."""
+    ``stream/events/`` (an overlay of the frame at each alarm).
+
+    ``on_update`` receives every rolling snapshot; ``on_frame`` every processed frame's
+    review image, labels and marks (called from the executor thread: keep it cheap)."""
     cfg = settings or StreamSettings()
     say = progress or (lambda _m: None)
     resolved = recipe.resolve()
@@ -311,10 +321,15 @@ def run_stream(
     started = datetime.now(timezone.utc)
     t0 = time.perf_counter()
 
-    first = np.asarray(next(iter(source._lazy.values()))[0])
+    frames_in = iter(source)
+    try:
+        first_frame = next(frames_in)
+    except StopIteration:
+        raise ValueError("input has no frames") from None
+    first = first_frame.images[SOURCE]
     base_ctx = Context(
         frame_shape=(int(first.shape[0]), int(first.shape[1])),
-        n_frames=source.n_frames,
+        n_frames=source.n_frames or 1,
         spacing_yx=(volume.spacing["y"], volume.spacing["x"]),
         space_unit=volume.space_unit,
         frame_interval=volume.spacing["t"],
@@ -330,6 +345,7 @@ def run_stream(
         bg.input_ref = next(s for s in resolved.steps if s.id == sid).inputs["image"]
     track_step = next((s for s in resolved.steps if s.id == plan.track), None)
     tracker = _Tracker(params[plan.track]) if track_step is not None else None
+
     warmup = max([params[sid].max_frames for sid in plan.background] + [cfg.flow_warmup if tracker else 0, 1])
 
     frame_tables: dict[str, list[pd.DataFrame]] = {}
@@ -337,8 +353,13 @@ def run_stream(
     frame_qc: dict[str, list[dict[str, float]]] = {s.id: [] for s in plan.frame_steps if s.id not in backgrounds}
     step_time: dict[str, float] = {s.id: 0.0 for s in resolved.steps}
     rv = resolved.review
-    picks = set(np.unique(np.linspace(0, source.n_frames - 1, min(source.n_frames, rv.n_frames)).round().astype(int))) if rv else set()
+    known = source.n_frames
+    picks = set(np.unique(np.linspace(0, known - 1, min(known, rv.n_frames)).round().astype(int))) if rv and known else set()
     review_frames: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray | None]] = {}
+    # Length unknown (a watched folder): keep an evenly thinned set of frames, from which
+    # the review frames are chosen at the end.
+    sampled: list[tuple[int, tuple[np.ndarray, np.ndarray, np.ndarray | None]]] = []
+    sample_step = 1
     last_view: tuple[int, np.ndarray, np.ndarray, np.ndarray | None] | None = None
 
     def compute(fr: Frame, values: dict[str, Any]) -> tuple[dict[str, Any], dict[str, dict[str, float]], dict[str, float]]:
@@ -365,7 +386,7 @@ def run_stream(
     def process(batch: list[Frame], learn: bool = True) -> list[pd.DataFrame | None]:
         """Backgrounds in frame order, the frame operators in parallel, bookkeeping in order.
         Returns, per frame, the table the tracker reads."""
-        nonlocal last_view
+        nonlocal last_view, sample_step
         prepared = []
         for fr in batch:
             values: dict[str, Any] = dict(fr.images)
@@ -399,9 +420,17 @@ def run_stream(
             if rv and rv.image in values and rv.labels in values:
                 view = (values[rv.image], values[rv.labels], values.get(rv.marks) if rv.marks else None)
                 last_view = (fr.index, *view)
-                due_pick = next((p for p in sorted(picks) if p <= fr.index and p not in review_frames), None)
-                if due_pick is not None:
-                    review_frames[due_pick] = view
+                if known:
+                    due_pick = next((p for p in sorted(picks) if p <= fr.index and p not in review_frames), None)
+                    if due_pick is not None:
+                        review_frames[due_pick] = view
+                elif fr.index % sample_step == 0:
+                    sampled.append((fr.index, view))
+                    if len(sampled) > 4 * rv.n_frames:
+                        del sampled[1::2]
+                        sample_step *= 2
+                if on_frame is not None:
+                    on_frame(fr.index, *view)
             out.append(values.get(track_step.inputs["table"]) if track_step is not None else None)
         return out
 
@@ -441,7 +470,7 @@ def run_stream(
     # -- producer ------------------------------------------------------------------------
     q: queue.Queue = queue.Queue(maxsize=max(1, cfg.queue_size))
     stop = threading.Event()
-    counts = {"received": 0, "dropped": 0, "sampled_out": 0, "overflow": 0}
+    counts = {"received": 0, "dropped": 0, "sampled_out": 0, "overflow": 0, "stride": 1}
     stride_log: list[dict[str, int]] = []
     errors: list[BaseException] = []
 
@@ -455,16 +484,17 @@ def run_stream(
         return False
 
     def produce() -> None:
+        frames = itertools.chain([first_frame], frames_in)
         # Paced: when the queue fills up, keep every n-th frame (n doubles while the queue
         # stays over half full, halves once it is nearly empty), so frames are thinned out
         # evenly rather than lost in bursts; a frame that still finds the queue full is lost.
         stride, since_change, hold = 1, 0, max(1, cfg.queue_size // 2)
         try:
-            for fr in source:
+            for fr in frames:
                 if stop.is_set():
                     break
                 counts["received"] += 1
-                if source.speed is None:
+                if not source.live:
                     if not put(fr):
                         break
                     continue
@@ -472,9 +502,11 @@ def run_stream(
                 fill = q.qsize() / q.maxsize
                 if since_change >= hold and fill > 0.5 and stride < cfg.max_stride:
                     stride, since_change = stride * 2, 0
+                    counts["stride"] = stride
                     stride_log.append({"frame": fr.index, "stride": stride})
                 elif since_change >= hold and fill < 0.1 and stride > 1:
                     stride, since_change = stride // 2, 0
+                    counts["stride"] = stride
                     stride_log.append({"frame": fr.index, "stride": stride})
                 if fr.index % stride:
                     counts["sampled_out"] += 1
@@ -498,6 +530,7 @@ def run_stream(
     alarms: list[dict[str, Any]] = []
     active_alarms: set[tuple[str, str]] = set()
     reference: dict[str, float] = {}
+    throughput = {"lost": 0}
     latencies: list[float] = []
     processed = 0
     last_index = -1
@@ -559,6 +592,27 @@ def run_stream(
                     alarm(t, "qc", step.id, rule.metric, v.value, f"min {rule.min} max {rule.max}", v.message())
                 else:
                     clear("qc", step.id, rule.metric)
+        # throughput: frames lost outright, or thinned so far that droplets can no longer be
+        # told apart between processed frames (moving more than half their spacing)
+        lost = counts["overflow"]
+        if lost > throughput["lost"]:
+            alarm(t, "throughput", "stream", "frames_lost", float(lost), "0",
+                  f"processing behind: {lost} frame(s) lost with the queue full; counts may be incomplete")  # fmt: skip
+        else:
+            clear("throughput", "stream", "frames_lost")
+        throughput["lost"] = lost
+        # thinned so far that a droplet crossing the field is seen in too few processed frames
+        if tracker is not None and tracker.shifts and plan.summary_min_frames:
+            per_frame = float(np.max(np.abs(np.median(np.stack(tracker.shifts[-50:]), axis=0))))
+            axis = int(np.argmax(np.abs(np.median(np.stack(tracker.shifts[-50:]), axis=0))))
+            field = base_ctx.frame_shape[axis]
+            sightings = field / max(per_frame * counts["stride"], 1e-9)
+            if per_frame > 0 and sightings < plan.summary_min_frames:
+                alarm(t, "throughput", "stream", "sightings", sightings, f">= {plan.summary_min_frames}",
+                      f"processing behind: every {counts['stride']} frame(s) processed, so a droplet is seen about "
+                      f"{sightings:.1f} times while crossing the field; counts may be incomplete")  # fmt: skip
+            else:
+                clear("throughput", "stream", "sightings")
         # drift of size and frequency against the first well-populated window
         n = snap.get("droplets.n_droplets", 0) or 0
         if n >= cfg.drift_min_droplets:
@@ -574,7 +628,7 @@ def run_stream(
                 else:
                     clear("drift", "droplets", metric)
         if on_update is not None:
-            on_update(snap)
+            on_update({**snap, "alarms": [dict(r) for r in alarms]})  # alarms so far, for live displays
 
     final_update = False
     t_stream = time.perf_counter()
@@ -586,7 +640,7 @@ def run_stream(
         nonlocal processed, last_index, next_update
         for fr, table in zip(batch, tables):
             link(fr.index, table)
-            if timed and source.speed is not None:  # unpaced, the wait is only queueing
+            if timed and source.live:  # unpaced, the wait is only queueing
                 latencies.append(time.monotonic() - fr.due)
             processed += 1
             last_index = fr.index
@@ -626,6 +680,7 @@ def run_stream(
             advance(buffer, _start(buffer, backgrounds, tracker, process), timed=False)
     finally:
         stop.set()
+        source.request_stop()
         producer.join(timeout=5)
         pool.shutdown(wait=True)
     if errors:
@@ -660,6 +715,9 @@ def run_stream(
     rolling_df.to_csv(out_dir / "stream" / "rolling.csv", index=False, float_format="%.6g", lineterminator="\n")
     alarms_df.to_csv(out_dir / "stream" / "alarms.csv", index=False, lineterminator="\n")
 
+    if not known and sampled:
+        chosen = np.unique(np.linspace(0, len(sampled) - 1, min(len(sampled), rv.n_frames)).round().astype(int))
+        review_frames = {sampled[i][0]: sampled[i][1] for i in chosen}
     review_files = []
     if review_frames:
         (out_dir / "review").mkdir()
@@ -710,7 +768,7 @@ def run_stream(
         "note": "replay timing excludes camera readout and transfer; it is the software's speed, not end-to-end latency",
     }
     per_file, result_digest = prov.digest_files(files)
-    input_record: dict[str, Any] = volume.describe()
+    input_record: dict[str, Any] = source.volume.describe()  # a watched folder knows its size only now
     # frames_used is the span covered (as in batch runs); thinned-out frames inside it are in "stream"
     input_record.update({"channel": resolved.input.channel, "channels": dict(resolved.input.channels), "z": resolved.input.z,
                          "frames_used": last_index + 1, "frames_processed": processed})  # fmt: skip

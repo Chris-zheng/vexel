@@ -92,3 +92,56 @@ def read_ome_zarr(path: str | Path, *, level: int = 0) -> SpatialVolume:
         source=str(path),
         metadata={"reader": "ome-zarr", "level": level, "n_levels": len(ms["datasets"])},
     )
+
+
+class OmeZarrAppender:
+    """An OME-Zarr image (single resolution, TCZYX) that grows by one time point per call,
+    for acquisitions written as they arrive. Readable with :func:`read_ome_zarr` at any
+    time; the time axis is resized on every append."""
+
+    def __init__(
+        self,
+        path: str | Path,
+        frame_shape: tuple[int, int],
+        dtype: str | object,
+        n_channels: int = 1,
+        *,
+        spacing: dict[str, float] | None = None,
+        space_unit: str = "px",
+        time_unit: str = "frame",
+        channel_names: list[str] | None = None,
+        source: str | None = None,
+    ) -> None:
+        self.path = Path(path)
+        sp = {"t": 1.0, "z": 1.0, "y": 1.0, "x": 1.0, **(spacing or {})}
+        root = zarr.open_group(str(self.path), mode="w-", zarr_format=2)
+        y, x = frame_shape
+        self._array = root.create_array(name="0", shape=(0, n_channels, 1, y, x), chunks=(1, 1, 1, *_chunks_for((1, 1, 1, y, x))[3:]),
+                                        dtype=dtype)  # fmt: skip
+
+        def axis(name: str) -> dict:
+            if name == "c":
+                return {"name": "c", "type": "channel"}
+            unit = _UNIT_NAMES.get(time_unit if name == "t" else space_unit)
+            out = {"name": name, "type": "time" if name == "t" else "space"}
+            if unit:
+                out["unit"] = unit
+            return out
+
+        scale = [sp["t"], 1.0, sp["z"], sp["y"], sp["x"]]
+        root.attrs["multiscales"] = [
+            {"version": _NGFF_VERSION, "name": self.path.stem, "axes": [axis(a) for a in AXES.lower()],
+             "datasets": [{"path": "0", "coordinateTransformations": [{"type": "scale", "scale": scale}]}]}
+        ]  # fmt: skip
+        root.attrs["vexel"] = {"space_unit": space_unit, "time_unit": time_unit, "channel_names": channel_names, "source": source}
+        self.n_frames = 0
+
+    def append(self, channels: list[object]) -> None:
+        """Add one time point; ``channels`` holds one 2-D array per channel."""
+        import numpy as np
+
+        stack = np.stack([np.asarray(c) for c in channels])[:, None]  # (C, 1, Y, X)
+        t = self.n_frames
+        self._array.resize((t + 1, *self._array.shape[1:]))
+        self._array[t] = stack
+        self.n_frames = t + 1

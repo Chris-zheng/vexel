@@ -242,3 +242,82 @@ def test_worker_and_thread_are_released_by_qt(window, droplet_dataset):
     # nothing left behind: no parked worker or thread objects under the window
     assert not window.findChildren(RunWorker) and not window.findChildren(QThread)
     assert window._worker is None and window._thread is None
+
+
+# -- live dashboard -------------------------------------------------------------------------
+
+
+@pytest.fixture
+def live(app):
+    from vexel.ui.live import LiveWindow
+
+    w = LiveWindow()
+    w.warnings = []
+    w.warn = lambda title, text: w.warnings.append((title, text))
+    yield w
+    _dispose(w)
+
+
+def _speed_index(window, speed) -> int:
+    return next(i for i in range(window.speed_combo.count()) if window.speed_combo.itemData(i) == speed)
+
+
+def test_live_replay_fills_the_dashboard(live, droplet_dataset):
+    assert not live.start_btn.isEnabled()
+    assert live.set_replay(droplet_dataset / "droplets.ome.tif")
+    assert live.pixel_edit.text() == "2" and live.interval_edit.text() == "1"
+    live.speed_combo.setCurrentIndex(_speed_index(live, None))
+    assert live.start()
+    wait_until_idle(live)
+    assert live.warnings == []
+    assert live.snapshots and live.snapshots[-1]["final"]
+    assert live.card_n.value.text() == str(int(live.snapshots[-1]["droplets.n_droplets"]))
+    assert live.card_d.value.text().endswith("µm") and "帧/秒" in live.card_fps.value.text()
+    assert live.chart_d.x.size == len(live.snapshots) and live.chart_f.x.size > 0
+    assert live.frame_view.pixmap() is not None and not live.frame_view.pixmap().isNull()
+    p = json.loads((live.run_dir / "provenance.json").read_text())
+    assert p["mode"] == "stream" and live.run_dir.parent.name == "droplets_vexel"
+    assert live.report_btn.isVisibleTo(live)
+
+
+def test_live_watch_runs_a_final_pass(live, tmp_path):
+    import tifffile
+
+    from vexel.synthetic.droplets import DropletSynthConfig, generate
+
+    folder = tmp_path / "acq"
+    folder.mkdir()
+    video, _, _ = generate(DropletSynthConfig(n_frames=150, seed=3))
+    for i, f in enumerate(video):
+        tifffile.imwrite(folder / f"img_{i}.tif", f)
+    (folder / "vexel.json").write_text(json.dumps({"pixel_size": 2.0, "frame_interval": 0.001}))
+    assert live.set_watch(folder) and not live.speed_combo.isEnabled()
+    live.idle_edit.setText("0.5")
+    assert live.start()
+    wait_until_idle(live)
+    assert live.warnings == []
+    assert "全量分析" in live.status.text()
+    online = json.loads((live.run_dir / "summary.json").read_text())["droplets.summary"]["n_droplets"]
+    final = json.loads((live.run_dir / "final" / "summary.json").read_text())["droplets.summary"]["n_droplets"]
+    assert online == final > 5
+    assert (live.run_dir / "frames.zarr").is_dir()
+
+
+def test_live_stop_keeps_partial_results(live, droplet_dataset):
+    live.set_replay(droplet_dataset / "droplets.ome.tif")
+    live.speed_combo.setCurrentIndex(_speed_index(live, 0.02))  # 20 frames/s: 10 s for the whole video
+    assert live.start()
+    loop = QEventLoop()
+    QTimer.singleShot(3500, loop.quit)
+    loop.exec()
+    live.stop()
+    wait_until_idle(live)
+    p = json.loads((live.run_dir / "provenance.json").read_text())
+    assert p["status"] == "stopped" and p["stream"]["frames_processed"] < 200
+    assert live.status.text().startswith("已停止")
+
+
+def test_main_window_opens_the_dashboard(window):
+    window.open_live()
+    assert window.live_window.isVisible()
+    window.live_window.close()

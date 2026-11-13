@@ -10,19 +10,44 @@ speed, not end-to-end latency.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
-from typing import Iterator
+from typing import Callable, Iterator, Protocol
 
 import numpy as np
 
 from vexel.core.volume import SpatialVolume
 
 
-@dataclass
 class Frame:
-    index: int  # position in the acquisition (gaps mean frames were dropped)
-    images: dict[str, np.ndarray]  # value reference ("source", "source.fluo", ...) -> 2-D frame
-    due: float  # time.monotonic() at which the frame became available
+    """One delivered frame. ``images`` maps value references ("source", "source.fluo", ...)
+    to 2-D arrays; a source may pass a loader instead, so frames the executor skips when
+    it is behind are never read."""
+
+    def __init__(self, index: int, images: dict[str, np.ndarray] | None, due: float, loader: Callable[[], dict[str, np.ndarray]] | None = None) -> None:
+        self.index = index  # position in the acquisition (gaps mean frames were skipped)
+        self.due = due  # time.monotonic() at which the frame became available
+        self._images = images
+        self._loader = loader
+
+    @property
+    def images(self) -> dict[str, np.ndarray]:
+        if self._images is None:
+            self._images = self._loader()
+        return self._images
+
+
+class StreamSource(Protocol):
+    """What the stream executor consumes."""
+
+    volume: SpatialVolume  # calibration and description of the input
+    n_frames: int | None  # None while the acquisition is open-ended
+    frame_interval_s: float | None
+    live: bool  # frames arrive in real time: thin them when behind, report latency
+
+    def describe(self) -> dict: ...
+
+    def request_stop(self) -> None: ...
+
+    def __iter__(self) -> Iterator[Frame]: ...
 
 
 class ReplaySource:
@@ -53,6 +78,13 @@ class ReplaySource:
         self.frame_interval_s = frame_interval_s
         self.speed = speed
 
+    @property
+    def live(self) -> bool:
+        return self.speed is not None
+
+    def request_stop(self) -> None:
+        """Nothing to release: iteration ends when the executor stops pulling."""
+
     def describe(self) -> dict:
         return {
             "kind": "replay",
@@ -72,5 +104,4 @@ class ReplaySource:
                     time.sleep(wait)
             else:
                 due = time.monotonic()
-            images = {ref: np.asarray(lazy[t]) for ref, lazy in self._lazy.items()}
-            yield Frame(t, images, due)
+            yield Frame(t, None, due, loader=lambda t=t: {ref: np.asarray(lazy[t]) for ref, lazy in self._lazy.items()})
