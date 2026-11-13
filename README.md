@@ -5,8 +5,16 @@
 
 ## 快速开始
 
+桌面界面：
+
 ```bash
 uv sync
+uv run vexel gui
+```
+
+命令行：
+
+```bash
 uv run vexel synth data/demo                       # 合成液滴视频 + 精确真值
 uv run vexel run data/demo/droplets.ome.tif -r droplet_basic -o runs/demo
 uv run vexel validate runs/demo --truth data/demo/truth
@@ -29,6 +37,7 @@ uv run vexel run   my_video.avi -r my_recipe.json --set seg.min_area=200
 
 | 命令 | 作用 |
 | :--- | :--- |
+| `vexel gui` | 打开桌面界面 |
 | `vexel run` | 在录好的数据上执行配方 |
 | `vexel info` | 只读元数据，不读像素 |
 | `vexel ops` | 列出算子：作用范围、输入输出类型、参数 |
@@ -64,6 +73,7 @@ src/vexel/
 ├── packs/     领域分析包；droplet/ 含汇总算子、内置配方、真值校验
 ├── engine/    配方、批式执行器、质控、溯源
 ├── synthetic/ 合成样本生成器
+├── ui/        桌面界面（PySide6，经 qtpy），只调用引擎
 └── cli.py
 ```
 

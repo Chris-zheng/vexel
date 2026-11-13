@@ -39,7 +39,10 @@ from vexel.ops.registry import Context, Kind, OpResult, OpSpec, Scope, get_op
 _CHUNK_BYTES = 16 * 1024**2
 _RUN_MARKERS = ("provenance.json", "recipe.json")
 _ARRAY_KINDS = (Kind.IMAGE, Kind.LABELS)
+_MAX_BLOCK_FRAMES = 128  # keeps progress reporting and cancellation responsive
 Progress = Callable[[str], None]
+# (step_id, step_number starting at 1, n_steps, done, total). Raising from it aborts the run.
+Tick = Callable[[str, int, int, int, int], None]
 
 
 @dataclass
@@ -97,7 +100,9 @@ class _ArrayWriter:
 
 def _block_frames(frame_shape: tuple[int, ...], n_arrays: int) -> int:
     frame_nbytes = int(np.prod(frame_shape)) * 4  # sized for float32 working copies
-    return plan_block_frames(frame_nbytes, n_arrays, multiple=_ArrayWriter.chunk_frames(frame_nbytes))
+    multiple = _ArrayWriter.chunk_frames(frame_nbytes)
+    frames = plan_block_frames(frame_nbytes, n_arrays, multiple=multiple)
+    return min(frames, max(multiple, (_MAX_BLOCK_FRAMES // multiple) * multiple))
 
 
 def _check_outputs(spec: OpSpec, result: OpResult) -> None:
@@ -108,7 +113,14 @@ def _check_outputs(spec: OpSpec, result: OpResult) -> None:
 
 
 def _run_frame_step(
-    spec: OpSpec, params: Any, inputs: dict[str, da.Array], ctx: Context, scratch: Path, step_id: str, pool: ThreadPoolExecutor
+    spec: OpSpec,
+    params: Any,
+    inputs: dict[str, da.Array],
+    ctx: Context,
+    scratch: Path,
+    step_id: str,
+    pool: ThreadPoolExecutor,
+    tick: Callable[[int, int], None],
 ) -> tuple[dict[str, Any], dict[str, float]]:
     names = list(inputs)
     n = ctx.n_frames
@@ -144,6 +156,7 @@ def _run_frame_step(
                     empty.insert(0, "frame", pd.Series(dtype=np.int64))
                     parts.append(empty)
         qc_rows.extend(r.qc for r in results)
+        tick(stop, n)
 
     outputs: dict[str, Any] = {o: w.lazy() for o, w in writers.items()}
     for o, parts in table_parts.items():
@@ -153,7 +166,13 @@ def _run_frame_step(
 
 
 def _run_window_step(
-    spec: OpSpec, params: Any, inputs: dict[str, Any], ctx: Context, scratch: Path, step_id: str
+    spec: OpSpec,
+    params: Any,
+    inputs: dict[str, Any],
+    ctx: Context,
+    scratch: Path,
+    step_id: str,
+    tick: Callable[[int, int], None],
 ) -> tuple[dict[str, Any], dict[str, float]]:
     result = spec.fn(params, ctx, **inputs)
     _check_outputs(spec, result)
@@ -168,6 +187,7 @@ def _run_window_step(
             block = _block_frames(lazy.shape[1:], 4)
             for start in range(0, ctx.n_frames, block):
                 writer.write(start, np.asarray(lazy[start : start + block].compute()))
+                tick(min(ctx.n_frames, start + block), ctx.n_frames)
             outputs[o] = writer.lazy()
         else:
             outputs[o] = value
@@ -206,6 +226,7 @@ def run_recipe(
     workers: int | None = None,
     hash_input: bool = True,
     progress: Progress | None = None,
+    tick: Tick | None = None,
 ) -> RunResult:
     """Resolve and execute ``recipe`` on ``volume``; write tables, summary, review overlays
     and provenance into ``out_dir``."""
@@ -254,10 +275,17 @@ def run_recipe(
             params = spec.params.model_validate(step.params)
             inputs = {name: values[ref] for name, ref in step.inputs.items()}
             ts = time.perf_counter()
+
+            def step_tick(done: int, total: int, _id: str = step.id, _i: int = i) -> None:
+                if tick is not None:
+                    tick(_id, _i, len(resolved.steps), done, total)
+
+            step_tick(0, 1)
             if spec.scope is Scope.FRAME:
-                outputs, metrics = _run_frame_step(spec, params, inputs, ctx, scratch, step.id, pool)
+                outputs, metrics = _run_frame_step(spec, params, inputs, ctx, scratch, step.id, pool, step_tick)
             else:
-                outputs, metrics = _run_window_step(spec, params, inputs, ctx, scratch, step.id)
+                outputs, metrics = _run_window_step(spec, params, inputs, ctx, scratch, step.id, step_tick)
+            step_tick(1, 1)
             for name, value in outputs.items():
                 values[f"{step.id}.{name}"] = value
             failed = evaluate(step.id, metrics, step.qc)

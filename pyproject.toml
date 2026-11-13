@@ -15,10 +15,15 @@ dependencies = [
     "pandas>=2.2",
     "pydantic>=2.8",
     "laptrack>=0.16",
+    "qtpy>=2.4,<3",
+    "pyside6-essentials~=6.12.0",
 ]
 
 [project.scripts]
 vexel = "vexel.cli:main"
+
+[project.gui-scripts]
+vexel-gui = "vexel.ui.app:main"
 
 [dependency-groups]
 dev = ["pytest>=8"]

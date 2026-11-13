@@ -206,12 +206,22 @@ def cmd_licenses(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_gui(args: argparse.Namespace) -> int:
+    from vexel.ui.app import main as gui_main
+
+    return gui_main([args.input] if args.input else [])
+
+
 # -- parser -----------------------------------------------------------------------------
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vexel", description="Vexel: recipe-driven, reproducible scientific image analysis.")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("gui", help="open the desktop interface")
+    p.add_argument("input", nargs="?", help="data to open on start")
+    p.set_defaults(func=cmd_gui)
 
     p = sub.add_parser("run", help="run a recipe on a recorded acquisition")
     p.add_argument("input", help="TIFF / OME-TIFF, video, image-sequence folder, .npy or OME-Zarr")
