@@ -563,7 +563,7 @@ class MainWindow(QMainWindow):
             max_frames=PREVIEW_FRAMES if preview else None,
             hash_input=not preview,
         )
-        self._thread = QThread()  # owned by Python; released in _stop_thread
+        self._thread = QThread()  # released in _stop_thread
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._on_progress)
@@ -584,12 +584,20 @@ class MainWindow(QMainWindow):
             self.cancel_btn.setEnabled(False)
 
     def _stop_thread(self) -> None:
-        if self._thread is not None:
-            self._thread.quit()
-            self._thread.wait()
-        # The worker's thread has finished, so both objects are released from here.
+        # Called from the worker's own signals: neither object may be destroyed while that
+        # signal is still being delivered, so both are handed to Qt (parented to the window,
+        # which also ends Python's ownership) and deleted by the event loop afterwards. The
+        # worker moved itself back to this thread when it finished.
+        thread, worker = self._thread, self._worker
         self._thread = None
         self._worker = None
+        if thread is not None:
+            thread.quit()
+            thread.wait()
+        for obj in (worker, thread):
+            if obj is not None and obj.thread() is self.thread():
+                obj.setParent(self)
+                obj.deleteLater()
         self._set_running(False)
 
     def _on_progress(self, percent: int, message: str) -> None:

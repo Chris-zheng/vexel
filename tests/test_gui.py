@@ -10,7 +10,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("qtpy")
 
-from qtpy.QtCore import QCoreApplication, QEventLoop, QTimer  # noqa: E402
+from qtpy.QtCore import QCoreApplication, QEvent, QEventLoop, QTimer  # noqa: E402
 from qtpy.QtWidgets import QApplication  # noqa: E402
 
 from vexel.engine import Recipe  # noqa: E402
@@ -19,7 +19,21 @@ from vexel.engine import Recipe  # noqa: E402
 @pytest.fixture(scope="module")
 def app():
     QCoreApplication.setOrganizationName("VexelTests")  # keep test settings apart from the user's
-    return QApplication.instance() or QApplication([])
+    application = QApplication.instance() or QApplication([])
+    yield application
+    _flush_deletes()
+
+
+def _flush_deletes() -> None:
+    """Run pending deleteLater calls now, so no widget outlives the test that made it
+    (otherwise it is destroyed during interpreter shutdown, in no particular order)."""
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
+def _dispose(window) -> None:
+    window.close()
+    window.deleteLater()
+    _flush_deletes()
 
 
 @pytest.fixture
@@ -30,7 +44,7 @@ def window(app):
     w.warnings = []
     w.warn = lambda title, text: w.warnings.append((title, text))  # no modal dialogs in tests
     yield w
-    w.close()
+    _dispose(w)
 
 
 def wait_until_idle(window, timeout_s: float = 180) -> None:
@@ -38,9 +52,14 @@ def wait_until_idle(window, timeout_s: float = 180) -> None:
     poll = QTimer()
     poll.timeout.connect(lambda: None if window.is_running() else loop.quit())
     poll.start(20)
-    QTimer.singleShot(int(timeout_s * 1000), loop.quit)
+    deadline = QTimer()  # an owned timer, stopped below: nothing stays queued after the test
+    deadline.setSingleShot(True)
+    deadline.timeout.connect(loop.quit)
+    deadline.start(int(timeout_s * 1000))
     loop.exec()
     poll.stop()
+    deadline.stop()
+    _flush_deletes()  # worker and thread are released with deleteLater
     assert not window.is_running(), "run did not finish in time"
 
 
@@ -114,7 +133,7 @@ def test_preview_is_partial_temporary_and_cleaned_up(app, droplet_dataset):
     assert "sha256" not in provenance["input"]
     assert "预览" in w.notes.text() and w.result_title.text() == "预览结果"
     assert "次/帧" in w.card_f.value.text()
-    w.close()
+    _dispose(w)
     assert not run_dir.exists()
 
 
@@ -210,3 +229,16 @@ def test_channel_height_override(window, droplet_dataset):
     window.height_edit.setText("-3")
     assert not window.start() and window.warnings[-1][0] == "标定有误"
     window.height_edit.clear()
+
+
+def test_worker_and_thread_are_released_by_qt(window, droplet_dataset):
+    from qtpy.QtCore import QThread
+
+    from vexel.ui.worker import RunWorker
+
+    window.open_path(droplet_dataset / "droplets.ome.tif")
+    assert window.start(preview=True)
+    wait_until_idle(window)
+    # nothing left behind: no parked worker or thread objects under the window
+    assert not window.findChildren(RunWorker) and not window.findChildren(QThread)
+    assert window._worker is None and window._thread is None

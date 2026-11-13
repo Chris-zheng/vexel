@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from qtpy.QtCore import QObject, Signal
+from qtpy.QtCore import QCoreApplication, QObject, Signal
 
 from vexel.core.volume import SpatialVolume
 from vexel.engine import QCGateError, Recipe, run_recipe
@@ -78,6 +78,15 @@ class RunWorker(QObject):
         self._cancel = True
 
     def run(self) -> None:
+        signal, args = self._run()
+        # Hand the object back to the UI thread before reporting, so that it is released
+        # there (and not from a thread that no longer runs an event loop).
+        app = QCoreApplication.instance()
+        if app is not None:
+            self.moveToThread(app.thread())
+        signal.emit(*args)
+
+    def _run(self) -> tuple[Signal, tuple]:
         try:
             volume = open_volume(self.path)
             apply_calibration(volume, self.pixel_size_um, self.frame_interval_s)
@@ -92,14 +101,13 @@ class RunWorker(QObject):
             )
         except _Cancelled:
             shutil.rmtree(self.out_dir, ignore_errors=True)
-            self.cancelled.emit()
+            return self.cancelled, ()
         except QCGateError as e:
-            self.failed.emit(f"被质控规则中止：{e}", str(self.out_dir))
+            return self.failed, (f"被质控规则中止：{e}", str(self.out_dir))
         except Exception as e:  # surfaced to the user, never swallowed
             usable = (self.out_dir / "summary.json").exists()
-            self.failed.emit(f"{type(e).__name__}: {e}", str(self.out_dir) if usable else "")
-        else:
-            self.finished.emit(str(self.out_dir))
+            return self.failed, (f"{type(e).__name__}: {e}", str(self.out_dir) if usable else "")
+        return self.finished, (str(self.out_dir),)
 
     def _say(self, message: str) -> None:
         if self._cancel:
