@@ -160,7 +160,7 @@ def test_run_directory_and_provenance(droplet_dataset, droplet_run):
     assert p["input"]["space_unit"] == "um"
     assert {"numpy", "scikit-image", "laptrack"} <= set(p["environment"]["packages"])
     assert [s["id"] for s in p["steps"]] == ["bg", "seg", "measure", "track", "droplets", "flags"]
-    assert p["steps"][1]["scope"] == "frame" and "threshold.mean" in p["steps"][1]["qc"]
+    assert p["steps"][1]["scope"] == "frame" and "radius_median_px.mean" in p["steps"][1]["qc"]
     assert set(p["outputs"]) == {
         "summary.json", "tables/measure.table.csv", "tables/track.table.csv", "tables/droplets.droplets.csv", "tables/flags.table.csv"
     }  # fmt: skip
@@ -226,3 +226,95 @@ def test_output_directory_is_protected(tmp_path):
     with pytest.raises(FileExistsError):
         run_recipe(recipe, blank, tmp_path / "r")
     run_recipe(recipe, blank, tmp_path / "r", overwrite=True)
+
+
+# -- real-looking droplets: rings, bright centres, trains ----------------------------------
+
+
+def _ring_droplets(centres, r=15.0, shape=(80, 240), bright_centre=False, seed=0):
+    """Droplets drawn as a thin dark outline on a flat background, optionally with a bright
+    core, plus a static wall line; returns (frame, background)."""
+    yy, xx = np.mgrid[: shape[0], : shape[1]].astype(float)
+    bg = np.full(shape, 120.0)
+    bg[8:10, :] = 40.0  # channel wall: static, must be ignored
+    img = bg.copy()
+    for cy, cx in centres:
+        d = np.hypot(yy - cy, xx - cx)
+        img -= 60.0 * np.exp(-0.5 * ((d - (r - 1.5)) / 1.0) ** 2)
+        if bright_centre:
+            img += 30.0 * np.exp(-0.5 * (d / (0.4 * r)) ** 2)
+    img += np.random.default_rng(seed).normal(0, 2.0, shape)
+    return img.astype(np.float32), bg.astype(np.float32)
+
+
+@pytest.mark.parametrize("bright_centre", [False, True])
+def test_circles_find_ring_droplets_a_threshold_cannot_fill(bright_centre):
+    centres = [(40.0, 40.5), (40.0, 71.0), (41.0, 101.5), (39.5, 160.0)]  # three touching, one apart
+    img, bg = _ring_droplets(centres, bright_centre=bright_centre)
+    op = get_op("segment.circles")
+    res = op.fn(op.params(), _ctx(img.shape), image=img, contrast=np.abs(img - bg))
+    labels = res.outputs["labels"]
+    assert labels.max() == 4
+    for k, (cy, cx) in enumerate(sorted(centres, key=lambda c: c[1]), 1):
+        ys, xs = np.nonzero(labels == labels[int(cy), int(cx)])
+        assert abs(ys.mean() - cy) < 0.7 and abs(xs.mean() - cx) < 0.7
+        assert np.sqrt(len(ys) / np.pi) == pytest.approx(15.0, abs=1.2)
+    assert res.qc["radius_median_px"] == pytest.approx(15.0, abs=1.0)
+
+
+def test_circles_ignore_static_scene_and_noise():
+    img, bg = _ring_droplets([])
+    op = get_op("segment.circles")
+    res = op.fn(op.params(), _ctx(img.shape), image=img, contrast=np.abs(img - bg))
+    assert res.outputs["labels"].max() == 0
+
+
+def test_flow_estimate_resolves_a_dense_train():
+    # Objects 35 px apart moving 16-19 px per frame: a neighbour's next position is about
+    # as close as the object's own, so plain nearest-neighbour linking swaps identities.
+    rng = np.random.default_rng(1)
+    rows, offset = [], 0.0
+    for frame in range(30):
+        for k in range(12):
+            rows.append({"frame": frame, "centroid_y_px": 50.0 + rng.normal(0, 0.3), "centroid_x_px": offset + 35.0 * k})
+        offset += rng.uniform(16.0, 19.0)
+    table = pd.DataFrame(rows)
+    table["true_id"] = np.tile(np.arange(12), 30)
+    op = get_op("track.link")
+    res = op.fn(op.params(max_distance_px=30, estimate_shift=True), _ctx(n=30), table=table)
+    out = res.outputs["table"]
+    assert out.groupby("track_id")["true_id"].nunique().eq(1).all()
+    assert out["track_id"].nunique() == 12
+    assert res.qc["flow_dx_px"] == pytest.approx(17.5, abs=1.0)
+
+
+def test_cells_counted_against_the_droplets_own_outline():
+    # A droplet with a ring thicker on one side, shading, one cell near the edge and one
+    # in the centre; a second droplet is empty. Faint shading must not count as cells.
+    yy, xx = np.mgrid[:80, :160].astype(float)
+    img = np.full((80, 160), 120.0)
+    labels = np.zeros((80, 160), np.int32)
+    for k, cx in enumerate((40.0, 110.0), 1):
+        d = np.hypot(yy - 40, xx - cx)
+        side = 1.0 + 0.8 * np.clip((xx - cx) / 15.0, 0, 1)  # thicker on the right
+        img -= 70.0 * np.exp(-0.5 * ((d - 13.0) / side) ** 2)
+        img -= 6.0 * np.clip((yy - 40) / 15.0, 0, 1) * (d < 13)  # shading towards the bottom
+        labels[d <= 15.0] = k
+    for cy, cx in ((40, 40), (40, 30)):  # centre and near the left edge of droplet 1
+        img -= 50.0 * np.exp(-0.5 * (np.hypot(yy - cy, xx - cx) / 1.5) ** 2)
+    img += np.random.default_rng(3).normal(0, 1.0, img.shape)
+    op = get_op("droplet.inclusions")
+    params = op.params(cell_diameter_px=5.0, edge_margin_px=3, background="radial", relative_floor=0.3)
+    counts = op.fn(params, _ctx(img.shape), image=img.astype(np.float32), labels=labels).outputs["table"]
+    assert counts["n_inclusions"].tolist() == [2.0, 0.0]
+
+
+def test_cells_in_droplets_cut_by_the_border_are_not_counted():
+    labels = np.zeros((40, 60), np.int32)
+    yy, xx = np.mgrid[:40, :60]
+    labels[np.hypot(yy - 20, xx - 5) <= 12] = 1
+    labels[np.hypot(yy - 20, xx - 35) <= 12] = 2
+    img = np.full(labels.shape, 100.0, np.float32)
+    op = get_op("droplet.inclusions")
+    out = op.fn(op.params(edge_margin_px=2), _ctx(labels.shape), image=img, labels=labels).outputs["table"]
+    assert np.isnan(out["n_inclusions"].iloc[0]) and out["n_inclusions"].iloc[1] == 0

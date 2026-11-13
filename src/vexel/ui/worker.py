@@ -17,6 +17,7 @@ STEP_LABELS = {
     "preprocess.gaussian": "平滑",
     "preprocess.median": "去噪",
     "segment.threshold_watershed": "分割液滴",
+    "segment.circles": "识别液滴",
     "measure.regionprops": "测量",
     "track.link": "追踪",
     "droplet.summary": "统计",

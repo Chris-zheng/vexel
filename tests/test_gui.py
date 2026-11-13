@@ -48,8 +48,11 @@ def test_default_settings_reproduce_the_builtin_recipe(window):
     assert window.overrides() == {}
     window.flow_combo.setCurrentIndex(1)
     window.spins["droplets.count_line"][0].setValue(40)
-    window.spins["seg.min_area"][0].setValue(150)
-    assert window.overrides() == {"droplets.flow_axis": "y", "droplets.count_line": 0.4, "seg.min_area": 150}
+    window.spins["seg.min_score"][0].setValue(0.5)
+    window.spins["seg.min_diameter_px"][0].setValue(20)
+    assert window.overrides() == {
+        "droplets.flow_axis": "y", "droplets.count_line": 0.4, "seg.min_score": 0.5, "seg.min_diameter_px": 20.0
+    }  # fmt: skip
     window.reset_advanced()
     window.flow_combo.setCurrentIndex(0)
     assert window.overrides() == {}

@@ -243,6 +243,119 @@ class InclusionParams(Params):
     noise_factor: float = Field(6.0, gt=0, description="automatic threshold, in multiples of the smoothed noise level")
     edge_margin_px: int = Field(6, ge=0, description="ignore this many pixels inside the droplet edge, where the dark outline is")
     min_separation_px: float | None = Field(None, gt=0, description="minimum distance between two cells; default 0.6 x cell diameter")
+    relative_floor: float = Field(
+        0.0,
+        ge=0,
+        lt=1,
+        description="when a frame has clear cells (contrast >= 2x threshold), also require this fraction of "
+        "their median contrast; removes faint shading spots in clean images. 0 disables",
+    )
+    skip_border: bool = Field(
+        True, description="do not count cells in droplets cut by the image border (reported as NaN for that frame)"
+    )
+    background: Literal["median", "radial"] = Field(
+        "median",
+        description="median: one interior level per droplet; radial: the droplet's own median profile by distance "
+        "from its centre, which removes a rotationally symmetric outline (dark ring, bright rim) so cells "
+        "near the edge can be counted with a small edge margin",
+    )
+
+
+def _radial_model(
+    smooth: np.ndarray, raw: np.ndarray, labels: np.ndarray, n: int, inner_fraction: float = 0.6
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Per-droplet background following the droplet's own outline.
+
+    Inside ``inner_fraction`` of its radius a droplet has one level (the median of those
+    pixels, which cells cannot dominate); further out, each whole-pixel distance from the
+    centroid gets its own median, which follows the rim. Returns the model for the
+    smoothed and the raw image (0 outside droplets), each pixel's distance from its
+    droplet's centroid, and the centre level per droplet."""
+    level_s = np.zeros(labels.shape, dtype=np.float32)
+    level_r = np.zeros(labels.shape, dtype=np.float32)
+    rad_img = np.zeros(labels.shape, dtype=np.float32)
+    centre = np.zeros(n + 1, dtype=np.float64)
+    mask = labels > 0
+    if not mask.any():
+        return level_s, level_r, rad_img, centre
+    yy, xx = np.nonzero(mask)
+    lab = labels[yy, xx]
+    count = np.bincount(lab, minlength=n + 1).astype(np.float64)
+    cy = np.bincount(lab, weights=yy, minlength=n + 1) / np.maximum(count, 1)
+    cx = np.bincount(lab, weights=xx, minlength=n + 1) / np.maximum(count, 1)
+    dist = np.hypot(yy - cy[lab], xx - cx[lab])
+    r_max = np.zeros(n + 1)
+    np.maximum.at(r_max, lab, dist)
+    core = dist < inner_fraction * r_max[lab]
+    ring = np.where(core, -1, np.rint(dist)).astype(np.int64)
+    table = pd.DataFrame({"key": lab * 100_000 + ring, "s": smooth[yy, xx], "r": raw[yy, xx]})
+    grouped = table.groupby("key")
+    level_s[yy, xx] = grouped["s"].transform("median").to_numpy(np.float32)
+    level_r[yy, xx] = grouped["r"].transform("median").to_numpy(np.float32)
+    rad_img[yy, xx] = dist
+    centre_keys = lab[core]
+    if centre_keys.size:
+        centre[np.unique(centre_keys)] = pd.Series(smooth[yy, xx][core]).groupby(centre_keys).median().to_numpy()
+    return level_s, level_r, rad_img, centre
+
+
+def _rim_limit(
+    smooth: np.ndarray,
+    rad: np.ndarray,
+    labels: np.ndarray,
+    centre: np.ndarray,
+    threshold: float,
+    clearance: float,
+    n_sectors: int = 8,
+    inner_fraction: float = 0.6,
+) -> np.ndarray:
+    """Pixels inside each droplet's outline ring, found separately in angular sectors
+    because rings are often thicker on one side (illumination, focus).
+
+    In each sector the median level at each whole-pixel radius is compared with the
+    droplet's centre level; the ring is the band that, walking inward from the strongest
+    deviation in the outer part of the droplet, keeps deviating by more than
+    ``threshold`` and a third of that strongest deviation. A cell touching the ring is
+    left out with it; one separated from it by background is kept. Pixels within
+    ``clearance`` of the ring are left out too (smoothing spreads it inward)."""
+    inside = np.zeros(labels.shape, dtype=bool)
+    yy, xx = np.nonzero(labels > 0)
+    if yy.size == 0:
+        return inside
+    lab = labels[yy, xx]
+    n = centre.size - 1
+    count = np.bincount(lab, minlength=n + 1).astype(np.float64)
+    cy = np.bincount(lab, weights=yy, minlength=n + 1) / np.maximum(count, 1)
+    cx = np.bincount(lab, weights=xx, minlength=n + 1) / np.maximum(count, 1)
+    dist = rad[yy, xx]
+    r = np.rint(dist).astype(np.int64)
+    sector = ((np.arctan2(yy - cy[lab], xx - cx[lab]) + np.pi) / (2 * np.pi) * n_sectors).astype(np.int64) % n_sectors
+    r_top = int(r.max()) + 1
+    key = (lab * n_sectors + sector) * r_top + r
+    med = pd.Series(smooth[yy, xx]).groupby(key).median()
+    dev = np.full((n + 1) * n_sectors * r_top, np.nan)
+    dev[med.index.to_numpy()] = np.abs(med.to_numpy() - centre[med.index.to_numpy() // (n_sectors * r_top)])
+    dev = dev.reshape(n + 1, n_sectors, r_top)
+    r_max = np.zeros(n + 1)
+    np.maximum.at(r_max, lab, dist)
+    radii = np.arange(r_top)
+    outer = radii[None, :] >= inner_fraction * r_max[:, None]  # (n+1, r_top)
+    dev_outer = np.where(outer[:, None, :], dev, np.nan)
+    with np.errstate(invalid="ignore"):
+        peak = np.nanmax(np.where(np.isnan(dev_outer), -np.inf, dev_outer), axis=2)  # (n+1, sectors)
+    peak_r = np.argmax(np.where(np.isnan(dev_outer), -np.inf, dev_outer), axis=2)
+    dmax = np.max(np.where(np.isfinite(peak), peak, 0.0), axis=1)  # per droplet
+    cut = np.maximum(threshold, dmax / 3.0)[:, None]
+    limit = np.full((n + 1, n_sectors), np.inf)
+    ring = np.isfinite(peak) & (peak > cut)
+    above = np.nan_to_num(dev, nan=0.0) > cut[:, :, None]
+    for k, j in zip(*np.nonzero(ring)):
+        start = int(peak_r[k, j])
+        while start > 0 and above[k, j, start - 1]:
+            start -= 1
+        limit[k, j] = start
+    inside[yy, xx] = dist < limit[lab, sector] - clearance
+    return inside
 
 
 @register_op(
@@ -264,29 +377,44 @@ def inclusions(params: InclusionParams, ctx: Context, *, image: np.ndarray, labe
 
     # Interior: each droplet shrunk by edge_margin_px, measured from its own boundary so
     # that touching droplets are shrunk apart too.
-    inner = np.where(find_boundaries(labels, mode="inner"), 0, labels)
-    interior = np.where(ndi.distance_transform_edt(inner > 0) > params.edge_margin_px, labels, 0)
+    labels_in = labels
+    if params.skip_border:
+        edge = np.unique(np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]]))
+        labels_in = np.where(np.isin(labels, edge[edge > 0]), 0, labels)
+    inner = np.where(find_boundaries(labels_in, mode="inner"), 0, labels_in)
+    interior = np.where(ndi.distance_transform_edt(inner > 0) > params.edge_margin_px, labels_in, 0)
 
     img = image.astype(np.float32)
     # Smoothing at a quarter of the cell diameter suppresses pixel noise but, unlike the
     # blob-matched sigma (d / 2*sqrt(2)), still resolves two touching cells as two peaks.
-    smooth = ndi.gaussian_filter(img, params.cell_diameter_px / 4.0)  # = sigma below
+    sigma = params.cell_diameter_px / 4.0
+    smooth = ndi.gaussian_filter(img, sigma)
+    if params.background == "radial":
+        level, level_raw, rad, centre = _radial_model(smooth, img, labels_in, n)
+        residual_img = img - level_raw
+        body = labels_in > 0
+        noise_all = 1.4826 * float(np.median(np.abs(residual_img[body] - np.median(residual_img[body])))) if body.any() else 0.0
+        # leave out each droplet's own outline ring (its width varies with optics and focus)
+        interior = np.where(_rim_limit(smooth, rad, labels_in, centre, 4.0 * noise_all, 2.0 * sigma), interior, 0)
+    else:
+        present0 = np.bincount(interior.ravel(), minlength=n + 1)[1:] > 0
+        background = np.zeros(n + 1, dtype=np.float32)
+        if present0.any():
+            background[idx[present0]] = ndi.median(img, labels=interior, index=idx[present0])
+        level = background[interior]
+        residual_img = img - level
     present = np.bincount(interior.ravel(), minlength=n + 1)[1:] > 0
-    background = np.zeros(n + 1, dtype=np.float32)
-    if present.any():
-        background[idx[present]] = ndi.median(img, labels=interior, index=idx[present])
-    contrast = background[interior] - smooth if params.polarity == "dark" else smooth - background[interior]
+    inside = interior > 0
+    contrast = level - smooth if params.polarity == "dark" else smooth - level
     contrast[interior == 0] = 0.0
 
-    sigma = params.cell_diameter_px / 4.0
     if params.min_contrast is not None:
         threshold = params.min_contrast
     else:
         # Pixel noise from the median absolute deviation inside droplets (robust to the few
         # cell pixels), scaled to the noise left after Gaussian smoothing of white noise.
-        inside = interior > 0
         if inside.any():
-            residual = img[inside] - background[interior[inside]]
+            residual = residual_img[inside]
             noise = 1.4826 * float(np.median(np.abs(residual - np.median(residual))))
         else:
             noise = 0.0
@@ -300,6 +428,16 @@ def inclusions(params: InclusionParams, ctx: Context, *, image: np.ndarray, labe
         labels=interior,
         exclude_border=False,
     )
+    if params.relative_floor > 0 and len(peaks):
+        # Faint shading spots pass a noise-based threshold in clean images; when the frame
+        # has clear cells, require a fraction of their typical contrast.
+        heights = contrast[tuple(peaks.T)]
+        strong = heights[heights >= 2.0 * threshold]
+        if strong.size:
+            floor = params.relative_floor * float(np.median(strong))
+            if floor > threshold:
+                peaks = peaks[heights >= floor]
+                threshold = floor
     owner = interior[tuple(peaks.T)] if len(peaks) else np.empty(0, dtype=np.int64)
     counts = np.bincount(owner, minlength=n + 1)[1:]
     radius = max(1.0, params.cell_diameter_px / 2.0)

@@ -76,10 +76,9 @@ uv run vexel gui
 
 | 项 | 对应配方参数 | 什么时候调 |
 | :--- | :--- | :--- |
-| 最低对比度 | `seg.min_threshold` | 漏检时调低；空白处出现误检时调高 |
-| 平滑 | `seg.smooth_sigma` | 轮廓毛糙时调高；粒径偏大时调低 |
-| 最小面积 | `seg.min_area` | 杂质、噪点被当成液滴时调高 |
-| 粘连分离距离 | `seg.min_distance` | 一个液滴被切成几块时调高；相邻液滴连成一个时调低 |
+| 最小 / 最大液滴直径 | `seg.min_diameter_px` / `seg.max_diameter_px` | 默认“自动”，按每帧液滴的典型大小确定查找范围。小卫星液滴被当成液滴时调高最小值；大小差别很大的液滴混在一起时手动给出范围 |
+| 轮廓完整度 | `seg.min_score` | 圆周上至少有这一比例落在边缘上才算液滴（默认 0.35）。漏检时调低；凭空多出圆时调高 |
+| 最低对比度 | `seg.motion_threshold` | 扣除背景后低于该灰度差的地方不找液滴边缘（会按噪声自动抬高）。漏检时调低；空白处误检时调高 |
 | 最大帧间位移 | `track.max_distance_px` | 同一液滴被数成多个时调高；不同液滴被连成一条轨迹时调低 |
 | 计数线位置 | `droplets.count_line` | 计数线处有遮挡或流道结构时移开 |
 | 细胞直径 | `inclusions.cell_diameter_px` | 仅包裹计数。按实际细胞在图像中的像素直径填写；两个相邻细胞被数成一个时调小 |
@@ -396,7 +395,9 @@ runs/exp01/
 - D 明显大于 1：细胞聚集、成团或上样浓度随时间漂移。D 明显小于 1：排布比随机更规则（例如惯性有序包裹）。
 - `n_low_agreement` 不为 0 时，这些液滴的计数可能不准，先在复核图中核对，再看统计结论。
 
-**计数方法：** 每一帧里，每个液滴先向内收缩 `edge_margin_px` 个像素以避开深色轮廓；用液滴内部的中位灰度作为该液滴的背景；平滑后比背景暗（或亮）超过阈值的局部极值记为一个细胞。阈值默认自动：从液滴内部估计噪声水平，取平滑后噪声的 6 倍（`noise_factor`），因此 8 位和 16 位图像都适用。每个液滴最终取它完整出现在画面内的各帧计数的众数。
+**计数方法：** 被画面边缘截断的液滴不计。每一帧里，每个液滴以它自己的径向灰度剖面作背景（`background: radial`）：中心 60% 半径内取一个中位灰度，外圈逐个半径取中位数，这样液滴的暗环、亮边、透镜效应都被扣掉；再按 8 个扇区找出暗环从哪个半径开始（暗环常常一侧厚一侧薄），只在暗环以内数，另外离液滴边缘 `edge_margin_px` 个像素以内不计。平滑后比背景暗（或亮）超过阈值的局部极值记为一个细胞。阈值默认自动：从液滴内部估计噪声水平，取平滑后噪声的 6 倍（`noise_factor`），因此 8 位和 16 位图像都适用；一帧里有明显的细胞时，还要求达到它们中位对比度的 30%（`relative_floor`），用来排除干净图像里的浅色阴影。每个液滴最终取它完整出现在画面内的各帧计数的众数。
+
+在真实数据（WSCNet2 示例序列，134 个液滴，人工数细胞）上：空液滴全部判对，132 个确定的液滴中 10 个数错，全部是两三个细胞前后重叠、多数帧里看起来是一个而少数；λ 测得 1.49，人工 1.57。
 
 ### 5.6 荧光阴阳判读
 
@@ -511,7 +512,7 @@ uv run vexel recipes --show droplet_basic
 | 步骤 id | 算子 | 作用 |
 | :--- | :--- | :--- |
 | `bg` | `preprocess.static_background` | 用时间中值估计静态背景（流道壁、不均匀照明）并扣除 |
-| `seg` | `segment.threshold_watershed` | 阈值分割，填充环形轮廓，分开粘连目标 |
+| `seg` | `segment.circles` | 找圆形液滴：显示为细暗环、亮心或实心的液滴都能识别，相互接触的液滴分开 |
 | `measure` | `measure.regionprops` | 测量每个目标的位置、面积、粒径、圆度 |
 | `track` | `track.link` | 把逐帧检测连成轨迹 |
 | `droplets` | `droplet.summary` | 按计数线去重，输出每液滴表和汇总统计 |
@@ -545,7 +546,7 @@ uv run vexel recipes --show droplet_basic
     {
       "id": "seg",
       "op": "segment.threshold_watershed",
-      "inputs": {"image": "source"},
+      "inputs": {"image": "bg.image"},
       "params": {"min_area": 100},
       "qc": [{"metric": "n_objects.max", "min": 1, "on_fail": "warn"}]
     }
@@ -568,7 +569,7 @@ uv run vexel recipes --show droplet_basic
 临时修改用 `--set`：
 
 ```bash
-uv run vexel run my_video.avi -r droplet_basic --set seg.min_area=200 --set droplets.count_line=0.4
+uv run vexel run my_video.avi -r droplet_basic --set seg.min_score=0.5 --set droplets.count_line=0.4
 ```
 
 需要长期使用时，导出内置配方再编辑：
@@ -604,9 +605,10 @@ uv run vexel run my_stack.tif -r droplet_fluorescence_encapsulation --set input.
 | 算子 | 指标 |
 | :--- | :--- |
 | `preprocess.static_background` | `frames_sampled`、`background_mean`、`residual_mean` |
+| `segment.circles` | `n_objects`、`radius_median_px`、`score_median`、`foreground_fraction`（各带 `.mean/.min/.max`） |
 | `segment.threshold_watershed` | `threshold`、`n_objects`、`foreground_fraction`（各带 `.mean/.min/.max`） |
 | `measure.regionprops` | `n_objects`（带 `.mean/.min/.max`） |
-| `track.link` | `n_tracks`、`mean_track_length` |
+| `track.link` | `n_tracks`、`mean_track_length`；估计流动时另有 `flow_dy_px`、`flow_dx_px`（每帧位移的中位数） |
 | `droplet.summary` | `n_droplets`、`diameter_cv_percent`、`circularity_median` |
 | `droplet.inclusions` | `n_inclusions`、`contrast_threshold`（各带 `.mean/.min/.max`） |
 | `droplet.poisson` | `n_droplets`、`dispersion_index`、`chi2_p`、`low_agreement_fraction` |
@@ -625,16 +627,14 @@ uv run vexel run my_stack.tif -r droplet_fluorescence_encapsulation --set input.
 
 | 现象 | 调整 |
 | :--- | :--- |
-| 没有液滴的帧里出现大片误检 | 调高 `seg.min_threshold`（自动阈值的下限，单位是扣背景后的灰度差） |
-| 液滴漏检 | 调低 `seg.min_threshold`；或调低 `seg.min_area` |
-| 轮廓比液滴偏大 | 调低 `seg.smooth_sigma`（0 为不平滑） |
-| 轮廓毛糙、噪点被当成目标 | 调高 `seg.smooth_sigma` 或 `seg.opening_radius`；调高 `seg.min_area` |
-| 液滴轮廓不闭合，只分割出一段弧 | 调高 `seg.smooth_sigma`；或调低 `seg.min_threshold` |
-| 相邻液滴被连成一个 | 确认 `seg.split_touching` 为 `true`；调低 `seg.min_distance` |
-| 一个液滴被切成几块 | 调高 `seg.min_distance`（应略小于液滴半径的像素数） |
-| 同一液滴被数成多个（`n_tracks_total` 远大于实际） | 调高 `track.max_distance_px`；它应大于液滴每帧的位移 |
-| 不同液滴被连成一条轨迹 | 调低 `track.max_distance_px`；它应小于相邻液滴间距的一半 |
-| 每帧位移大于液滴间距的一半 | 设置 `track.expected_shift_px` 为每帧的预期位移，例如 `--set 'track.expected_shift_px=[0,25]'` 表示每帧沿 x 移动 25 像素 |
+| 没有液滴的地方出现圆 | 调高 `seg.min_score`（如 0.5）；或调高 `seg.motion_threshold` |
+| 液滴漏检 | 调低 `seg.min_score`（如 0.25）；或调低 `seg.motion_threshold` |
+| 小卫星液滴、碎片被当成液滴 | 设定 `seg.min_diameter_px`（像素）；默认只保留与每帧中位大小相差 30% 以内的圆（`seg.size_tolerance`） |
+| 液滴大小差别很大（多分散） | 同时设定 `seg.min_diameter_px` 和 `seg.max_diameter_px`，并把 `seg.size_tolerance` 设为 `null` |
+| 液滴不是圆形（长条塞子、被挤变形） | 圆检测不适用。导出配方，把 `seg` 步骤换成 `segment.threshold_watershed`（输入接 `bg.image`），见第 8 节 |
+| 同一液滴被数成多个（`n_tracks_total` 远大于实际） | 调高 `track.max_distance_px`；它应大于液滴每帧位移的变化量 |
+| 不同液滴被连成一条轨迹 | 调低 `track.max_distance_px` |
+| 每帧位移接近或大于液滴间距的一半 | 内置配方默认按每帧的检测位置估计整体流动并扣除（`track.estimate_shift`），一般不用调；查看 `provenance.json` 里的 `flow_dx_px` 是否与实际相符。估计不对时设 `estimate_shift=false` 并给出 `track.expected_shift_px`，例如 `--set 'track.expected_shift_px=[0,25]'` |
 | 液滴沿竖直方向流动 | `--set droplets.flow_axis=y` |
 | 计数线处有遮挡或流道结构 | 调整 `droplets.count_line`（0 到 1 之间，沿流动方向的比例位置） |
 | 背景扣除后液滴残影明显 | 液滴过密，同一像素超过一半时间被液滴覆盖，时间中值不再是背景。调高 `bg.max_frames`；仍不行则该方法不适用 |
@@ -642,7 +642,8 @@ uv run vexel run my_stack.tif -r droplet_fluorescence_encapsulation --set input.
 | 空液滴里数出细胞（噪点、杂质被圈出） | 设定 `inclusions.min_contrast` 为一个较大的固定值；或调高 `inclusions.noise_factor` |
 | 两个紧挨的细胞被数成一个 | 调小 `inclusions.cell_diameter_px`；或设定 `inclusions.min_separation_px` |
 | 一个细胞被数成两个 | 调大 `inclusions.cell_diameter_px` |
-| 贴近液滴边缘的细胞漏数 | 调小 `inclusions.edge_margin_px`；但过小会把液滴的深色轮廓误数成细胞 |
+| 贴近液滴边缘的细胞漏数 | 调小 `inclusions.edge_margin_px`；暗环本身由扇区检测排除，紧贴暗环的细胞仍会被一并排除 |
+| 一帧里只有暗淡细胞时漏数 | `inclusions.relative_floor` 只在有明显细胞的帧里生效；仍漏数时设为 0 |
 | 细胞比液滴内部亮（荧光） | `--set inclusions.polarity=bright` |
 | 液滴被流道压扁（俯视直径大于流道高度） | 填写流道高度：`--set droplets.channel_height_um=<µm>`（界面：设置 › 流道高度），否则体积按球形算大、浓度偏小 |
 | 可疑液滴太多（质控提示 `flagged_fraction` 超限） | 看 `flags.summary` 里哪一类最多，按对应的行调整；某类判据对你的数据过严时，可放宽 `flags` 的对应参数 |
@@ -651,7 +652,7 @@ uv run vexel run my_stack.tif -r droplet_fluorescence_encapsulation --set input.
 | 荧光阴阳两群重叠（D 小于 4） | 检查荧光通道是否选对、曝光是否合适；必要时调大 `intensity.edge_margin_px` 避开液滴边缘 |
 | 荧光背景不均匀 | `intensity.background` 取液滴外像素的中位数作背景；背景很不均匀时可设为 `none`，并用固定阈值 |
 
-**关于粒径偏差：** 阈值法测得的边界位置受平滑量和阈值影响。在合成数据上，`smooth_sigma` 为 1.0 时粒径均值偏大约 2.75%，为 0.5 时约 0.6%。对绝对粒径有要求时，应该用已知尺寸的样品或人工标注做一次校准（见第 9 节），不要直接相信默认参数。
+**关于粒径偏差：** 圆检测把半径定在液滴外缘（扣除背景后的对比度下降最快处）。在合成数据上粒径均值偏小约 0.7%；在一段带 50 µm 比例尺的真实视频上测得 52.3 µm，与目测外缘约 50 µm 一致。明场下液滴的“边界”本身取决于成像（暗环有几个像素宽），对绝对粒径有要求时，应该用已知尺寸的样品或人工标注做一次校准（见第 9 节）。
 
 ---
 
@@ -671,12 +672,13 @@ uv run vexel ops
 | `preprocess.background_correction` | frame | 图像 → 图像 | 单帧背景校正：顶帽或大尺度高斯。适用于没有稳定静态背景的数据 |
 | `preprocess.gaussian` | frame | 图像 → 图像 | 高斯平滑 |
 | `preprocess.median` | frame | 图像 → 图像 | 中值去噪 |
-| `segment.threshold_watershed` | frame | 图像 → 标签 | 阈值（`otsu` / `triangle` / `fixed`）+ 填洞 + 开运算 + 分水岭分离 |
+| `segment.circles` | frame | 图像 + 对比度图像 → 标签 | 内置配方使用。在原始图像上取边缘（只取对比度图像显示有东西的地方），Hough 变换找圆，去重叠，按每帧典型大小筛选，圆心以边缘点拟合精修，半径定在液滴外缘。适用于圆形液滴，不论显示为细暗环、亮心还是实心 |
+| `segment.threshold_watershed` | frame | 图像 → 标签 | 阈值（`otsu` / `triangle` / `fixed`）+ 填洞 + 开运算 + 分水岭分离。适用于非圆形目标 |
 | `measure.regionprops` | frame | 标签（+ 可选强度图像）→ 表格 | 位置、面积、等效直径、长短轴、偏心率、圆度、平均强度 |
-| `track.link` | window | 表格 → 表格 | 线性指派追踪，增加 `track_id` 列 |
+| `track.link` | window | 表格 → 表格 | 线性指派追踪，增加 `track_id` 列。`estimate_shift` 时先由检测位置估计逐帧流动位移并扣除，液滴排成密集长队、每帧移动接近间距一半时也能连对 |
 | `stats.describe` | window | 表格 → 汇总 | 某一列的 n、均值、标准差、CV、中位数、范围 |
 | `droplet.summary` | window | 表格（+ 可选细胞计数表、荧光表）→ 表格 + 汇总 | 计数线去重、粒径统计、体积、生成频率、速度、间距；有细胞计数表时为每个液滴给出细胞数，有荧光表时给出荧光 |
-| `droplet.inclusions` | frame | 图像 + 标签 → 表格 + 标签 | 数每个液滴内的细胞（暗点或亮点），输出每帧计数和细胞标记 |
+| `droplet.inclusions` | frame | 图像 + 标签 → 表格 + 标签 | 数每个液滴内的细胞（暗点或亮点），输出每帧计数和细胞标记。`background`：`median`（每滴一个背景值）或 `radial`（每滴自己的径向剖面，内置配方使用） |
 | `droplet.poisson` | window | 表格 → 表格 + 汇总 | 包裹数分布、λ、空滴/单包裹/多包裹比例、泊松预期、离散指数、卡方检验 |
 | `droplet.intensity` | frame | 图像 + 标签 → 表格 | 每个液滴扣除背景后的平均、中位、第 95 百分位与积分荧光 |
 | `droplet.positivity` | window | 表格 → 表格 + 汇总 | 阴阳判读（自动分群 / 离群值规则 / 大津法 / 固定阈值）、阳性比例、每滴拷贝数与浓度 |
@@ -769,6 +771,19 @@ uv run vexel synth data/noisy --frames 1000 --noise 8 --diameter 40 --cv 5 --fre
 
 ### 回归基准
 
+### 真实数据回归
+
+`tests/test_realdata.py` 用两段真实录像检验计数、粒径和细胞数，真值在 `tests/realdata/`：
+
+| 数据 | 内容 | 真值来源 | 当前结果 |
+| :--- | :--- | :--- | :--- |
+| `DropletMicrofluidics.mov` | 流动聚焦，暗心液滴，101 帧，带 50 µm 比例尺 | 越线时刻由计数线处的明暗周期独立测出；粒径由比例尺目测 | 9 个液滴全部计到，越线时刻差不到 1 帧；粒径 52.3 µm |
+| WSCNet2 示例序列（`WSCNet2-master.zip` 内 300 张图） | 细暗环液滴排成密集长队，每滴 0–3 个细胞 | 液滴数由流速与间距核对；细胞数由一人逐个液滴目测（两个视角），2 个拿不准的不参与比对 | 134 个液滴全部计到；细胞数见 5.5 节 |
+
+数据本身不在仓库里（来源和许可证尚未全部确认，只供内部开发）。默认在仓库根目录的 `microfluidics dataset/` 下找，或用环境变量 `VEXEL_REALDATA` 指定目录；找不到时这些测试自动跳过。细胞数真值目前只有一人标注，需要再请一人复核。
+
+### 回归基准
+
 `tests/benchmarks/` 里有 9 组固定的合成数据，覆盖目前所有功能和几个已知的难点情况（高噪声小液滴、压扁液滴、低对比度细胞、全阴性、阴阳重叠、荧光细胞加阴阳判读）。每组都要通过上面的真值校验，并且各项指标要与存档的基线 `baseline.json` 一致（计数完全相同，其余相对误差在 0.1% 以内）。改动代码后运行：
 
 ```bash
@@ -821,13 +836,13 @@ uv run vexel licenses
 - 桌面界面只覆盖单个文件的分析与结果查看；批量处理、目录监视、实时回放、在图上手工纠错都还没有。
 - 桌面界面只能使用四个内置配方；自定义配方需用命令行。
 - 只处理 2D 时序。可以同时读多个通道，但只分析一个 z 平面；3D 算子尚不执行。
-- 分割只有阈值加分水岭一种方法。对比度低、轮廓不闭合、严重粘连的液滴效果有限。
+- 内置配方假定液滴是圆的。长条形塞子、被挤压变形的液滴需要换用阈值加分水岭（见第 7 节）。液滴大小差别很大时需手动给出直径范围。
 - 体积由 2D 投影直径和流道高度按理想几何换算，没有用液滴的三维形状测量校准过；浓度没有做稀释换算，也不含体积误差。
 - 各通道分别存成不同文件的数据不支持，需要先合并成一个多通道文件。
 - 荧光阴阳判读只有一个荧光通道；多色（如双色探针）判读尚未实现。
 - 自动阴阳判读无法区分“全部阴性”和“全部阳性”；只有一群时一律按阴性处理并提示。
-- 包裹计数要求细胞在液滴内部可分辨。紧贴液滴边缘（`edge_margin_px` 以内）的细胞会漏数；成团、重叠的细胞会少数；液滴内部亮度很不均匀（如明场下的透镜效应）时，自动阈值偏保守。
-- 准确度只在合成数据上验证过，尚未在真实液滴数据上验证。回归基准也全部基于合成数据；路线图中的公开数据集下载与核对尚未接入。
+- 包裹计数要求细胞在液滴内部可分辨。紧贴液滴暗环的细胞会漏数；前后重叠的细胞会少数（真实数据上这是剩余错误的全部来源）。
+- 真实数据只验证了两段录像（见第 9 节），且细胞数真值只有一人标注。荧光判读、体积换算尚未在真实数据上验证；路线图中的公开数据集下载与核对尚未接入。
 - 方法段落只有中文。
 - 视频按 RGB 三通道解码，灰度视频会多占内存。
 - 每个处理块最多占用约 2 GB 内存（系统内存的 10%，上限 2 GB）。

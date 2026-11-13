@@ -31,7 +31,7 @@ uv run pytest -m benchmark       # 回归基准（约 2 分钟）
 ```bash
 uv run vexel info  my_video.avi
 uv run vexel run   my_video.avi -r droplet_basic --pixel-size 2.0 --frame-interval 0.001
-uv run vexel run   my_video.avi -r my_recipe.json --set seg.min_area=200
+uv run vexel run   my_video.avi -r my_recipe.json --set seg.min_score=0.5
 ```
 
 没有像素尺寸时结果以像素为单位，`summary.json` 中 `calibrated` 为 `false`。

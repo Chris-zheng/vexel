@@ -192,21 +192,45 @@ def methods_text(recipe: dict[str, Any], provenance: dict[str, Any]) -> list[str
                 f"经 σ = {p['smooth_sigma']} 像素的高斯平滑后按{thr}分割，填充孔洞，以半径 {p['opening_radius']} 像素作开运算，"
                 f"去除面积小于 {p['min_area']} 像素的目标，并以距离变换分水岭分离相互接触的液滴（最小中心距 {p['min_distance']} 像素）。"
             )
+        elif op == "segment.circles":
+            if p.get("min_diameter_px") and p.get("max_diameter_px"):
+                rng = f"直径 {p['min_diameter_px']}–{p['max_diameter_px']} 像素"
+            else:
+                rng = "按每帧液滴典型大小自动确定的直径范围"
+            out.append(
+                f"在原始图像上以 Canny 算子（σ = {p['edge_sigma']} 像素）提取边缘，只保留与背景差异超过阈值"
+                f"（{p['motion_threshold']}，按噪声自适应抬高）的区域；以 Hough 变换在{rng}内检测圆，"
+                f"要求圆周至少 {p['min_score']:.0%} 落在边缘上，重叠的圆保留得分高者；"
+                "圆心以边缘点最小二乘拟合精修，半径取液滴外缘（对比度径向剖面下降最快处）。"
+            )
         elif op == "measure.regionprops":
             out.append("测量每个液滴的质心、面积、等效面积直径与圆度（4πA/P²）。")
         elif op == "droplet.inclusions":
             thr = "取每帧由液滴内部估计的噪声的 " + f"{p['noise_factor']} 倍" if p.get("min_contrast") is None else f"固定为 {p['min_contrast']}"
             look = "暗" if p["polarity"] == "dark" else "亮"
+            if p.get("background") == "radial":
+                bg = (
+                    f"以该液滴自身的径向灰度剖面为背景（中心区取中位灰度，外圈逐个半径取中位数），并按 8 个扇区排除液滴的轮廓暗环"
+                    f"（另距边缘 {p['edge_margin_px']} 像素以内不计）"
+                )
+            else:
+                bg = f"以该液滴的中位灰度为背景（距边缘 {p['edge_margin_px']} 像素以内不计）"
+            floor = (
+                f"；同一帧中有明显细胞时，另要求达到其中位对比度的 {p['relative_floor']:.0%}"
+                if p.get("relative_floor")
+                else ""
+            )
             out.append(
-                f"在每个液滴内部（距边缘 {p['edge_margin_px']} 像素以内不计）以该液滴的中位灰度为背景，将比背景{look}、"
-                f"对比度超过阈值（{thr}）的局部极值记为细胞（细胞直径设为 {p['cell_diameter_px']} 像素）；"
+                f"在每个液滴内部{bg}，将比背景{look}、对比度超过阈值（{thr}{floor}）的局部极值记为细胞"
+                f"（细胞直径设为 {p['cell_diameter_px']} 像素）；被画面边缘截断的液滴不计，"
                 "每个液滴取其完整出现在视场内各帧计数的众数。"
             )
         elif op == "droplet.intensity":
             bg = "减去同一帧液滴外像素的中位数作为背景，" if p["background"] == "outside" else ""
             out.append(f"在荧光通道中{bg}取液滴内部（距边缘 {p['edge_margin_px']} 像素以内不计）的平均荧光，每个液滴取各完整帧的中位数。")
         elif op == "track.link":
-            out.append(f"以线性指派（laptrack）跨帧关联液滴，帧间最大位移 {p['max_distance_px']} 像素，允许缺失 {p['max_gap_frames']} 帧。")
+            flow = "先由各帧检测位置估计逐帧整体流动位移并扣除，再" if p.get("estimate_shift") else ""
+            out.append(f"{flow}以线性指派（laptrack）跨帧关联液滴，帧间最大位移 {p['max_distance_px']} 像素，允许缺失 {p['max_gap_frames']} 帧。")
         elif op == "droplet.summary":
             vol = (
                 f"液滴体积按流道高度 {p['channel_height_um']} µm 换算（直径大于流道高度者按压扁形状：中央圆柱加半圆环边）"

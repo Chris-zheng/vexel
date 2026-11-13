@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "name": "droplet_basic",
-  "description": "Brightfield droplets flowing through a straight channel: static background removal, threshold + watershed segmentation, sizing, tracking, and de-duplicated statistics at a virtual counting line.",
+  "description": "Brightfield droplets flowing through a straight channel: static background removal, circle detection (handles droplets seen as dark rings or with a bright centre), sizing, tracking, and de-duplicated statistics at a virtual counting line.",
   "seed": 0,
   "input": {
     "channel": 0,
@@ -21,19 +21,12 @@
     },
     {
       "id": "seg",
-      "op": "segment.threshold_watershed",
+      "op": "segment.circles",
       "inputs": {
-        "image": "bg.image"
+        "image": "source",
+        "contrast": "bg.image"
       },
-      "params": {
-        "smooth_sigma": 0.5,
-        "method": "otsu",
-        "min_threshold": 15.0,
-        "fill_holes": true,
-        "opening_radius": 2,
-        "min_area": 100,
-        "min_distance": 8
-      },
+      "params": {},
       "qc": [
         {
           "metric": "foreground_fraction.max",
@@ -58,7 +51,8 @@
       },
       "params": {
         "max_distance_px": 30.0,
-        "max_gap_frames": 1
+        "max_gap_frames": 1,
+        "estimate_shift": true
       }
     },
     {

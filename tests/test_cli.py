@@ -25,9 +25,9 @@ def test_run_with_override_and_errors(tmp_path, capsys):
     data = tmp_path / "data"
     main(["synth", str(data), "--frames", "40"])
     video = str(data / "droplets.ome.tif")
-    assert main(["run", video, "-r", "droplet_basic", "-o", str(tmp_path / "a"), "--set", "seg.min_area=200", "--no-input-hash"]) == 0
+    assert main(["run", video, "-r", "droplet_basic", "-o", str(tmp_path / "a"), "--set", "seg.min_score=0.4", "--no-input-hash"]) == 0
     recipe = json.loads((tmp_path / "a" / "recipe.json").read_text())
-    assert recipe["steps"][1]["params"]["min_area"] == 200
+    assert recipe["steps"][1]["params"]["min_score"] == 0.4
     capsys.readouterr()
     assert main(["run", video, "-r", "droplet_basic", "-o", str(tmp_path / "a")]) == 2  # exists
     assert main(["run", video, "-r", "no_such_recipe", "-o", str(tmp_path / "b")]) == 2

@@ -58,10 +58,10 @@ _UNIT_LABEL = {"um": "µm", "px": "px"}
 
 # key, label, min, max, step, decimals, suffix, display scale, tooltip
 ADVANCED: list[tuple[str, str, float, float, float, int, str, float, str]] = [
-    ("seg.min_threshold", "最低对比度", 0, 255, 1, 1, "", 1, "扣除背景后，低于该灰度差的区域不算液滴。漏检时调低，空白处误检时调高"),
-    ("seg.smooth_sigma", "平滑", 0, 5, 0.1, 1, " px", 1, "分割前的高斯平滑。轮廓毛糙时调高，粒径偏大时调低"),
-    ("seg.min_area", "最小面积", 0, 100000, 10, 0, " px²", 1, "小于该面积的目标被丢弃"),
-    ("seg.min_distance", "粘连分离距离", 1, 1000, 1, 0, " px", 1, "相邻液滴中心的最小距离。一个液滴被切成几块时调高"),
+    ("seg.min_diameter_px", "最小液滴直径", 0, 10000, 1, 0, " px", 1, "“自动”按每帧液滴的典型大小设定查找范围。小卫星液滴被当成液滴时调高"),
+    ("seg.max_diameter_px", "最大液滴直径", 0, 10000, 1, 0, " px", 1, "“自动”按每帧液滴的典型大小设定查找范围。大液滴漏检时调高"),
+    ("seg.min_score", "轮廓完整度", 0.05, 1, 0.05, 2, "", 1, "圆周上至少有这一比例落在边缘上才算液滴。漏检时调低，凭空多出圆时调高"),
+    ("seg.motion_threshold", "最低对比度", 0, 255, 1, 1, "", 1, "扣除背景后低于该灰度差的地方不找液滴边缘（会按噪声自动抬高）。漏检时调低，空白处误检时调高"),
     ("track.max_distance_px", "最大帧间位移", 1, 10000, 1, 1, " px", 1, "同一液滴相邻两帧的最大移动距离。同一液滴被数成多个时调高"),
     ("droplets.count_line", "计数线位置", 5, 95, 5, 0, " %", 100, "沿流动方向的计数线位置；液滴越过此线时计数一次"),
     ("inclusions.cell_diameter_px", "细胞直径", 1, 500, 0.5, 1, " px", 1, "单个细胞的典型直径。两个相邻细胞被数成一个时调小"),
@@ -75,7 +75,7 @@ FLAG_SHORT = {
     "near_threshold": "近阈值",
     "few_frames": "帧数少",
 }
-AUTO_KEYS = {"inclusions.min_contrast", "positivity.threshold"}  # 0 on the spin box means "automatic"
+AUTO_KEYS = {"seg.min_diameter_px", "seg.max_diameter_px", "inclusions.min_contrast", "positivity.threshold"}  # 0 on the spin box means "automatic"
 
 
 def recipe_defaults(name: str = RECIPE) -> dict[str, Any]:

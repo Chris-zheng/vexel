@@ -24,19 +24,12 @@
     },
     {
       "id": "seg",
-      "op": "segment.threshold_watershed",
+      "op": "segment.circles",
       "inputs": {
-        "image": "bg.image"
+        "image": "source",
+        "contrast": "bg.image"
       },
-      "params": {
-        "smooth_sigma": 0.5,
-        "method": "otsu",
-        "min_threshold": 15.0,
-        "fill_holes": true,
-        "opening_radius": 2,
-        "min_area": 100,
-        "min_distance": 8
-      },
+      "params": {},
       "qc": [
         {
           "metric": "foreground_fraction.max",
@@ -73,7 +66,8 @@
       },
       "params": {
         "max_distance_px": 30.0,
-        "max_gap_frames": 1
+        "max_gap_frames": 1,
+        "estimate_shift": true
       }
     },
     {

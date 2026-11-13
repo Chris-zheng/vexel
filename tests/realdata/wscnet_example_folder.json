@@ -1,0 +1,548 @@
+{
+ "source": "WSCNet2 examples/example-folder (github.com/Loyage/WSCNet2, MIT licence), images 1.jpg..300.jpg in numeric order",
+ "annotation": "Provisional: one annotator counting cells in two views of every droplet that crosses the vertical centre line (x = 145 px). Needs a second review.",
+ "count_line": 0.5,
+ "flow_axis": "x",
+ "n_frames": 300,
+ "n_crossings_note": "134; consistent with flow 15.9 px/frame x 299 frames / mean spacing 35.6 px = 133.7, and crossing intervals all 2.0-2.6 frames",
+ "droplets": [
+  {
+   "crossing_frame": 0.2,
+   "n_cells": 0
+  },
+  {
+   "crossing_frame": 2.4,
+   "n_cells": 0
+  },
+  {
+   "crossing_frame": 4.7,
+   "n_cells": 0
+  },
+  {
+   "crossing_frame": 6.9,
+   "n_cells": 0
+  },
+  {
+   "crossing_frame": 9.2,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 11.4,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 13.7,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 15.9,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 18.1,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 20.4,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 22.6,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 24.9,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 27.1,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 29.4,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 31.7,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 33.9,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 36.1,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 38.4,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 40.6,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 42.9,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 45.1,
+   "n_cells": 0
+  },
+  {
+   "crossing_frame": 47.4,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 49.6,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 51.9,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 54.1,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 56.3,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 58.5,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 60.8,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 63.1,
+   "n_cells": 0
+  },
+  {
+   "crossing_frame": 65.3,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 67.5,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 69.7,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 71.9,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 74.2,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 76.4,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 78.7,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 80.9,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 83.2,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 85.4,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 87.7,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 89.9,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 92.2,
+   "n_cells": 3
+  },
+  {
+   "crossing_frame": 94.5,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 96.7,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 98.8,
+   "n_cells": 3
+  },
+  {
+   "crossing_frame": 101.0,
+   "n_cells": 3
+  },
+  {
+   "crossing_frame": 103.3,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 105.6,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 107.8,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 110.0,
+   "n_cells": 3
+  },
+  {
+   "crossing_frame": 112.3,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 114.5,
+   "n_cells": 3
+  },
+  {
+   "crossing_frame": 116.7,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 118.9,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 121.2,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 123.4,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 125.7,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 127.9,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 130.1,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 132.4,
+   "n_cells": 3
+  },
+  {
+   "crossing_frame": 134.6,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 136.9,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 139.0,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 141.3,
+   "n_cells": 2,
+   "uncertain": "second view shows a dark merged blob: 2 or 3"
+  },
+  {
+   "crossing_frame": 143.6,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 145.8,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 148.0,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 150.4,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 152.6,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 155.1,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 157.1,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 159.7,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 161.7,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 163.9,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 166.1,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 168.3,
+   "n_cells": 0
+  },
+  {
+   "crossing_frame": 170.6,
+   "n_cells": 3
+  },
+  {
+   "crossing_frame": 172.8,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 175.1,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 177.3,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 179.6,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 181.8,
+   "n_cells": 0
+  },
+  {
+   "crossing_frame": 184.1,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 186.3,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 188.5,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 190.8,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 193.0,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 195.2,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 197.5,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 199.9,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 202.1,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 204.3,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 206.4,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 208.7,
+   "n_cells": 0
+  },
+  {
+   "crossing_frame": 210.9,
+   "n_cells": 3,
+   "uncertain": "third cell visible in one view only: 2 or 3"
+  },
+  {
+   "crossing_frame": 213.2,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 215.4,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 217.7,
+   "n_cells": 0
+  },
+  {
+   "crossing_frame": 219.9,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 222.1,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 224.4,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 226.7,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 228.9,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 231.2,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 233.4,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 235.7,
+   "n_cells": 0
+  },
+  {
+   "crossing_frame": 237.9,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 240.3,
+   "n_cells": 0
+  },
+  {
+   "crossing_frame": 242.5,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 244.7,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 246.9,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 249.2,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 251.4,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 253.7,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 255.9,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 258.2,
+   "n_cells": 0
+  },
+  {
+   "crossing_frame": 260.5,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 262.7,
+   "n_cells": 0
+  },
+  {
+   "crossing_frame": 264.9,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 267.2,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 269.4,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 271.7,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 273.9,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 276.2,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 278.5,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 280.7,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 282.9,
+   "n_cells": 0
+  },
+  {
+   "crossing_frame": 285.2,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 287.5,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 289.7,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 291.9,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 294.2,
+   "n_cells": 1
+  },
+  {
+   "crossing_frame": 296.5,
+   "n_cells": 2
+  },
+  {
+   "crossing_frame": 298.7,
+   "n_cells": 2
+  }
+ ]
+}
