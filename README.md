@@ -1,7 +1,7 @@
 # Vexel
 
 智能体原生的科学图像分析平台：LLM 负责规划，确定性算子负责计算，每个结果可复核、可复现。
-当前进度：**Phase 1（引擎与 CLI）**。
+规划见 [vexel_roadmap_0.0.3.md](vexel_roadmap_0.0.3.md)。当前进度：**Phase 1（引擎与 CLI）**。
 
 ## 快速开始
 
