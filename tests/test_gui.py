@@ -159,3 +159,27 @@ def test_cell_counting_switches_recipe_and_shows_encapsulation(window, cells_dat
     window.cells_check.setChecked(False)
     window.load_results(window.run_dir)  # still shows encapsulation for a run that has it
     assert window.enc_cards.isVisibleTo(window)
+
+
+def test_fluorescence_option_channels_and_results(window, fluo_dataset):
+    window.open_path(fluo_dataset / "droplets.ome.tif")
+    assert window.channel_combo.count() == 2 and "fluorescence" in window.fluo_channel_combo.itemText(1)
+    window.fluo_check.setChecked(True)
+    assert window.recipe_name() == "droplet_fluorescence" and window.overrides() == {}
+    window.spins["positivity.threshold"][0].setValue(50)
+    assert window.overrides() == {"positivity.threshold": 50.0, "positivity.method": "fixed"}
+    window.reset_advanced()
+    window.cells_check.setChecked(True)
+    window.cells_channel_combo.setCurrentIndex(1)
+    assert window.recipe_name() == "droplet_fluorescence_encapsulation"
+    assert window.overrides() == {"input.channels.cells": 1}
+    window.cells_check.setChecked(False)
+
+    assert window.start()
+    wait_until_idle(window)
+    assert window.warnings == []
+    summary = json.loads((window.run_dir / "summary.json").read_text())["positivity.summary"]
+    assert window.fluo_cards.isVisibleTo(window) and window.scatter_box.isVisibleTo(window)
+    assert not window.enc_cards.isVisibleTo(window)
+    assert window.card_pos_n.value.text() == f"{summary['n_positive']} / {summary['n_droplets']}"
+    assert window.scatter.x.size == summary["n_droplets"] and window.scatter.threshold == pytest.approx(summary["threshold"])

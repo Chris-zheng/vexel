@@ -239,6 +239,16 @@ def run_recipe(
     if not_yet:
         raise NotImplementedError(f"volume-scope operators are not executed by the Phase 1 batch executor (steps: {not_yet})")
 
+    n_channels, n_z = volume.sizes["C"], volume.sizes["Z"]
+    for ref, index in resolved.input.sources().items():
+        if index >= n_channels:
+            what = "source" if ref == SOURCE else f"{ref} (input.channels.{ref.split('.', 1)[1]})"
+            raise ValueError(
+                f"recipe reads channel {index} as {what}, but the data has {n_channels} channel(s), numbered from 0"
+            )
+    if resolved.input.z >= n_z:
+        raise ValueError(f"recipe reads z-plane {resolved.input.z}, but the data has {n_z} plane(s), numbered from 0")
+
     out_dir = Path(out_dir)
     _prepare_out_dir(out_dir, overwrite)
     scratch = out_dir / "scratch"
@@ -246,9 +256,10 @@ def run_recipe(
     started = datetime.now(timezone.utc)
     t0 = time.perf_counter()
 
-    source = volume.frames(resolved.input.channel, resolved.input.z)
+    sources = {ref: volume.frames(index, resolved.input.z) for ref, index in resolved.input.sources().items()}
     if max_frames is not None:
-        source = source[:max_frames]
+        sources = {ref: frames[:max_frames] for ref, frames in sources.items()}
+    source = sources[SOURCE]
     if source.shape[0] == 0:
         raise ValueError("input has no frames")
     ctx = Context(
@@ -262,7 +273,7 @@ def run_recipe(
     )
     prov.write_json(out_dir / "recipe.json", resolved.model_dump(mode="json"))
 
-    values: dict[str, Any] = {SOURCE: source}
+    values: dict[str, Any] = dict(sources)
     kinds = resolved.kinds()
     step_records: list[dict[str, Any]] = []
     violations: list[Violation] = []
@@ -338,7 +349,14 @@ def run_recipe(
 
     per_file, result_digest = prov.digest_files(files)
     input_record: dict[str, Any] = volume.describe()
-    input_record.update({"channel": resolved.input.channel, "z": resolved.input.z, "frames_used": ctx.n_frames})
+    input_record.update(
+        {
+            "channel": resolved.input.channel,
+            "channels": dict(resolved.input.channels),
+            "z": resolved.input.z,
+            "frames_used": ctx.n_frames,
+        }
+    )
     if hash_input and volume.source and Path(volume.source).exists():
         say("hashing input")
         digest, size = prov.sha256_path(Path(volume.source))

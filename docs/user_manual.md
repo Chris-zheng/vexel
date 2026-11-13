@@ -45,7 +45,7 @@ uv run vexel gui
 
 点 **选择文件…** 选视频或 TIFF；图像序列和 OME-Zarr 用 **图像序列文件夹…**。也可以把文件直接拖进窗口。
 
-载入后，文件名下方显示帧数、画面尺寸和数据类型。只读元数据，大文件也立即显示。多通道数据只分析第 1 个通道。
+载入后，文件名下方显示帧数、画面尺寸、数据类型和通道数。只读元数据，大文件也立即显示。多通道数据在第二步里选择各项分析用哪个通道。
 
 ### 2.2 第二步：设置
 
@@ -54,8 +54,14 @@ uv run vexel gui
 | 像素尺寸 (µm) | 每个像素对应的实际长度 |
 | 帧间隔 (ms) | 相邻两帧的采集时间间隔 |
 | 流动方向 | 液滴在画面中左右流动选“水平”，上下流动选“竖直” |
+| 液滴通道 | 仅多通道数据。在哪个通道里分割液滴，选液滴轮廓最清楚的通道（通常是明场） |
 | 包裹计数 | 勾选后统计每个液滴里的细胞数，给出空滴、单包裹、多包裹比例并与泊松分布比较（见 5.5 节） |
+| 细胞所在通道 | 仅多通道数据且勾选包裹计数。在哪个通道里数细胞，例如细胞经荧光染色时选荧光通道 |
 | 细胞外观 | 勾选包裹计数后出现。明场下细胞通常比液滴内部暗；荧光通道下细胞比液滴内部亮 |
+| 荧光 | 勾选后测每个液滴的荧光强度，判为阳性或阴性，给出阳性比例和每滴平均拷贝数（见 5.6 节） |
+| 荧光通道 | 仅多通道数据且勾选荧光。测荧光强度用的通道 |
+
+界面里的通道从 1 开始编号；配方和命令行里的通道号从 0 开始，界面的“通道 2”即配方里的 `1`。通道名称（如 brightfield、fluorescence）取自文件元数据，没有时只显示编号。
 
 文件里有标定信息时会自动填入，并提示“已从文件读取标定，请核对”。
 
@@ -65,7 +71,7 @@ uv run vexel gui
 
 ### 2.3 高级设置
 
-点 **高级设置** 展开。默认值与内置配方一致（不勾选包裹计数时为 `droplet_basic`，勾选时为 `droplet_encapsulation`）；鼠标悬停在每一项上有说明。改坏了点 **恢复默认**。
+点 **高级设置** 展开。默认值与所选内置配方一致（见 2.6 节）；鼠标悬停在每一项上有说明。改坏了点 **恢复默认**。
 
 | 项 | 对应配方参数 | 什么时候调 |
 | :--- | :--- | :--- |
@@ -77,6 +83,7 @@ uv run vexel gui
 | 计数线位置 | `droplets.count_line` | 计数线处有遮挡或流道结构时移开 |
 | 细胞直径 | `inclusions.cell_diameter_px` | 仅包裹计数。按实际细胞在图像中的像素直径填写；两个相邻细胞被数成一个时调小 |
 | 细胞最低对比度 | `inclusions.min_contrast` | 仅包裹计数。默认“自动”，按每帧估计的噪声设阈值；漏数细胞时填一个较小的值，空液滴被数出细胞时填一个较大的值 |
+| 阳性阈值 | `positivity.threshold` | 仅荧光。默认“自动”；填入数值即改为固定阈值（等同于 `positivity.method=fixed`）。自动判读提示只发现一群液滴、或两群重叠时，用阴性和阳性对照确定阈值后填在这里 |
 
 各项的详细含义与调整思路见第 7 节。
 
@@ -95,10 +102,12 @@ uv run vexel gui
 
 - **四个关键数字**：液滴数、平均粒径、粒径 CV、生成频率，每项下方附一行补充（轨迹数、标准差、粒径范围、平均间距）。各项含义见 5.1 节。
 - **包裹统计**（勾选包裹计数时）：平均每滴细胞数 λ 及其 95% 置信区间；空滴、单包裹、多包裹的实测比例，下方附泊松预期。各项含义见 5.5 节。
+- **荧光判读**（勾选荧光时）：阳性液滴比例及 95% 置信区间；阳性数 / 总数与所用阈值；每滴平均拷贝数及其区间；阴阳分离度 D 与阈值的确定方式。各项含义见 5.6 节。
 - **黄色提示条**（只在需要时出现）：预览结果、未标定、没有检测到液滴、质控规则提示等。出现时应先看复核图确认结果。
-- **复核图**：均匀抽取的 4 帧，红线为液滴轮廓；包裹计数时黄圈为检出的细胞。用 **上一张 / 下一张** 翻看；点图片用系统看图软件打开原图。检查要点见 5.3 节。
+- **复核图**：均匀抽取的 4 帧，红线为液滴轮廓；包裹计数时黄圈为检出的细胞。勾选荧光时，底图为荧光通道。用 **上一张 / 下一张** 翻看；点图片用系统看图软件打开原图。检查要点见 5.3 节。
 - **粒径分布**：每个液滴一个计数，虚线为均值。
 - **包裹数分布**（勾选包裹计数时）：每滴含 0、1、2… 个细胞的液滴比例，蓝色为实测，灰色为泊松预期。
+- **粒径与荧光**（勾选荧光时）：每个液滴一个点，蓝色为阳性、灰色为阴性，虚线为阈值。阴阳两群应上下分开；阈值附近点多时，判读结果需谨慎对待。
 
 右上角 **打开结果文件夹** 打开保存目录，里面的表格、溯源记录与命令行运行的完全相同（见第 5 节）。
 
@@ -112,7 +121,16 @@ uv run vexel gui
 uv run vexel run <数据> -r droplet_basic --pixel-size <像素尺寸> --frame-interval <帧间隔(秒)>
 ```
 
-勾选包裹计数时，把 `droplet_basic` 换成 `droplet_encapsulation`。细胞外观选“比液滴内部亮”等同于 `--set inclusions.polarity=bright`。
+界面按勾选的分析内容选用内置配方：
+
+| 包裹计数 | 荧光 | 配方 |
+| :--- | :--- | :--- |
+| 否 | 否 | `droplet_basic` |
+| 是 | 否 | `droplet_encapsulation` |
+| 否 | 是 | `droplet_fluorescence` |
+| 是 | 是 | `droplet_fluorescence_encapsulation` |
+
+其他设置对应的命令行参数：细胞外观选“比液滴内部亮”为 `--set inclusions.polarity=bright`；液滴通道、细胞所在通道、荧光通道分别为 `--set input.channel=N`、`--set input.channels.cells=N`、`--set input.channels.fluo=N`（N 从 0 起）。
 
 在高级设置里改过的参数，等同于命令行的 `--set`。实际使用的全部参数都记录在结果文件夹的 `recipe.json` 中。
 
@@ -179,11 +197,13 @@ validation PASSED
 
 | 输入 | 说明 |
 | :--- | :--- |
-| `.tif` / `.tiff` | 多页 TIFF、OME-TIFF、ImageJ TIFF。会读取文件里的像素尺寸和帧间隔 |
+| `.tif` / `.tiff` | 多页 TIFF、OME-TIFF、ImageJ TIFF，可含多个通道。会读取文件里的像素尺寸、帧间隔和通道名称 |
 | 图像序列目录 | 目录内的 `.tif` `.png` `.jpg` `.bmp`，每个文件一帧，尺寸必须一致，按文件名中的数字自然排序 |
-| `.avi` `.mp4` `.mov` `.mkv` `.m4v` | 视频。帧间隔取自视频帧率；按 RGB 三通道读入，默认分析第 0 通道（R） |
+| `.avi` `.mp4` `.mov` `.mkv` `.m4v` | 视频。帧间隔取自视频帧率；按 R、G、B 三个通道读入。彩色相机拍的荧光通常在其中一个颜色通道（如绿色荧光在 G，即通道 1） |
 | `.npy` | 2 维按 YX、3 维按 TYX、4 维按 TCYX、5 维按 TCZYX 解释 |
 | OME-Zarr 目录 | 例如 `vexel convert` 的输出 |
+
+各通道分别存成不同文件（如明场一个视频、荧光另一个视频）的数据目前不支持，需要先合并成一个多通道文件。
 
 ### 4.2 先看元数据
 
@@ -297,7 +317,18 @@ runs/exp01/
 | `n_inclusions` | 液滴里的细胞数（仅 `droplet_encapsulation`）。取该液滴各完整帧计数的众数；无法计数时为 −1 |
 | `inclusion_agreement` | 与众数一致的帧所占比例（仅 `droplet_encapsulation`）。低于 0.8 说明各帧计数不稳定，应在复核图里核对 |
 
-`encapsulation.distribution.csv`（仅 `droplet_encapsulation`，每个细胞数 k 一行）：`k`、`observed`（含 k 个细胞的液滴数）、`observed_fraction`、`poisson_fraction`（泊松概率）、`poisson_expected`（泊松预期液滴数）。
+使用荧光配方时，每个液滴还有：
+
+| 列 | 含义 |
+| :--- | :--- |
+| `fluo_mean` | 液滴内部（避开边缘 `edge_margin_px` 个像素）扣除背景后的平均荧光，取各完整帧的中位数。阴阳判读默认用这一列 |
+| `fluo_median`、`fluo_p95` | 液滴内部扣除背景后的中位数与第 95 百分位 |
+| `fluo_integrated` | 整个液滴范围内扣除背景后的荧光总和 |
+| `positive` | 是否判为阳性（在 `positivity.droplets.csv` 中） |
+
+荧光配方的每液滴结果以 `positivity.droplets.csv` 为准：它是 `droplets.droplets.csv` 加上 `positive` 列。
+
+`encapsulation.distribution.csv`（仅包裹计数配方，每个细胞数 k 一行）：`k`、`observed`（含 k 个细胞的液滴数）、`observed_fraction`、`poisson_fraction`（泊松概率）、`poisson_expected`（泊松预期液滴数）。
 
 `measure.table.csv` 与 `track.table.csv`（每帧每个目标一行）：带 `_px` 后缀的列是像素单位，不带的是物理单位。`touches_border` 为真表示目标碰到画面边缘，测径时不采用。
 
@@ -348,6 +379,45 @@ runs/exp01/
 
 **计数方法：** 每一帧里，每个液滴先向内收缩 `edge_margin_px` 个像素以避开深色轮廓；用液滴内部的中位灰度作为该液滴的背景；平滑后比背景暗（或亮）超过阈值的局部极值记为一个细胞。阈值默认自动：从液滴内部估计噪声水平，取平滑后噪声的 6 倍（`noise_factor`），因此 8 位和 16 位图像都适用。每个液滴最终取它完整出现在画面内的各帧计数的众数。
 
+### 5.6 荧光阴阳判读
+
+使用 `droplet_fluorescence` 或 `droplet_fluorescence_encapsulation`（或在界面中勾选荧光）时，`summary.json` 多出 `positivity.summary`。统计对象同样是越过计数线、每个只计一次的液滴。
+
+| 字段 | 含义 |
+| :--- | :--- |
+| `n_droplets`、`n_positive` | 参与判读的液滴数与阳性数 |
+| `positive_fraction` | 阳性比例 p |
+| `positive_fraction_ci_low` / `_high` | p 的 95% Wilson 置信区间 |
+| `copies_per_droplet` | 每滴平均拷贝数 λ = −ln(1 − p)，即数字 PCR 等数字检测的泊松校正。全部阳性时无法估计，为空 |
+| `copies_ci_low` / `_high` | 由 p 的置信区间换算得到的 λ 区间 |
+| `threshold` | 阳性阈值（`fluo_mean` 高于它为阳性） |
+| `threshold_method` | 阈值的确定方式：`mixture` 自动分群、`outlier` 离群值规则、`fixed` 固定值、`otsu` 大津法 |
+| `populations` | 自动判读认定的群数：2 为阴阳两群，1 为只有一群 |
+| `separation_d` | 阴阳两群的分离度（Ashman's D）。D ≥ 4 时两群分得很开；2–4 有重叠；小于 2 基本分不开 |
+| `dip_ratio` | 两群之间密度低谷的深度（低谷高度 ÷ 较矮的峰高）。越小越清楚 |
+| `negative_mean`、`positive_mean` | 两群的平均荧光 |
+| `saturated` | 是否全部为阳性 |
+
+**自动阈值怎么定（`method: auto`）：** 只有下面三项同时成立，才认定存在阴阳两群，并取两群概率相等处为阈值：
+
+1. 两成分高斯混合模型的 BIC 比单成分低 10 以上（`min_bic_gain`）；
+2. 两群之间的密度确有低谷，`dip_ratio` 小于 0.6（`max_dip_ratio`）；
+3. 分离度 D 不小于 3（`min_separation`）。
+
+否则视为只有一群，用离群值规则判读：高于中位数加 6 倍稳健标准差（`outlier_k`）的液滴才判为阳性。这样全阴性样本（如无模板对照）不会被硬拆出假阳性。代价是：如果所有液滴都是阳性，或阴阳两群严重重叠，自动判读会全部判为阴性，结果页和 `populations = 1` 会提示。此时应该用阴性和阳性对照确定阈值，改用固定阈值。
+
+**在合成数据上的表现：**
+
+| 条件 | 结果 |
+| :--- | :--- |
+| 阴阳分得开（阳性约为阴性的 4 倍以上，液滴间差异 10%），阳性比例 1%–97% | 每个液滴都判对 |
+| 同上，荧光噪声加大到 10 个灰度级 | 每个液滴都判对 |
+| 阳性的液滴间差异 30%（两群边缘重叠） | 200 个液滴错 2 个（1%） |
+| 全阴性，液滴间差异 10% 或 30% | 无假阳性 |
+| 阳性只比阴性亮 1.6 倍且差异 20%（两群严重重叠） | 自动判读认定只有一群，全部判阴性并给出提示；需要固定阈值 |
+
+另用随机数检验了自动判据：对正态、伽马、对数正态等单峰分布，200 个液滴以上时误拆成两群的比例不超过 2%；分得开的两群，200 个液滴以上检出率 95%–100%。液滴少于约 40 个时，自动判读更倾向于“只有一群”。
+
 ---
 
 ## 6. 配方
@@ -361,7 +431,16 @@ uv run vexel recipes
 uv run vexel recipes --show droplet_basic
 ```
 
-内置两个配方：`droplet_basic` 做液滴粒径、计数与频率；`droplet_encapsulation` 在此基础上加包裹计数和泊松统计。
+内置四个配方：
+
+| 配方 | 内容 |
+| :--- | :--- |
+| `droplet_basic` | 液滴粒径、计数与生成频率 |
+| `droplet_encapsulation` | 再加包裹计数与泊松统计 |
+| `droplet_fluorescence` | 再加荧光强度与阴阳判读（不含包裹计数） |
+| `droplet_fluorescence_encapsulation` | 以上全部 |
+
+四个配方中同名的步骤参数完全相同，只是组合不同。
 
 `droplet_basic` 的五个步骤：
 
@@ -379,6 +458,15 @@ uv run vexel recipes --show droplet_basic
 | :--- | :--- | :--- |
 | `inclusions` | `droplet.inclusions` | 逐帧数每个液滴里的细胞，并输出细胞标记供复核图使用 |
 | `encapsulation` | `droplet.poisson` | 汇总包裹数分布，与泊松分布比较 |
+
+细胞在 `input.channels.cells` 通道里数，默认与分割通道相同（0）。
+
+`droplet_fluorescence` 在 `droplet_basic` 基础上多两步：
+
+| 步骤 id | 算子 | 作用 |
+| :--- | :--- | :--- |
+| `intensity` | `droplet.intensity` | 在荧光通道（`input.channels.fluo`，默认 1）逐帧测每个液滴的荧光 |
+| `positivity` | `droplet.positivity` | 判读每个液滴的阴阳性，汇总阳性比例与每滴拷贝数 |
 
 ### 6.2 配方结构
 
@@ -402,7 +490,7 @@ uv run vexel recipes --show droplet_basic
 }
 ```
 
-- `input`：分析哪个通道、哪个 z 平面。
+- `input`：分析哪个通道、哪个 z 平面。`channel` 是 `source`；`channels` 给其他通道起名，例如 `"channels": {"fluo": 1}` 后，步骤里用 `"source.fluo"` 引用通道 1。这样可以在一个通道分割、在另一个通道测量。通道号从 0 起。
 - `steps`：按顺序执行。`id` 只能用小写字母、数字、下划线，且以字母开头。
 - `inputs`：每个输入接到哪里。`"source"` 是原始图像，其余写成 `"步骤id.输出名"`，只能引用前面的步骤。
 - `params`：省略的参数取默认值。写错参数名会报错，不会被悄悄忽略。
@@ -424,6 +512,13 @@ uv run vexel run my_video.avi -r droplet_basic --set seg.min_area=200 --set drop
 ```bash
 uv run vexel recipes --show droplet_basic > my_recipe.json
 uv run vexel run my_video.avi -r my_recipe.json
+```
+
+通道也用 `--set` 改，不必编辑配方：
+
+```bash
+uv run vexel run my_video.avi -r droplet_fluorescence --set input.channels.fluo=1
+uv run vexel run my_stack.tif -r droplet_fluorescence_encapsulation --set input.channels.cells=1 --set inclusions.polarity=bright
 ```
 
 实际使用的全部参数（含默认值）都写在输出目录的 `recipe.json` 里。
@@ -451,9 +546,11 @@ uv run vexel run my_video.avi -r my_recipe.json
 | `droplet.summary` | `n_droplets`、`diameter_cv_percent`、`circularity_median` |
 | `droplet.inclusions` | `n_inclusions`、`contrast_threshold`（各带 `.mean/.min/.max`） |
 | `droplet.poisson` | `n_droplets`、`dispersion_index`、`chi2_p`、`low_agreement_fraction` |
+| `droplet.intensity` | `background`、`droplet_mean`（各带 `.mean/.min/.max`） |
+| `droplet.positivity` | `n_droplets`、`positive_fraction`、`separation_d` |
 | `stats.describe` | `n` |
 
-`droplet_encapsulation` 默认对 `low_agreement_fraction` 设了上限 0.1：计数不稳定的液滴超过 10% 时给出警告。
+`droplet_encapsulation` 默认对 `low_agreement_fraction` 设了上限 0.1：计数不稳定的液滴超过 10% 时给出警告。荧光配方默认要求 `separation_d` 不小于 2，否则警告阴阳两群分不开。
 
 ---
 
@@ -482,6 +579,10 @@ uv run vexel run my_video.avi -r my_recipe.json
 | 一个细胞被数成两个 | 调大 `inclusions.cell_diameter_px` |
 | 贴近液滴边缘的细胞漏数 | 调小 `inclusions.edge_margin_px`；但过小会把液滴的深色轮廓误数成细胞 |
 | 细胞比液滴内部亮（荧光） | `--set inclusions.polarity=bright` |
+| 荧光提示“只发现一群液滴”，但样本应含阳性 | 用阳性和阴性对照确定阈值，`--set positivity.threshold=<值> --set positivity.method=fixed`（界面：高级设置 › 阳性阈值） |
+| 全阴性对照里出现少量阳性 | 多为荧光离群液滴（气泡、杂质）。核对复核图；必要时用固定阈值 |
+| 荧光阴阳两群重叠（D 小于 4） | 检查荧光通道是否选对、曝光是否合适；必要时调大 `intensity.edge_margin_px` 避开液滴边缘 |
+| 荧光背景不均匀 | `intensity.background` 取液滴外像素的中位数作背景；背景很不均匀时可设为 `none`，并用固定阈值 |
 
 **关于粒径偏差：** 阈值法测得的边界位置受平滑量和阈值影响。在合成数据上，`smooth_sigma` 为 1.0 时粒径均值偏大约 2.75%，为 0.5 时约 0.6%。对绝对粒径有要求时，应该用已知尺寸的样品或人工标注做一次校准（见第 9 节），不要直接相信默认参数。
 
@@ -507,15 +608,17 @@ uv run vexel ops
 | `measure.regionprops` | frame | 标签（+ 可选强度图像）→ 表格 | 位置、面积、等效直径、长短轴、偏心率、圆度、平均强度 |
 | `track.link` | window | 表格 → 表格 | 线性指派追踪，增加 `track_id` 列 |
 | `stats.describe` | window | 表格 → 汇总 | 某一列的 n、均值、标准差、CV、中位数、范围 |
-| `droplet.summary` | window | 表格（+ 可选细胞计数表）→ 表格 + 汇总 | 计数线去重、粒径统计、生成频率、速度、间距；有细胞计数表时为每个液滴给出细胞数 |
+| `droplet.summary` | window | 表格（+ 可选细胞计数表、荧光表）→ 表格 + 汇总 | 计数线去重、粒径统计、生成频率、速度、间距；有细胞计数表时为每个液滴给出细胞数，有荧光表时给出荧光 |
 | `droplet.inclusions` | frame | 图像 + 标签 → 表格 + 标签 | 数每个液滴内的细胞（暗点或亮点），输出每帧计数和细胞标记 |
 | `droplet.poisson` | window | 表格 → 表格 + 汇总 | 包裹数分布、λ、空滴/单包裹/多包裹比例、泊松预期、离散指数、卡方检验 |
+| `droplet.intensity` | frame | 图像 + 标签 → 表格 | 每个液滴扣除背景后的平均、中位、第 95 百分位与积分荧光 |
+| `droplet.positivity` | window | 表格 → 表格 + 汇总 | 阴阳判读（自动分群 / 离群值规则 / 大津法 / 固定阈值）、阳性比例、每滴拷贝数 |
 
 ---
 
 ## 9. 用真值验证
 
-`vexel validate` 把一次运行的汇总结果与真值比对，所有检查项都在容差内才算通过。基本检查四项：液滴数、粒径均值、粒径 CV、生成频率。运行用了 `droplet_encapsulation` 且真值带细胞数时，另加五项：逐液滴细胞数错误率、λ、空滴比例、单包裹比例、多包裹比例。
+`vexel validate` 把一次运行的汇总结果与真值比对，所有检查项都在容差内才算通过。基本检查四项：液滴数、粒径均值、粒径 CV、生成频率。运行做了包裹计数且真值带细胞数时，另加五项：逐液滴细胞数错误率、λ、空滴比例、单包裹比例、多包裹比例。运行做了荧光判读且真值带阴阳性时，再加两项：逐液滴判错率、阳性比例。
 
 ```bash
 uv run vexel validate runs/exp01 --truth path/to/truth
@@ -530,6 +633,8 @@ uv run vexel validate runs/exp01 --truth path/to/truth
 | `--mismatch-tol` | 0.05 | 细胞数数错的液滴允许占的比例 |
 | `--lambda-tol` | 0.05 | λ 允许的相对误差 |
 | `--fraction-tol` | 0.03 | 空滴、单包裹、多包裹比例允许的绝对误差 |
+| `--positive-mismatch-tol` | 0.02 | 阴阳判错的液滴允许占的比例 |
+| `--positive-fraction-tol` | 0.03 | 阳性比例允许的绝对误差 |
 
 **默认容差是占位值**，尚未与实际使用方约定。
 
@@ -545,7 +650,7 @@ droplet_id,diameter_um
 1,60.1
 ```
 
-要验证包裹计数，再加一列 `n_cells`（该液滴里的细胞数）：
+要验证包裹计数，再加一列 `n_cells`（该液滴里的细胞数）；要验证荧光判读，再加一列 `positive`（`True` / `False`）。例如：
 
 ```text
 droplet_id,diameter_um,n_cells
@@ -585,9 +690,11 @@ uv run vexel synth data/noisy --frames 1000 --noise 8 --diameter 40 --cv 5 --fre
 | `--frequency` | 100 | 生成频率，Hz |
 | `--noise` | 3 | 相机噪声标准差，灰度级 |
 | `--cells` | 0 | 平均每滴细胞数 λ，按泊松分布放入细胞；0 为不放细胞 |
+| `--fluo` | 不加 | 加一个荧光通道，数值为每滴平均拷贝数；含 1 个及以上拷贝的液滴为阳性 |
+| `--cells-in` | brightfield | 细胞出现在哪个通道：`brightfield`（明场暗点）或 `fluorescence`（荧光亮点，需要 `--fluo`） |
 | `--seed` | 0 | 随机种子 |
 
-合成视频固定为 256×768、2 um/像素、1 ms/帧、流速 20 mm/s。细胞为直径 10 µm（5 像素）的深色圆点，比液滴内部暗 50 个灰度级，随液滴平移，彼此至少相隔 1 个像素。它是理想化的：液滴为正圆、匀速、不粘连、轮廓清晰；细胞形状一致、不转动、不贴边。**在合成数据上通过不代表在真实数据上准确。**
+合成视频固定为 256×768、2 um/像素、1 ms/帧、流速 20 mm/s。加 `--fluo` 时为两通道 OME-TIFF（通道 0 明场、通道 1 荧光）：油相背景 8，阴性液滴 25，阳性液滴 120，液滴间差异 10%，噪声 3 个灰度级；明场通道与不加荧光时逐像素相同。细胞为直径 10 µm（5 像素）的深色圆点，比液滴内部暗 50 个灰度级，随液滴平移，彼此至少相隔 1 个像素。它是理想化的：液滴为正圆、匀速、不粘连、轮廓清晰；细胞形状一致、不转动、不贴边。**在合成数据上通过不代表在真实数据上准确。**
 
 在合成数据上的包裹计数准确度（每组 40 个液滴，共 14 组）：λ 从 0.3 到 3、噪声 3 到 12 个灰度级、细胞对比度低至 15 个灰度级时，逐液滴细胞数全部正确；只有细胞对比度 15 且噪声 6 时（信噪比约 2.5），40 个液滴中有 3 个数错，且这 3 个的帧间一致率都低于 0.4。
 
@@ -622,11 +729,13 @@ uv run vexel licenses
 
 - 桌面界面只覆盖单个文件的分析与结果查看；HTML 报告、批量处理、目录监视、实时回放、在图上手工纠错都还没有。
 - 桌面界面只能使用两个内置配方 `droplet_basic` 与 `droplet_encapsulation`；自定义配方需用命令行。
-- 只处理 2D 时序。多通道或多 z 平面的数据一次只分析一个通道、一个平面；3D 算子尚不执行。
+- 只处理 2D 时序。可以同时读多个通道，但只分析一个 z 平面；3D 算子尚不执行。
 - 分割只有阈值加分水岭一种方法。对比度低、轮廓不闭合、严重粘连的液滴效果有限。
 - 粒径是 2D 投影的等效直径，没有压扁液滴的体积换算。
-- 没有荧光强度分析（粒径对强度散点图、阳性率）。
-- 包裹计数只用一个通道：液滴分割和细胞计数在同一个通道上进行。还不能用明场通道分割液滴、用荧光通道数细胞。
+- 各通道分别存成不同文件的数据不支持，需要先合并成一个多通道文件。
+- 荧光阴阳判读只有一个荧光通道；多色（如双色探针）判读尚未实现。
+- 没有体积换算，因此只给出每滴拷贝数，不给出浓度（拷贝/µL）。
+- 自动阴阳判读无法区分“全部阴性”和“全部阳性”；只有一群时一律按阴性处理并提示。
 - 包裹计数要求细胞在液滴内部可分辨。紧贴液滴边缘（`edge_margin_px` 以内）的细胞会漏数；成团、重叠的细胞会少数；液滴内部亮度很不均匀（如明场下的透镜效应）时，自动阈值偏保守。
 - 准确度只在合成数据上验证过，尚未在真实液滴数据上验证。
 - 视频按 RGB 三通道解码，灰度视频会多占内存。

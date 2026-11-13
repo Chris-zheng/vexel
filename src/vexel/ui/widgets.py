@@ -252,3 +252,72 @@ class CountChart(QWidget):
         p.drawText(QRectF(area.left() + 74, 0, 80, 18), Qt.AlignmentFlag.AlignVCenter, "泊松预期")
         p.setPen(muted_color)
         p.drawText(QRectF(area.right() - 160, 0, 160, 18), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, "横轴：每滴细胞数")
+
+
+class ScatterChart(QWidget):
+    """Droplet diameter against fluorescence; positives in the accent colour, the
+    threshold as a dashed line."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setMinimumHeight(140)
+        self.x = np.empty(0)
+        self.y = np.empty(0)
+        self.positive = np.empty(0, dtype=bool)
+        self.threshold: float | None = None
+        self.x_unit = ""
+
+    def set_data(self, x: np.ndarray, y: np.ndarray, positive: np.ndarray, threshold: float | None, x_unit: str) -> None:
+        x, y = np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
+        keep = np.isfinite(x) & np.isfinite(y)
+        self.x, self.y = x[keep], y[keep]
+        self.positive = np.asarray(positive, dtype=bool)[keep]
+        self.threshold = threshold
+        self.x_unit = x_unit
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        muted_color = QColor(MUTED)
+        text_color = self.palette().windowText().color()
+        if self.x.size == 0:
+            p.setPen(muted_color)
+            p.drawText(QRectF(self.rect()), Qt.AlignmentFlag.AlignCenter, "没有荧光数据")
+            return
+        area = QRectF(self.rect()).adjusted(40, 22, -8, -22)
+        ys = self.y if self.threshold is None else np.append(self.y, self.threshold)
+        x0, x1 = float(self.x.min()), float(self.x.max())
+        y0, y1 = float(ys.min()), float(ys.max())
+        padx, pady = max((x1 - x0) * 0.05, 1e-6), max((y1 - y0) * 0.05, 1e-6)
+        x0, x1, y0, y1 = x0 - padx, x1 + padx, y0 - pady, y1 + pady
+
+        def to_px(xv: float, yv: float) -> QPointF:
+            return QPointF(
+                area.left() + (xv - x0) / (x1 - x0) * area.width(),
+                area.bottom() - (yv - y0) / (y1 - y0) * area.height(),
+            )
+
+        neg = QColor(MUTED)
+        neg.setAlpha(150)
+        pos = QColor(ACCENT)
+        pos.setAlpha(200)
+        p.setPen(Qt.PenStyle.NoPen)
+        for xv, yv, is_pos in zip(self.x, self.y, self.positive):
+            p.setBrush(pos if is_pos else neg)
+            p.drawEllipse(to_px(xv, yv), 3.0, 3.0)
+        if self.threshold is not None:
+            pen = QPen(text_color)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            a, b = to_px(x0, self.threshold), to_px(x1, self.threshold)
+            p.drawLine(a, b)
+            p.drawText(QRectF(b.x() - 150, b.y() - 18, 150, 16), Qt.AlignmentFlag.AlignRight, f"阈值 {self.threshold:.4g}")
+        p.setPen(muted_color)
+        p.drawText(QRectF(0, 0, 200, 18), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "纵轴：荧光强度")
+        p.drawText(QRectF(0, area.top() - 2, 36, 16), Qt.AlignmentFlag.AlignRight, f"{y1:.3g}")
+        p.drawText(QRectF(0, area.bottom() - 14, 36, 16), Qt.AlignmentFlag.AlignRight, f"{y0:.3g}")
+        bottom = QRectF(area.left(), area.bottom() + 4, area.width(), 18)
+        p.drawText(bottom, Qt.AlignmentFlag.AlignLeft, f"{x0:.4g}")
+        p.drawText(bottom, Qt.AlignmentFlag.AlignHCenter, "横轴：粒径")
+        p.drawText(bottom, Qt.AlignmentFlag.AlignRight, f"{x1:.4g} {self.x_unit}")

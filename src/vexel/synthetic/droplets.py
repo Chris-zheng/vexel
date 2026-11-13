@@ -9,6 +9,13 @@ With ``cell_lambda > 0`` each droplet also carries a Poisson-distributed number 
 cells (small dark discs) that travel with it; ``droplets.csv`` then records the true
 count per droplet in ``n_cells``. Cells are drawn from a separate random stream, so
 cell-free videos are identical to those of earlier versions.
+
+With ``fluorescence=True`` the video gains a second channel (``TCYX``; channel 0
+brightfield, channel 1 fluorescence) modelling a digital assay: each droplet holds a
+Poisson(``fluo_lambda``) number of target copies and glows at the positive level when it
+holds at least one, at the negative level otherwise. ``droplets.csv`` records
+``copies``, ``positive`` and ``fluo_level``. With ``cells_in="fluorescence"`` cells are
+bright spots in the fluorescence channel and invisible in brightfield.
 """
 
 from __future__ import annotations
@@ -16,6 +23,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -43,6 +51,15 @@ class DropletSynthConfig:
     cell_lambda: float = 0.0  # mean cells per droplet (Poisson); 0 disables cells
     cell_diameter_um: float = 10.0
     cell_contrast: float = 50.0  # how much darker a cell is than the droplet interior
+    cells_in: Literal["brightfield", "fluorescence"] = "brightfield"
+    fluorescence: bool = False  # add a fluorescence channel (digital assay)
+    fluo_lambda: float = 0.5  # mean target copies per droplet; a droplet with >= 1 copy is positive
+    fluo_background: float = 8.0  # oil, outside droplets
+    fluo_negative: float = 25.0  # droplet interior without target
+    fluo_positive: float = 120.0  # droplet interior with target
+    fluo_cv: float = 0.10  # droplet-to-droplet variation of the interior level
+    fluo_noise: float = 3.0
+    fluo_cell_contrast: float = 80.0  # how much brighter a fluorescent cell is
     seed: int = 0
 
     @property
@@ -83,7 +100,7 @@ def _background(cfg: DropletSynthConfig) -> np.ndarray:
 
 
 def generate(cfg: DropletSynthConfig = DropletSynthConfig()) -> tuple[np.ndarray, pd.DataFrame, pd.DataFrame]:
-    """Return ``(video uint8 (T, Y, X), droplets, positions)``.
+    """Return ``(video uint8 (T, Y, X) or (T, 2, Y, X) with fluorescence, droplets, positions)``.
 
     ``droplets`` has one row per droplet; ``positions`` one row per droplet per frame in
     which any part of it is inside the image.
@@ -122,11 +139,25 @@ def generate(cfg: DropletSynthConfig = DropletSynthConfig()) -> tuple[np.ndarray
         ]
         droplets["n_cells"] = [len(c) for c in cells]
 
+    if cfg.fluorescence:
+        fluo_rng = np.random.default_rng([cfg.seed, 2])  # separate stream: brightfield is unchanged
+        copies = fluo_rng.poisson(cfg.fluo_lambda, n)
+        positive = copies >= 1
+        level = np.where(positive, cfg.fluo_positive, cfg.fluo_negative) * (1.0 + fluo_rng.normal(0.0, cfg.fluo_cv, n))
+        droplets["copies"] = copies
+        droplets["positive"] = positive
+        droplets["fluo_level"] = level
+    cells_bright = cfg.cells_in == "brightfield"
+    if not cells_bright and not cfg.fluorescence:
+        raise ValueError("cells_in='fluorescence' needs fluorescence=True")
+
     background = _background(cfg)
     video = np.empty((cfg.n_frames, cfg.height, cfg.width), dtype=np.uint8)
+    fluo_video = np.empty_like(video) if cfg.fluorescence else None
     rows = []
     for t in range(cfg.n_frames):
         frame = background.copy()
+        fluo = np.full(background.shape, cfg.fluo_background, dtype=np.float64) if cfg.fluorescence else None
         x = start_x + v * (t - birth)
         for i in np.nonzero((x + radius > 0) & (x - radius < cfg.width - 1))[0]:
             r, cx, cy = radius[i], x[i], y[i]
@@ -139,14 +170,24 @@ def generate(cfg: DropletSynthConfig = DropletSynthConfig()) -> tuple[np.ndarray
             inner = _coverage(r - cfg.ring_width_px - d)
             ring = _coverage(r - d) - inner
             frame[y0:y1, x0:x1] += 8.0 * inner - cfg.ring_contrast * ring
+            if fluo is not None:
+                fluo[y0:y1, x0:x1] += (level[i] - cfg.fluo_background) * _coverage(r - 1.0 - d)
             for dy, dx in cells[i]:
                 dc = np.hypot(yy - (cy + dy), xx - (cx + dx))
-                frame[y0:y1, x0:x1] -= cfg.cell_contrast * _coverage(cell_r - dc)
+                if cells_bright:
+                    frame[y0:y1, x0:x1] -= cfg.cell_contrast * _coverage(cell_r - dc)
+                else:
+                    fluo[y0:y1, x0:x1] += cfg.fluo_cell_contrast * _coverage(cell_r - dc)
             visible = (cx - r >= 0) and (cx + r <= cfg.width - 1)
             rows.append((t, i, cx, cy, visible))
         frame += rng.normal(0.0, cfg.noise_sigma, frame.shape)
         video[t] = np.clip(np.rint(frame), 0, 255).astype(np.uint8)
+        if fluo is not None:
+            fluo += fluo_rng.normal(0.0, cfg.fluo_noise, fluo.shape)
+            fluo_video[t] = np.clip(np.rint(fluo), 0, 255).astype(np.uint8)
     positions = pd.DataFrame(rows, columns=["frame", "droplet_id", "x_px", "y_px", "fully_visible"])
+    if fluo_video is not None:
+        video = np.stack([video, fluo_video], axis=1)  # (T, C, Y, X)
     return video, droplets, positions
 
 
@@ -161,7 +202,8 @@ def write_dataset(out_dir: str | Path, cfg: DropletSynthConfig = DropletSynthCon
         path,
         video,
         metadata={
-            "axes": "TYX",
+            "axes": "TCYX" if cfg.fluorescence else "TYX",
+            **({"Channel": {"Name": ["brightfield", "fluorescence"]}} if cfg.fluorescence else {}),
             "PhysicalSizeX": cfg.pixel_size_um,
             "PhysicalSizeXUnit": "µm",
             "PhysicalSizeY": cfg.pixel_size_um,

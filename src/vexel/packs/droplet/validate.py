@@ -28,6 +28,10 @@ class Tolerances:
     inclusion_mismatch: float = 0.05  # share of droplets whose cell count is wrong
     lambda_rel: float = 0.05
     fraction_abs: float = 0.03  # empty / single / multiple shares
+    # fluorescence (checked when the run has droplet.positivity output and the truth has
+    # a ``positive`` column)
+    positive_mismatch: float = 0.02  # share of droplets called wrongly
+    positive_fraction_abs: float = 0.03
 
 
 @dataclass(frozen=True)
@@ -97,17 +101,21 @@ def validate_run(run_dir: str | Path, truth_dir: str | Path, tol: Tolerances = T
     ]
     encapsulation = next((s for s in summaries.values() if "lambda" in s and "frac_empty" in s), None)
     truth_droplets = pd.read_csv(truth_dir / "droplets.csv")
+    frames = provenance["input"]["frames_used"]
     if encapsulation is not None and "n_cells" in truth_droplets.columns:
-        checks += encapsulation_checks(run_dir, truth_dir, measured["count_line_px"], provenance["input"]["frames_used"], encapsulation, tol)
+        checks += encapsulation_checks(run_dir, truth_dir, measured["count_line_px"], frames, encapsulation, tol)
+    positivity = next((s for s in summaries.values() if "positive_fraction" in s), None)
+    if positivity is not None and "positive" in truth_droplets.columns:
+        checks += positivity_checks(run_dir, truth_dir, measured["count_line_px"], frames, positivity, tol)
     return checks
 
 
-def _droplet_table(run_dir: Path) -> pd.DataFrame:
+def _droplet_table(run_dir: Path, column: str = "n_inclusions") -> pd.DataFrame:
     for path in sorted((run_dir / "tables").glob("*.csv")):
         header = path.open(encoding="utf-8").readline().strip().split(",")
-        if {"crossing_frame", "n_inclusions"} <= set(header):
+        if {"crossing_frame", column} <= set(header):
             return pd.read_csv(path)
-    raise ValueError(f"{run_dir} has no per-droplet table with n_inclusions")
+    raise ValueError(f"{run_dir} has no per-droplet table with {column}")
 
 
 def match_droplets(measured_frames: np.ndarray, truth: dict[int, float], max_gap: float = 1.0) -> dict[int, int]:
@@ -148,4 +156,20 @@ def encapsulation_checks(
         _check("frac_empty", measured["frac_empty"], truth_frac["empty"], tol.fraction_abs, "share"),
         _check("frac_single", measured["frac_single"], truth_frac["single"], tol.fraction_abs, "share"),
         _check("frac_multi", measured["frac_multi"], truth_frac["multi"], tol.fraction_abs, "share"),
+    ]
+
+
+def positivity_checks(
+    run_dir: Path, truth_dir: Path, count_line_px: float, n_frames: int, measured: dict, tol: Tolerances
+) -> list[Check]:
+    crossings = truth_crossings(truth_dir, count_line_px, n_frames)
+    truth_pos = pd.read_csv(truth_dir / "droplets.csv").set_index("droplet_id")["positive"].astype(bool)
+    table = _droplet_table(run_dir, "positive")
+    pairs = match_droplets(table["crossing_frame"].to_numpy(float), crossings)
+    calls = table["positive"].astype(str).str.lower().isin(["true", "1"]).to_numpy()
+    wrong = sum(bool(calls[i]) != bool(truth_pos[tid]) for i, tid in pairs.items())
+    truth_fraction = float(np.mean([truth_pos[i] for i in crossings])) if crossings else None
+    return [
+        _check("positive_mismatch", wrong / len(pairs) if pairs else None, 0.0, tol.positive_mismatch, "share"),
+        _check("positive_fraction", measured["positive_fraction"], truth_fraction, tol.positive_fraction_abs, "share"),
     ]

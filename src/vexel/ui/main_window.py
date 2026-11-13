@@ -1,8 +1,8 @@
 """Vexel main window: choose data, check calibration, run, read the results.
 
 The window is a thin layer over the engine: it builds the same recipe the CLI would
-(``droplet_basic``, or ``droplet_encapsulation`` when cell counting is on, plus parameter
-overrides) and calls ``run_recipe`` in a worker thread. With default settings a UI run
+(one of four built-in droplet recipes, chosen by the cell-counting and fluorescence
+options, plus parameter and channel overrides) and calls ``run_recipe`` in a worker thread. With default settings a UI run
 and ``vexel run -r <that recipe>`` produce the same recipe digest.
 """
 
@@ -43,11 +43,14 @@ from qtpy.QtWidgets import (
 
 from vexel.engine import Recipe
 from vexel.readers import open_volume
-from vexel.ui.widgets import Card, CountChart, Histogram, ReviewViewer, heading, muted
+from vexel.ui.widgets import Card, CountChart, Histogram, ReviewViewer, ScatterChart, heading, muted
 from vexel.ui.worker import RunWorker
 
 RECIPE = "droplet_basic"
 RECIPE_CELLS = "droplet_encapsulation"
+RECIPE_FLUO = "droplet_fluorescence"
+RECIPE_FLUO_CELLS = "droplet_fluorescence_encapsulation"
+RECIPES = (RECIPE, RECIPE_CELLS, RECIPE_FLUO, RECIPE_FLUO_CELLS)
 PREVIEW_FRAMES = 200
 _TO_UM = {"um": 1.0, "nm": 1e-3, "mm": 1e3}
 _UNIT_LABEL = {"um": "µm", "px": "px"}
@@ -62,13 +65,18 @@ ADVANCED: list[tuple[str, str, float, float, float, int, str, float, str]] = [
     ("droplets.count_line", "计数线位置", 5, 95, 5, 0, " %", 100, "沿流动方向的计数线位置；液滴越过此线时计数一次"),
     ("inclusions.cell_diameter_px", "细胞直径", 1, 500, 0.5, 1, " px", 1, "单个细胞的典型直径。两个相邻细胞被数成一个时调小"),
     ("inclusions.min_contrast", "细胞最低对比度", 0, 65535, 1, 1, "", 1, "细胞与液滴内部的最小灰度差。“自动”按每帧估计的噪声设定；漏数时调低，空液滴被数出细胞时调高"),
+    ("positivity.threshold", "阳性阈值", 0, 1e9, 1, 1, "", 1, "液滴荧光（扣除背景后的平均值）高于此值判为阳性。“自动”在能分出阴阳两群时自动定阈值；用阴性对照确定阈值后可在此固定"),
 ]
-AUTO_KEYS = {"inclusions.min_contrast"}  # 0 on the spin box means None ("automatic")
+AUTO_KEYS = {"inclusions.min_contrast", "positivity.threshold"}  # 0 on the spin box means "automatic"
 
 
 def recipe_defaults(name: str = RECIPE) -> dict[str, Any]:
+    """Every overridable setting of a built-in recipe: step parameters and channel numbers."""
     resolved = Recipe.load(name).resolve()
-    return {f"{s.id}.{k}": v for s in resolved.steps for k, v in s.params.items()}
+    out: dict[str, Any] = {f"{s.id}.{k}": v for s in resolved.steps for k, v in s.params.items()}
+    out["input.channel"] = resolved.input.channel
+    out.update({f"input.channels.{k}": v for k, v in resolved.input.channels.items()})
+    return out
 
 
 def _parse_positive(text: str) -> float | None:
@@ -103,8 +111,8 @@ class MainWindow(QMainWindow):
         self.resize(1120, 760)
         self.setAcceptDrops(True)
         self.settings = QSettings()
-        self.recipe_defaults = {name: recipe_defaults(name) for name in (RECIPE, RECIPE_CELLS)}
-        self.defaults = self.recipe_defaults[RECIPE_CELLS]  # superset: used to initialise the controls
+        self.recipe_defaults = {name: recipe_defaults(name) for name in RECIPES}
+        self.defaults = self.recipe_defaults[RECIPE_FLUO_CELLS]  # superset: used to initialise the controls
         self.path: Path | None = None
         self.run_dir: Path | None = None
         self._thread: QThread | None = None
@@ -159,15 +167,26 @@ class MainWindow(QMainWindow):
         form.addRow("像素尺寸 (µm)", self.pixel_edit)
         form.addRow("帧间隔 (ms)", self.interval_edit)
         form.addRow("流动方向", self.flow_combo)
+        self.channel_combo = QComboBox()
+        self.channel_combo.setToolTip("在哪个通道里分割液滴（液滴轮廓最清楚的通道，通常是明场）")
+        form.addRow("液滴通道", self.channel_combo)
         self.cells_check = QCheckBox("统计每个液滴里的细胞数")
         self.cells_check.setToolTip("包裹计数：空滴、单包裹、多包裹比例，并与泊松分布比较")
         self.polarity_combo = QComboBox()
         self.polarity_combo.addItem("比液滴内部暗（明场）", "dark")
         self.polarity_combo.addItem("比液滴内部亮（荧光）", "bright")
+        self.cells_channel_combo = QComboBox()
         form.addRow("包裹计数", self.cells_check)
+        form.addRow("细胞所在通道", self.cells_channel_combo)
         form.addRow("细胞外观", self.polarity_combo)
+        self.fluo_check = QCheckBox("判读阴阳性（荧光）")
+        self.fluo_check.setToolTip("测每个液滴的荧光强度，判为阳性或阴性，给出阳性比例与每滴平均拷贝数")
+        self.fluo_channel_combo = QComboBox()
+        form.addRow("荧光", self.fluo_check)
+        form.addRow("荧光通道", self.fluo_channel_combo)
         self.form = form
         self.cells_check.toggled.connect(self._toggle_cells)
+        self.fluo_check.toggled.connect(self._toggle_cells)
         v.addLayout(form)
         self.calib_note = muted("")
         v.addWidget(self.calib_note)
@@ -207,6 +226,7 @@ class MainWindow(QMainWindow):
         self.adv_box.setVisible(False)
         v.addWidget(self.adv_box)
         self.reset_advanced()
+        self._fill_channels(1, None)
         self._toggle_cells(False)
 
         v.addStretch(1)
@@ -304,6 +324,19 @@ class MainWindow(QMainWindow):
         self.enc_cards.setVisible(False)
         pv.addWidget(self.enc_cards)
 
+        self.fluo_cards = QWidget()
+        fl = QHBoxLayout(self.fluo_cards)
+        fl.setContentsMargins(0, 0, 0, 0)
+        fl.setSpacing(12)
+        self.card_pos = Card("阳性液滴")
+        self.card_pos_n = Card("阳性 / 总数")
+        self.card_copies = Card("每滴平均拷贝数")
+        self.card_sep = Card("阴阳分离度 D")
+        for c in (self.card_pos, self.card_pos_n, self.card_copies, self.card_sep):
+            fl.addWidget(c)
+        self.fluo_cards.setVisible(False)
+        pv.addWidget(self.fluo_cards)
+
         pv.addWidget(heading("复核图"))
         self.viewer = ReviewViewer()
         pv.addWidget(self.viewer, 3)
@@ -322,6 +355,14 @@ class MainWindow(QMainWindow):
         col.addWidget(self.count_chart, 1)
         self.count_box.setVisible(False)
         charts.addWidget(self.count_box, 1)
+        self.scatter_box = QWidget()
+        col = QVBoxLayout(self.scatter_box)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.addWidget(heading("粒径与荧光"))
+        self.scatter = ScatterChart()
+        col.addWidget(self.scatter, 1)
+        self.scatter_box.setVisible(False)
+        charts.addWidget(self.scatter_box, 1)
         pv.addLayout(charts, 2)
         self.stack.addWidget(page)
         return self.stack
@@ -340,11 +381,12 @@ class MainWindow(QMainWindow):
         self.path = path
         self.settings.setValue("last_dir", str(path.parent))
         sizes = volume.sizes
-        channels = f" · {sizes['C']} 通道（分析第 1 个）" if sizes["C"] > 1 else ""
+        channels = f" · {sizes['C']} 通道" if sizes["C"] > 1 else ""
         self.file_label.setText(path.name)
         self.file_label.setToolTip(str(path))
         self.info_label.setText(f"{sizes['T']} 帧 · {sizes['X']}×{sizes['Y']} 像素 · {volume.dtype}{channels}")
 
+        self._fill_channels(sizes["C"], volume.channel_names)
         has_px = volume.space_unit in _TO_UM
         has_dt = volume.time_unit == "s"
         self.pixel_edit.setText(f"{volume.spacing['x'] * _TO_UM[volume.space_unit]:.6g}" if has_px else "")
@@ -364,7 +406,25 @@ class MainWindow(QMainWindow):
         return True
 
     def recipe_name(self) -> str:
-        return RECIPE_CELLS if self.cells_check.isChecked() else RECIPE
+        cells, fluo = self.cells_check.isChecked(), self.fluo_check.isChecked()
+        return {(False, False): RECIPE, (True, False): RECIPE_CELLS, (False, True): RECIPE_FLUO, (True, True): RECIPE_FLUO_CELLS}[
+            (cells, fluo)
+        ]
+
+    def _fill_channels(self, n: int, names: list[str] | None) -> None:
+        """Offer channels 1..n (shown 1-based; recipes count from 0)."""
+        for combo, default in (
+            (self.channel_combo, self.defaults["input.channel"]),
+            (self.cells_channel_combo, self.defaults["input.channels.cells"]),
+            (self.fluo_channel_combo, self.defaults["input.channels.fluo"]),
+        ):
+            combo.clear()
+            for i in range(n):
+                name = names[i] if names and i < len(names) and names[i] else ""
+                combo.addItem(f"通道 {i + 1}" + (f"（{name}）" if name else ""), i)
+            combo.setCurrentIndex(min(default, n - 1))
+        self.n_channels = n
+        self._toggle_cells()
 
     def overrides(self) -> dict[str, Any]:
         """Recipe overrides for every setting that differs from the selected built-in recipe."""
@@ -384,6 +444,15 @@ class MainWindow(QMainWindow):
                     out[key] = value
             elif abs(value - default) > 1e-9:
                 out[key] = value
+        if out.get("positivity.threshold") is not None:  # a fixed threshold switches the method
+            out["positivity.method"] = "fixed"
+        for key, combo in (
+            ("input.channel", self.channel_combo),
+            ("input.channels.cells", self.cells_channel_combo),
+            ("input.channels.fluo", self.fluo_channel_combo),
+        ):
+            if key in defaults and combo.currentData() is not None and combo.currentData() != defaults[key]:
+                out[key] = combo.currentData()
         flow = self.flow_combo.currentData()
         if flow != defaults["droplets.flow_axis"]:
             out["droplets.flow_axis"] = flow
@@ -396,12 +465,17 @@ class MainWindow(QMainWindow):
             default = self.defaults[key]
             spin.setValue(spin.minimum() if default is None else default * scale)
 
-    def _toggle_cells(self, on: bool) -> None:
-        self.form.setRowVisible(self.polarity_combo, on)
+    def _toggle_cells(self, _checked: bool = False) -> None:
+        cells, fluo = self.cells_check.isChecked(), self.fluo_check.isChecked()
+        multi = getattr(self, "n_channels", 1) > 1
+        self.form.setRowVisible(self.channel_combo, multi)
+        self.form.setRowVisible(self.polarity_combo, cells)
+        self.form.setRowVisible(self.cells_channel_combo, cells and multi)
+        self.form.setRowVisible(self.fluo_channel_combo, fluo and multi)
         for key, (spin, _) in self.spins.items():
-            if key.startswith("inclusions."):
-                spin.setVisible(on)
-                self.spin_labels[key].setVisible(on)
+            visible = (cells or not key.startswith("inclusions.")) and (fluo or not key.startswith("positivity."))
+            spin.setVisible(visible)
+            self.spin_labels[key].setVisible(visible)
 
     def _toggle_advanced(self, on: bool) -> None:
         self.adv_box.setVisible(on)
@@ -502,8 +576,9 @@ class MainWindow(QMainWindow):
 
     def _set_running(self, running: bool) -> None:
         for w in (
-            self.open_btn, self.folder_btn, self.pixel_edit, self.interval_edit, self.flow_combo,
-            self.cells_check, self.polarity_combo, self.adv_box,
+            self.open_btn, self.folder_btn, self.pixel_edit, self.interval_edit, self.flow_combo, self.channel_combo,
+            self.cells_check, self.cells_channel_combo, self.polarity_combo, self.fluo_check, self.fluo_channel_combo,
+            self.adv_box,
         ):  # fmt: skip
             w.setEnabled(not running)
         self.preview_btn.setVisible(not running)
@@ -529,6 +604,7 @@ class MainWindow(QMainWindow):
             return False
         s = next((v for v in summaries.values() if isinstance(v, dict) and "count_line_px" in v), {})
         enc = next((v for v in summaries.values() if isinstance(v, dict) and "frac_empty" in v), None)
+        fluo = next((v for v in summaries.values() if isinstance(v, dict) and "positive_fraction" in v), None)
         unit = _UNIT_LABEL.get(s.get("length_unit", "px"), s.get("length_unit", "px"))
         freq_unit = s.get("frequency_unit", "")
         freq_unit = "次/帧" if freq_unit == "1/frame" else freq_unit
@@ -549,6 +625,7 @@ class MainWindow(QMainWindow):
         self.viewer.legend = "红线为液滴轮廓，黄圈为检出的细胞" if enc is not None else "红线为分割轮廓"
         self.viewer.show_index(0)
         self._show_encapsulation(run_dir, enc)
+        self._show_fluorescence(run_dir, fluo, unit)
 
         notes = []
         if preview:
@@ -571,6 +648,17 @@ class MainWindow(QMainWindow):
                 )
             if enc.get("n_excluded"):
                 notes.append(f"有 {enc['n_excluded']} 个液滴无法计数（内部区域太小），未计入包裹统计。")
+        if fluo is not None and fluo.get("n_droplets"):
+            if fluo.get("populations") == 1:
+                notes.append(
+                    f"荧光只发现一群液滴（未见明显的阴阳两群），已按离群值规则判读（阈值 {_fmt(fluo.get('threshold'))}）。"
+                    "若样本应含阳性，或全部液滴都是阳性，请用对照样本确定阈值，在“高级设置 › 阳性阈值”中填写。"
+                )
+            elif fluo.get("saturated"):
+                notes.append("所有液滴均为阳性，无法估计每滴拷贝数（已饱和），建议稀释后重测。")
+            d = fluo.get("separation_d")
+            if fluo.get("threshold_method") == "mixture" and d is not None and d < 4:
+                notes.append(f"阴阳两群有重叠（分离度 D = {d:.2f}），靠近阈值的液滴可能判错，请对照散点图确认。")
         for step in provenance.get("steps", []):
             for v in step.get("qc_violations", []):
                 bounds = "，".join(f"{k} {v[k]:g}" for k in ("min", "max") if v.get(k) is not None)
@@ -609,6 +697,33 @@ class MainWindow(QMainWindow):
             self.count_chart.set_data(np.empty(0), np.empty(0), np.empty(0))
         else:
             self.count_chart.set_data(dist["k"].to_numpy(), dist["observed_fraction"].to_numpy(), dist["poisson_fraction"].to_numpy())
+
+    def _show_fluorescence(self, run_dir: Path, fluo: dict | None, unit: str) -> None:
+        self.fluo_cards.setVisible(fluo is not None)
+        self.scatter_box.setVisible(fluo is not None)
+        if fluo is None:
+            return
+        p, lo, hi = fluo.get("positive_fraction"), fluo.get("positive_fraction_ci_low"), fluo.get("positive_fraction_ci_high")
+        self.card_pos.set("–" if p is None else f"{100 * p:.1f} %", "" if lo is None else f"95% 区间 {100 * lo:.1f} – {100 * hi:.1f} %")
+        self.card_pos_n.set(f"{fluo.get('n_positive', 0)} / {fluo.get('n_droplets', 0)}", f"阈值 {_fmt(fluo.get('threshold'))}")
+        c, clo, chi = fluo.get("copies_per_droplet"), fluo.get("copies_ci_low"), fluo.get("copies_ci_high")
+        self.card_copies.set(_fmt(c, 3), f"95% 区间 {_fmt(clo, 3)} – {_fmt(chi, 3)}" if c is not None else "已饱和或无数据")
+        method = {"mixture": "自动分群", "outlier": "离群值规则", "fixed": "固定阈值", "otsu": "大津法"}.get(
+            fluo.get("threshold_method"), fluo.get("threshold_method") or ""
+        )
+        d = fluo.get("separation_d")
+        self.card_sep.set("–" if d is None else ("∞" if not math.isfinite(d) else f"{d:.1f}"), method)
+        table = None
+        for path in sorted((run_dir / "tables").glob("*.csv")):
+            header = path.open(encoding="utf-8").readline().strip().split(",")
+            if {"positive", "diameter", fluo.get("column", "fluo_mean")} <= set(header):
+                table = pd.read_csv(path)
+                break
+        if table is None or table.empty:
+            self.scatter.set_data(np.empty(0), np.empty(0), np.empty(0, dtype=bool), None, unit)
+        else:
+            positive = table["positive"].astype(str).str.lower().isin(["true", "1"]).to_numpy()
+            self.scatter.set_data(table["diameter"].to_numpy(), table[fluo.get("column", "fluo_mean")].to_numpy(), positive, fluo.get("threshold"), unit)
 
     # -- dialogs and system integration ------------------------------------------------------
 

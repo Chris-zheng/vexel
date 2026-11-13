@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "name": "droplet_fluorescence",
+  "description": "droplet_basic plus fluorescence: segments droplets in the main channel (default 0, brightfield), measures each droplet's fluorescence in channel input.channels.fluo (default 1), calls droplets positive or negative and reports the positive fraction and copies per droplet (digital assay).",
+  "seed": 0,
+  "input": {
+    "channel": 0,
+    "z": 0,
+    "channels": {
+      "fluo": 1
+    }
+  },
+  "steps": [
+    {
+      "id": "bg",
+      "op": "preprocess.static_background",
+      "inputs": {
+        "image": "source"
+      },
+      "params": {
+        "mode": "absdiff",
+        "max_frames": 64
+      }
+    },
+    {
+      "id": "seg",
+      "op": "segment.threshold_watershed",
+      "inputs": {
+        "image": "bg.image"
+      },
+      "params": {
+        "smooth_sigma": 0.5,
+        "method": "otsu",
+        "min_threshold": 15.0,
+        "fill_holes": true,
+        "opening_radius": 2,
+        "min_area": 100,
+        "min_distance": 8
+      },
+      "qc": [
+        {
+          "metric": "foreground_fraction.max",
+          "max": 0.6,
+          "on_fail": "warn"
+        }
+      ]
+    },
+    {
+      "id": "measure",
+      "op": "measure.regionprops",
+      "inputs": {
+        "labels": "seg.labels",
+        "intensity": "source"
+      }
+    },
+    {
+      "id": "intensity",
+      "op": "droplet.intensity",
+      "inputs": {
+        "image": "source.fluo",
+        "labels": "seg.labels"
+      },
+      "params": {
+        "edge_margin_px": 2,
+        "background": "outside"
+      }
+    },
+    {
+      "id": "track",
+      "op": "track.link",
+      "inputs": {
+        "table": "measure.table"
+      },
+      "params": {
+        "max_distance_px": 30.0,
+        "max_gap_frames": 1
+      }
+    },
+    {
+      "id": "droplets",
+      "op": "droplet.summary",
+      "inputs": {
+        "table": "track.table",
+        "intensity": "intensity.table"
+      },
+      "params": {
+        "flow_axis": "x",
+        "count_line": 0.5,
+        "min_track_frames": 3
+      },
+      "qc": [
+        {
+          "metric": "n_droplets",
+          "min": 2,
+          "on_fail": "warn"
+        },
+        {
+          "metric": "circularity_median",
+          "min": 0.8,
+          "on_fail": "warn"
+        }
+      ]
+    },
+    {
+      "id": "positivity",
+      "op": "droplet.positivity",
+      "inputs": {
+        "table": "droplets.droplets"
+      },
+      "params": {
+        "column": "fluo_mean",
+        "method": "auto"
+      },
+      "qc": [
+        {
+          "metric": "separation_d",
+          "min": 2.0,
+          "on_fail": "warn"
+        }
+      ]
+    }
+  ],
+  "review": {
+    "image": "source.fluo",
+    "labels": "seg.labels",
+    "n_frames": 4
+  }
+}

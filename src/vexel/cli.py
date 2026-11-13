@@ -143,7 +143,15 @@ def cmd_validate(args: argparse.Namespace) -> int:
     from vexel.packs.droplet.validate import Tolerances, validate_run
 
     tol = Tolerances(
-        args.count_tol, args.diameter_tol, args.cv_tol, args.frequency_tol, args.mismatch_tol, args.lambda_tol, args.fraction_tol
+        args.count_tol,
+        args.diameter_tol,
+        args.cv_tol,
+        args.frequency_tol,
+        args.mismatch_tol,
+        args.lambda_tol,
+        args.fraction_tol,
+        args.positive_mismatch_tol,
+        args.positive_fraction_tol,
     )
     checks = validate_run(args.run, args.truth, tol)
     print(f"{'metric':<22}{'measured':>12}{'truth':>12}{'error':>12}{'tolerance':>14}  result")
@@ -168,6 +176,9 @@ def cmd_synth(args: argparse.Namespace) -> int:
         frequency_hz=args.frequency,
         noise_sigma=args.noise,
         cell_lambda=args.cells,
+        fluorescence=args.fluo is not None or args.cells_in == "fluorescence",
+        fluo_lambda=args.fluo if args.fluo is not None else 0.5,
+        cells_in=args.cells_in,
     )
     path = write_dataset(args.out, cfg)
     print(f"video  {path}")
@@ -264,6 +275,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mismatch-tol", type=float, default=0.05, help="allowed share of droplets with a wrong cell count")
     p.add_argument("--lambda-tol", type=float, default=0.05, help="allowed relative error of lambda (mean cells per droplet)")
     p.add_argument("--fraction-tol", type=float, default=0.03, help="allowed absolute error of empty/single/multiple shares")
+    p.add_argument("--positive-mismatch-tol", type=float, default=0.02, help="allowed share of droplets called wrongly")
+    p.add_argument("--positive-fraction-tol", type=float, default=0.03, help="allowed absolute error of the positive fraction")
     p.set_defaults(func=cmd_validate)
 
     p = sub.add_parser("synth", help="generate a synthetic droplet video with exact ground truth")
@@ -275,6 +288,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--frequency", type=float, default=100.0, help="generation frequency, Hz")
     p.add_argument("--noise", type=float, default=3.0, help="camera noise sigma, gray levels")
     p.add_argument("--cells", type=float, default=0.0, help="mean cells per droplet (Poisson); 0 = no cells")
+    p.add_argument("--fluo", type=float, metavar="LAMBDA", help="add a fluorescence channel; mean target copies per droplet")
+    p.add_argument(
+        "--cells-in", choices=["brightfield", "fluorescence"], default="brightfield", help="channel in which cells are visible"
+    )
     p.set_defaults(func=cmd_synth)
 
     p = sub.add_parser("convert", help="convert an input to an OME-Zarr pyramid")

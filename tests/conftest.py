@@ -21,3 +21,11 @@ def cells_dataset(tmp_path_factory: pytest.TempPathFactory) -> Path:
     root = tmp_path_factory.mktemp("cells")
     write_dataset(root, DropletSynthConfig(n_frames=200, seed=5, cell_lambda=1.2))
     return root
+
+
+@pytest.fixture(scope="session")
+def fluo_dataset(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Two-channel (brightfield, fluorescence) digital-assay video; truth has ``positive``."""
+    root = tmp_path_factory.mktemp("fluo")
+    write_dataset(root, DropletSynthConfig(n_frames=300, seed=1, fluorescence=True, fluo_lambda=0.7))
+    return root

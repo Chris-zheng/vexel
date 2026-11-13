@@ -20,6 +20,8 @@ uv run vexel run data/demo/droplets.ome.tif -r droplet_basic -o runs/demo
 uv run vexel validate runs/demo --truth data/demo/truth
 uv run vexel synth data/cells --cells 1.0                # 液滴内按泊松分布放入细胞
 uv run vexel run data/cells/droplets.ome.tif -r droplet_encapsulation -o runs/cells
+uv run vexel synth data/fluo --fluo 0.7                  # 加荧光通道（数字检测：阴阳液滴）
+uv run vexel run data/fluo/droplets.ome.tif -r droplet_fluorescence -o runs/fluo
 uv run pytest
 ```
 

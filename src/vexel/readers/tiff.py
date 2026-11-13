@@ -35,6 +35,9 @@ def _ome_calibration(xml: str) -> dict:
     if "TimeIncrement" in a:
         out["t"] = float(a["TimeIncrement"])
         out["time_unit"] = normalize_unit(a.get("TimeIncrementUnit", "s"))
+    names = [el.attrib.get("Name", "") for el in pixels if el.tag.endswith("}Channel") or el.tag == "Channel"]
+    if names and any(names):
+        out["channel_names"] = names
     return out
 
 
@@ -86,6 +89,7 @@ class TiffReader(Reader):
             spacing={k: calib[k] for k in "tzyx" if k in calib},
             space_unit=calib.get("space_unit") or "px",
             time_unit=calib.get("time_unit") or "frame",
+            channel_names=calib.get("channel_names"),
             source=str(path),
             metadata={"reader": self.name, "tiff_axes": raw_axes},
         )

@@ -53,8 +53,32 @@ class Step(_Model):
 
 
 class InputSelect(_Model):
+    """Which planes of the data a recipe reads.
+
+    ``channel`` is ``source``. ``channels`` names further channels, each addressable as
+    ``source.<name>`` (e.g. ``{"fluo": 1}`` -> ``source.fluo``), so a recipe can segment on
+    one channel and measure another. Channel numbers are 0-based and can be overridden
+    (``input.channel``, ``input.channels.<name>``) without editing the recipe.
+    """
+
     channel: int = Field(0, ge=0)
     z: int = Field(0, ge=0)
+    channels: dict[str, int] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _check_names(self) -> "InputSelect":
+        import re
+
+        for name, index in self.channels.items():
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+                raise ValueError(f"channel name {name!r} must be lower-case letters, digits or '_' and start with a letter")
+            if index < 0:
+                raise ValueError(f"channel {name!r} must be >= 0")
+        return self
+
+    def sources(self) -> dict[str, int]:
+        """Value reference -> channel number, for every channel the recipe reads."""
+        return {SOURCE: self.channel, **{f"{SOURCE}.{k}": v for k, v in self.channels.items()}}
 
 
 class Review(_Model):
@@ -102,7 +126,7 @@ class Recipe(_Model):
 
     def kinds(self) -> dict[str, Kind]:
         """Every addressable value (``source`` and ``step.output``) and its kind."""
-        out = {SOURCE: Kind.IMAGE}
+        out = {ref: Kind.IMAGE for ref in self.input.sources()}
         for step in self.steps:
             for name, kind in get_op(step.op).outputs.items():
                 out[f"{step.id}.{name}"] = kind
@@ -110,7 +134,7 @@ class Recipe(_Model):
 
     def resolve(self) -> "Recipe":
         """Validate against the registry and return a copy with all parameters explicit."""
-        available: dict[str, Kind] = {SOURCE: Kind.IMAGE}
+        available: dict[str, Kind] = {ref: Kind.IMAGE for ref in self.input.sources()}
         seen: set[str] = set()
         steps: list[Step] = []
         for step in self.steps:
@@ -152,16 +176,34 @@ class Recipe(_Model):
         return self.model_copy(update={"steps": steps})
 
     def with_overrides(self, overrides: dict[str, Any]) -> "Recipe":
-        """Apply ``{"step.param": value}`` overrides (validated on the next ``resolve``)."""
+        """Apply ``{"step.param": value}`` overrides (validated on the next ``resolve``).
+
+        ``input.channel``, ``input.z`` and ``input.channels.<name>`` select data planes.
+        """
         steps = {s.id: s for s in self.steps}
         patched: dict[str, dict[str, Any]] = {}
+        selection = self.input.model_dump()
         for key, value in overrides.items():
+            if key.startswith("input."):
+                field_name = key[len("input.") :]
+                if field_name in ("channel", "z"):
+                    selection[field_name] = value
+                elif field_name.startswith("channels.") and field_name[len("channels.") :] in selection["channels"]:
+                    selection["channels"][field_name[len("channels.") :]] = value
+                else:
+                    known = ["input.channel", "input.z"] + [f"input.channels.{k}" for k in selection["channels"]]
+                    raise RecipeError(f"override {key!r}: unknown input setting (have {', '.join(known)})")
+                continue
             step_id, _, param = key.partition(".")
             if step_id not in steps or not param:
                 raise RecipeError(f"override {key!r}: expected '<step>.<param>' with step in {sorted(steps)}")
             patched.setdefault(step_id, dict(steps[step_id].params))[param] = value
         new_steps = [s.model_copy(update={"params": patched[s.id]}) if s.id in patched else s for s in self.steps]
-        return self.model_copy(update={"steps": new_steps})
+        try:
+            new_input = InputSelect.model_validate(selection)
+        except ValidationError as e:
+            raise RecipeError(f"invalid input override: {e}") from e
+        return self.model_copy(update={"steps": new_steps, "input": new_input})
 
     # -- identity ----------------------------------------------------------------
 

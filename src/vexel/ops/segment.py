@@ -78,7 +78,10 @@ def threshold_watershed(params: ThresholdWatershedParams, ctx: Context, *, image
     if params.clear_border:
         labels = segmentation.clear_border(labels)
     if params.min_area > 1 and labels.max() > 0:
-        labels = morphology.remove_small_objects(labels, max_size=params.min_area - 1)
+        if labels.max() == 1:  # a single label is a mask; skimage warns when given it as labels
+            labels = labels * morphology.remove_small_objects(labels > 0, max_size=params.min_area - 1)
+        else:
+            labels = morphology.remove_small_objects(labels, max_size=params.min_area - 1)
     labels, _, _ = segmentation.relabel_sequential(labels)
 
     qc = {

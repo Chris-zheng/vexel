@@ -1,5 +1,6 @@
 """Droplet pack operators (S1): size statistics, de-duplicated counting, generation
-frequency, and encapsulation (cells per droplet, Poisson statistics)."""
+frequency, encapsulation (cells per droplet, Poisson statistics) and fluorescence
+(per-droplet intensity, positive/negative calls, digital copies per droplet)."""
 
 from __future__ import annotations
 
@@ -67,23 +68,34 @@ def _mode(values: np.ndarray) -> tuple[int, float]:
 @register_op(
     "droplet.summary",
     scope=Scope.WINDOW,
-    inputs={"table": Kind.TABLE, "inclusions": Kind.TABLE},
-    optional_inputs=("inclusions",),
+    inputs={"table": Kind.TABLE, "inclusions": Kind.TABLE, "intensity": Kind.TABLE},
+    optional_inputs=("inclusions", "intensity"),
     outputs={"droplets": Kind.TABLE, "summary": Kind.SUMMARY},
     params=DropletSummaryParams,
 )
 def droplet_summary(
-    params: DropletSummaryParams, ctx: Context, *, table: pd.DataFrame, inclusions: pd.DataFrame | None = None
+    params: DropletSummaryParams,
+    ctx: Context,
+    *,
+    table: pd.DataFrame,
+    inclusions: pd.DataFrame | None = None,
+    intensity: pd.DataFrame | None = None,
 ) -> OpResult:
     """One row per physical droplet (counted once, when its track crosses the counting line),
     then diameter mean/std/CV, generation frequency, spacing and velocity. With an
     ``inclusions`` table (from droplet.inclusions) each droplet also gets its cell count:
-    the most frequent per-frame count, and the share of frames that agree with it."""
+    the most frequent per-frame count, and the share of frames that agree with it. With an
+    ``intensity`` table (from droplet.intensity) it gets the median of each fluorescence
+    measure over its whole frames."""
     if "track_id" not in table.columns:
         raise KeyError("droplet.summary needs a tracked table (run track.link first)")
     if inclusions is not None:
         counts = inclusions[["frame", "label", "n_inclusions"]]
         table = table.merge(counts, on=["frame", "label"], how="left", validate="one_to_one")
+    fluo_cols: list[str] = []
+    if intensity is not None:
+        fluo_cols = [c for c in intensity.columns if c.startswith("fluo_") and c != "fluo_background"]
+        table = table.merge(intensity[["frame", "label", *fluo_cols]], on=["frame", "label"], how="left", validate="one_to_one")
     h, w = ctx.frame_shape
     flow_is_x = params.flow_axis == "x"
     extent = w if flow_is_x else h
@@ -116,6 +128,8 @@ def droplet_summary(
                 extra["n_inclusions"], extra["inclusion_agreement"] = _mode(per_frame)
             else:
                 extra["n_inclusions"], extra["inclusion_agreement"] = -1, 0.0
+        for col in fluo_cols:
+            extra[col] = float(whole[col].median())
         rows.append(
             {
                 "track_id": int(track_id),
@@ -132,7 +146,7 @@ def droplet_summary(
                 **extra,
             }
         )
-    columns = DROPLET_COLUMNS + (["n_inclusions", "inclusion_agreement"] if inclusions is not None else [])
+    columns = DROPLET_COLUMNS + (["n_inclusions", "inclusion_agreement"] if inclusions is not None else []) + fluo_cols
     droplets = pd.DataFrame(rows, columns=columns).sort_values("crossing_frame", kind="stable").reset_index(drop=True)
     if inclusions is not None:
         droplets["n_inclusions"] = droplets["n_inclusions"].astype(np.int64)
@@ -383,3 +397,251 @@ def poisson(params: PoissonParams, ctx: Context, *, table: pd.DataFrame) -> OpRe
         "low_agreement_fraction": low_agreement / n,
     }
     return OpResult({"distribution": dist, "summary": summary}, qc)
+
+
+# -- fluorescence --------------------------------------------------------------------------
+
+FLUO_COLUMNS = ["label", "fluo_mean", "fluo_median", "fluo_p95", "fluo_integrated", "fluo_background"]
+
+
+class IntensityParams(Params):
+    edge_margin_px: int = Field(2, ge=0, description="ignore this many pixels inside the droplet edge when averaging")
+    background: Literal["outside", "none"] = Field(
+        "outside", description="outside: subtract the median of pixels away from all droplets in the same frame"
+    )
+    background_gap_px: int = Field(4, ge=0, description="pixels around droplets excluded from the background estimate")
+
+
+@register_op(
+    "droplet.intensity",
+    scope=Scope.FRAME,
+    inputs={"image": Kind.IMAGE, "labels": Kind.LABELS},
+    outputs={"table": Kind.TABLE},
+    params=IntensityParams,
+)
+def intensity(params: IntensityParams, ctx: Context, *, image: np.ndarray, labels: np.ndarray) -> OpResult:
+    """Per-droplet fluorescence: background-subtracted mean, median and 95th percentile over
+    the droplet interior, and the integrated signal over the whole droplet."""
+    img = image.astype(np.float64)
+    mask = labels > 0
+    bg = 0.0
+    if params.background == "outside":
+        near = ndi.binary_dilation(mask, iterations=params.background_gap_px) if params.background_gap_px else mask
+        outside = img[~near]
+        bg = float(np.median(outside)) if outside.size else 0.0
+    n = int(labels.max())
+    if n == 0:
+        return OpResult({"table": pd.DataFrame(columns=FLUO_COLUMNS)}, {"background": bg})
+    idx = np.arange(1, n + 1)
+    inner = np.where(find_boundaries(labels, mode="inner"), 0, labels)
+    interior = np.where(ndi.distance_transform_edt(inner > 0) > params.edge_margin_px, labels, 0)
+    present = np.bincount(interior.ravel(), minlength=n + 1)[1:] > 0
+    # droplets too small for the margin fall back to their full mask
+    interior = np.where(np.isin(labels, idx[~present]), labels, interior)
+    corrected = img - bg
+    mean = np.asarray(ndi.mean(corrected, labels=interior, index=idx))
+    median = np.asarray(ndi.median(corrected, labels=interior, index=idx))
+    p95 = np.asarray(ndi.labeled_comprehension(corrected, interior, idx, lambda v: np.percentile(v, 95), np.float64, np.nan))
+    integrated = np.asarray(ndi.sum(corrected, labels=labels, index=idx))
+    table = pd.DataFrame(
+        {
+            "label": idx.astype(np.int64),
+            "fluo_mean": mean,
+            "fluo_median": median,
+            "fluo_p95": p95,
+            "fluo_integrated": integrated,
+            "fluo_background": bg,
+        }
+    )
+    return OpResult({"table": table}, {"background": bg, "droplet_mean": float(np.nanmean(mean))})
+
+
+class PositivityParams(Params):
+    column: str = Field("fluo_mean", description="per-droplet intensity column to classify")
+    method: Literal["auto", "otsu", "outlier", "fixed"] = Field(
+        "auto",
+        description="auto: split into two populations only when all three tests agree (two-population Gaussian "
+        "mixture has a clearly lower BIC, the density has a real dip between them, Ashman's D >= min_separation), "
+        "otherwise treat all droplets as one population and use the outlier rule; otsu: always split at the best "
+        "Otsu gap; outlier: median + outlier_k x robust spread; fixed: use 'threshold'",
+    )
+    threshold: float | None = Field(None, description="intensity threshold for method='fixed'")
+    min_bic_gain: float = Field(10.0, ge=0, description="auto: how much lower the two-population BIC must be")
+    max_dip_ratio: float = Field(0.6, gt=0, le=1, description="auto: density at the dip / density of the lower peak")
+    min_separation: float = Field(3.0, gt=0, description="auto: minimum Ashman's D between the two populations")
+    outlier_k: float = Field(6.0, gt=0, description="outlier rule: robust standard deviations above the median")
+    min_droplets: int = Field(10, ge=2, description="auto: below this many droplets, use the outlier rule")
+
+
+def _wilson(k: int, n: int, z: float = 1.959964) -> tuple[float, float]:
+    """Wilson score 95% interval for a proportion."""
+    if n == 0:
+        return float("nan"), float("nan")
+    p = k / n
+    centre = (p + z * z / (2 * n)) / (1 + z * z / n)
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / (1 + z * z / n)
+    return max(0.0, centre - half), min(1.0, centre + half)
+
+
+def _ashman_d(a: np.ndarray, b: np.ndarray) -> float | None:
+    if a.size < 2 or b.size < 2:
+        return None
+    spread = math.sqrt(float(a.var(ddof=1)) + float(b.var(ddof=1)))
+    return math.sqrt(2.0) * abs(float(a.mean()) - float(b.mean())) / spread if spread > 0 else float("inf")
+
+
+def otsu_1d(values: np.ndarray) -> float | None:
+    """Exact Otsu split of 1-D values: the gap between consecutive sorted values that
+    maximises the between-class variance; returns the middle of that gap."""
+    v = np.sort(np.asarray(values, dtype=np.float64))
+    if v.size < 2 or v[0] == v[-1]:
+        return None
+    n = v.size
+    k = np.arange(1, n)  # sizes of the lower class
+    csum = np.cumsum(v)[:-1]
+    mean_low = csum / k
+    mean_high = (v.sum() - csum) / (n - k)
+    between = k * (n - k) * (mean_low - mean_high) ** 2
+    between[v[1:] == v[:-1]] = -1.0  # cannot split between equal values
+    i = int(np.argmax(between))
+    return float((v[i] + v[i + 1]) / 2.0)
+
+
+def dip_ratio(v: np.ndarray, threshold: float) -> float:
+    """Depth of the density valley between the highest density peak on each side of
+    ``threshold``: valley height / lower peak height. 1.0 when one side has no peak.
+
+    The kernel bandwidth follows Silverman's rule with the robust spread (min of standard
+    deviation and IQR/1.34), so a small population is not smoothed away."""
+    sd = float(np.std(v, ddof=1))
+    iqr = float(np.subtract(*np.percentile(v, [75, 25])))
+    spread = min(sd, iqr / 1.34) if iqr > 0 else sd
+    if sd <= 0 or spread <= 0:
+        return 1.0
+    kde = sps.gaussian_kde(v, bw_method=0.9 * spread * v.size ** -0.2 / sd)
+    grid = np.linspace(float(v.min()), float(v.max()), 1024)
+    d = kde(grid)
+    peaks = np.nonzero((d[1:-1] > d[:-2]) & (d[1:-1] >= d[2:]))[0] + 1
+    left = [i for i in peaks if grid[i] <= threshold]
+    right = [i for i in peaks if grid[i] > threshold]
+    if not left or not right:
+        return 1.0
+    il = max(left, key=lambda i: d[i])
+    ih = max(right, key=lambda i: d[i])
+    return float(d[il : ih + 1].min() / min(d[il], d[ih]))
+
+
+def _mixture_threshold(v: np.ndarray) -> tuple[float, float, float]:
+    """Two-population Gaussian mixture. Returns (threshold, BIC with one population, BIC
+    with two); the threshold is where both components are equally likely, searched between
+    the two component means. Deterministic (fixed random_state)."""
+    from sklearn.mixture import GaussianMixture
+
+    x = v.reshape(-1, 1)
+    scale = max(float(np.std(v)), 1e-9)
+    reg = (1e-3 * scale) ** 2  # keeps a one-droplet component from collapsing
+    one = GaussianMixture(1, reg_covar=reg, random_state=0).fit(x)
+    two = GaussianMixture(2, reg_covar=reg, n_init=3, random_state=0).fit(x)
+    bic1, bic2 = float(one.bic(x)), float(two.bic(x))
+    means = two.means_.ravel()
+    lo, hi = int(np.argmin(means)), int(np.argmax(means))
+    grid = np.linspace(means[lo], means[hi], 2001).reshape(-1, 1)
+    post = two.predict_proba(grid)
+    cross = np.nonzero(post[:, hi] >= post[:, lo])[0]
+    threshold = float(grid[cross[0], 0]) if cross.size else float((means[lo] + means[hi]) / 2)
+    return threshold, bic1, bic2
+
+
+def _copies(p: float | None) -> float | None:
+    """Mean copies per droplet from the positive fraction (Poisson): -ln(1 - p)."""
+    if p is None or not math.isfinite(p) or p >= 1.0:
+        return None
+    return -math.log1p(-p)
+
+
+@register_op(
+    "droplet.positivity",
+    scope=Scope.WINDOW,
+    inputs={"table": Kind.TABLE},
+    outputs={"droplets": Kind.TABLE, "summary": Kind.SUMMARY},
+    params=PositivityParams,
+)
+def positivity(params: PositivityParams, ctx: Context, *, table: pd.DataFrame) -> OpResult:
+    """Call each droplet positive or negative by its fluorescence, then report the positive
+    fraction (Wilson interval) and, for digital assays, mean copies per droplet
+    lambda = -ln(1 - positive fraction)."""
+    if params.column not in table.columns:
+        raise KeyError(f"droplet.positivity: column {params.column!r} not in table (run droplet.intensity first)")
+    if params.method == "fixed" and params.threshold is None:
+        raise ValueError("droplet.positivity: method='fixed' requires 'threshold'")
+    values = table[params.column].to_numpy(dtype=np.float64)
+    finite = np.isfinite(values)
+    v = values[finite]
+    n = int(v.size)
+
+    method_used, threshold, separation = params.method, None, None
+    bic1 = bic2 = dip = None
+    if n:
+        median = float(np.median(v))
+        spread = 1.4826 * float(np.median(np.abs(v - median)))
+        outlier_t = median + params.outlier_k * max(spread, 1e-9)
+        if params.method == "fixed":
+            threshold = float(params.threshold)
+        elif params.method == "otsu":
+            threshold = otsu_1d(v)
+            if threshold is None:
+                threshold, method_used = outlier_t, "outlier"
+        elif params.method == "outlier":
+            threshold = outlier_t
+        else:
+            accepted = None
+            if n >= params.min_droplets and np.ptp(v) > 0:
+                mixture_t, bic1, bic2 = _mixture_threshold(v)
+                dip = dip_ratio(v, mixture_t)
+                d = _ashman_d(v[v <= mixture_t], v[v > mixture_t])
+                if (
+                    bic2 + params.min_bic_gain < bic1
+                    and dip < params.max_dip_ratio
+                    and (d is None or d >= params.min_separation)  # None: a one-droplet population
+                    and (v > mixture_t).any()
+                    and (v <= mixture_t).any()
+                ):
+                    accepted = mixture_t
+            threshold, method_used = (accepted, "mixture") if accepted is not None else (outlier_t, "outlier")
+        separation = _ashman_d(v[v <= threshold], v[v > threshold])
+
+    out = table.copy()
+    out["positive"] = (values > threshold) if threshold is not None else False
+    out.loc[~finite, "positive"] = False
+    k = int(out.loc[finite, "positive"].sum())
+    p = k / n if n else None
+    lo, hi = _wilson(k, n) if n else (None, None)
+    pos, neg = v[v > threshold] if threshold is not None else v[:0], v[v <= threshold] if threshold is not None else v
+    summary = {
+        "column": params.column,
+        "n_droplets": n,
+        "n_positive": k,
+        "n_unmeasured": int((~finite).sum()),
+        "positive_fraction": p,
+        "positive_fraction_ci_low": lo,
+        "positive_fraction_ci_high": hi,
+        "copies_per_droplet": _copies(p),
+        "copies_ci_low": _copies(lo),
+        "copies_ci_high": _copies(hi),
+        "threshold": threshold,
+        "threshold_method": method_used,
+        "separation_d": separation,
+        "populations": 2 if method_used in ("mixture", "otsu") else (1 if method_used == "outlier" else None),
+        "dip_ratio": dip,
+        "bic_one_population": bic1,
+        "bic_two_populations": bic2,
+        "negative_mean": float(neg.mean()) if neg.size else None,
+        "positive_mean": float(pos.mean()) if pos.size else None,
+        "saturated": bool(n and k == n),
+    }
+    qc = {
+        "n_droplets": float(n),
+        "positive_fraction": float(p) if p is not None else float("nan"),
+        "separation_d": float(separation) if separation is not None and math.isfinite(separation) else float("nan"),
+    }
+    return OpResult({"droplets": out, "summary": summary}, qc)
