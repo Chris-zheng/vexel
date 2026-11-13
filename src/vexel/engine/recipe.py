@@ -58,10 +58,12 @@ class InputSelect(_Model):
 
 
 class Review(_Model):
-    """Overlay images written for human review: label outlines on top of an image."""
+    """Overlay images written for human review: ``labels`` outlines in red on top of
+    ``image``, and optional ``marks`` (e.g. detected cells) outlined in yellow."""
 
     image: str = SOURCE
     labels: str
+    marks: str | None = None
     n_frames: int = Field(4, ge=1, le=64)
 
 
@@ -141,7 +143,10 @@ class Recipe(_Model):
             for name, kind in spec.outputs.items():
                 available[f"{step.id}.{name}"] = kind
         if self.review is not None:
-            for ref, kind in ((self.review.image, Kind.IMAGE), (self.review.labels, Kind.LABELS)):
+            refs = [(self.review.image, Kind.IMAGE), (self.review.labels, Kind.LABELS)]
+            if self.review.marks is not None:
+                refs.append((self.review.marks, Kind.LABELS))
+            for ref, kind in refs:
                 if available.get(ref) is not kind:
                     raise RecipeError(f"review: {ref!r} is not an available {kind.value}")
         return self.model_copy(update={"steps": steps})

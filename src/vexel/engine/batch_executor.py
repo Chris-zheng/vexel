@@ -194,7 +194,7 @@ def _run_window_step(
     return outputs, dict(result.qc)
 
 
-def _write_review(image: da.Array, labels: da.Array, n_frames: int, folder: Path) -> list[Path]:
+def _write_review(image: da.Array, labels: da.Array, n_frames: int, folder: Path, marks: da.Array | None = None) -> list[Path]:
     folder.mkdir(parents=True, exist_ok=True)
     total = image.shape[0]
     picks = np.unique(np.linspace(0, total - 1, min(total, n_frames)).round().astype(int))
@@ -205,6 +205,8 @@ def _write_review(image: da.Array, labels: da.Array, n_frames: int, folder: Path
         lo, hi = np.percentile(img, (1, 99))
         gray = np.clip((img - lo) / max(hi - lo, 1e-6), 0, 1)
         overlay = mark_boundaries(np.dstack([gray] * 3), np.asarray(lab), color=(1.0, 0.15, 0.15), mode="thick")
+        if marks is not None:
+            overlay = mark_boundaries(overlay, np.asarray(marks[t].compute()), color=(1.0, 0.85, 0.0), mode="outer")
         path = folder / f"frame_{int(t):06d}.png"
         iio.imwrite(path, (overlay * 255).round().astype(np.uint8))
         written.append(path)
@@ -322,8 +324,10 @@ def run_recipe(
     files["summary.json"] = out_dir / "summary.json"
 
     review_files: list[Path] = []
-    if resolved.review and resolved.review.image in values and resolved.review.labels in values:
-        review_files = _write_review(values[resolved.review.image], values[resolved.review.labels], resolved.review.n_frames, out_dir / "review")
+    rv = resolved.review
+    if rv and rv.image in values and rv.labels in values:
+        marks = values.get(rv.marks) if rv.marks else None
+        review_files = _write_review(values[rv.image], values[rv.labels], rv.n_frames, out_dir / "review", marks)
 
     if keep_intermediates:
         intermediates = sorted(p.name for p in scratch.iterdir())

@@ -1,9 +1,9 @@
 """Vexel main window: choose data, check calibration, run, read the results.
 
 The window is a thin layer over the engine: it builds the same recipe the CLI would
-(``droplet_basic`` plus parameter overrides) and calls ``run_recipe`` in a worker
-thread. With default settings a UI run and ``vexel run -r droplet_basic`` produce the
-same recipe digest.
+(``droplet_basic``, or ``droplet_encapsulation`` when cell counting is on, plus parameter
+overrides) and calls ``run_recipe`` in a worker thread. With default settings a UI run
+and ``vexel run -r <that recipe>`` produce the same recipe digest.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import pandas as pd
 from qtpy.QtCore import QSettings, Qt, QThread, QUrl
 from qtpy.QtGui import QDesktopServices
 from qtpy.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -42,10 +43,11 @@ from qtpy.QtWidgets import (
 
 from vexel.engine import Recipe
 from vexel.readers import open_volume
-from vexel.ui.widgets import Card, Histogram, ReviewViewer, heading, muted
+from vexel.ui.widgets import Card, CountChart, Histogram, ReviewViewer, heading, muted
 from vexel.ui.worker import RunWorker
 
 RECIPE = "droplet_basic"
+RECIPE_CELLS = "droplet_encapsulation"
 PREVIEW_FRAMES = 200
 _TO_UM = {"um": 1.0, "nm": 1e-3, "mm": 1e3}
 _UNIT_LABEL = {"um": "µm", "px": "px"}
@@ -58,11 +60,14 @@ ADVANCED: list[tuple[str, str, float, float, float, int, str, float, str]] = [
     ("seg.min_distance", "粘连分离距离", 1, 1000, 1, 0, " px", 1, "相邻液滴中心的最小距离。一个液滴被切成几块时调高"),
     ("track.max_distance_px", "最大帧间位移", 1, 10000, 1, 1, " px", 1, "同一液滴相邻两帧的最大移动距离。同一液滴被数成多个时调高"),
     ("droplets.count_line", "计数线位置", 5, 95, 5, 0, " %", 100, "沿流动方向的计数线位置；液滴越过此线时计数一次"),
+    ("inclusions.cell_diameter_px", "细胞直径", 1, 500, 0.5, 1, " px", 1, "单个细胞的典型直径。两个相邻细胞被数成一个时调小"),
+    ("inclusions.min_contrast", "细胞最低对比度", 0, 65535, 1, 1, "", 1, "细胞与液滴内部的最小灰度差。“自动”按每帧估计的噪声设定；漏数时调低，空液滴被数出细胞时调高"),
 ]
+AUTO_KEYS = {"inclusions.min_contrast"}  # 0 on the spin box means None ("automatic")
 
 
-def recipe_defaults() -> dict[str, Any]:
-    resolved = Recipe.load(RECIPE).resolve()
+def recipe_defaults(name: str = RECIPE) -> dict[str, Any]:
+    resolved = Recipe.load(name).resolve()
     return {f"{s.id}.{k}": v for s in resolved.steps for k, v in s.params.items()}
 
 
@@ -98,7 +103,8 @@ class MainWindow(QMainWindow):
         self.resize(1120, 760)
         self.setAcceptDrops(True)
         self.settings = QSettings()
-        self.defaults = recipe_defaults()
+        self.recipe_defaults = {name: recipe_defaults(name) for name in (RECIPE, RECIPE_CELLS)}
+        self.defaults = self.recipe_defaults[RECIPE_CELLS]  # superset: used to initialise the controls
         self.path: Path | None = None
         self.run_dir: Path | None = None
         self._thread: QThread | None = None
@@ -142,7 +148,7 @@ class MainWindow(QMainWindow):
         v.addWidget(self.info_label)
 
         v.addSpacing(10)
-        v.addWidget(heading("2  标定"))
+        v.addWidget(heading("2  设置"))
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
         self.pixel_edit = _number_edit("例如 2.0")
@@ -153,6 +159,15 @@ class MainWindow(QMainWindow):
         form.addRow("像素尺寸 (µm)", self.pixel_edit)
         form.addRow("帧间隔 (ms)", self.interval_edit)
         form.addRow("流动方向", self.flow_combo)
+        self.cells_check = QCheckBox("统计每个液滴里的细胞数")
+        self.cells_check.setToolTip("包裹计数：空滴、单包裹、多包裹比例，并与泊松分布比较")
+        self.polarity_combo = QComboBox()
+        self.polarity_combo.addItem("比液滴内部暗（明场）", "dark")
+        self.polarity_combo.addItem("比液滴内部亮（荧光）", "bright")
+        form.addRow("包裹计数", self.cells_check)
+        form.addRow("细胞外观", self.polarity_combo)
+        self.form = form
+        self.cells_check.toggled.connect(self._toggle_cells)
         v.addLayout(form)
         self.calib_note = muted("")
         v.addWidget(self.calib_note)
@@ -170,6 +185,7 @@ class MainWindow(QMainWindow):
         adv = QFormLayout(self.adv_box)
         adv.setContentsMargins(0, 0, 0, 0)
         self.spins: dict[str, tuple[QDoubleSpinBox, float]] = {}
+        self.spin_labels: dict[str, QLabel] = {}
         for key, label, lo, hi, step, decimals, suffix, scale, tip in ADVANCED:
             spin = QDoubleSpinBox()
             spin.setRange(lo, hi)
@@ -177,10 +193,13 @@ class MainWindow(QMainWindow):
             spin.setDecimals(decimals)
             spin.setSuffix(suffix)
             spin.setToolTip(tip)
+            if key in AUTO_KEYS:
+                spin.setSpecialValueText("自动")
             name = QLabel(label)
             name.setToolTip(tip)
             adv.addRow(name, spin)
             self.spins[key] = (spin, scale)
+            self.spin_labels[key] = name
         reset = QPushButton("恢复默认")
         reset.setFlat(True)
         reset.clicked.connect(self.reset_advanced)
@@ -188,6 +207,7 @@ class MainWindow(QMainWindow):
         self.adv_box.setVisible(False)
         v.addWidget(self.adv_box)
         self.reset_advanced()
+        self._toggle_cells(False)
 
         v.addStretch(1)
         self.progress = QProgressBar()
@@ -271,12 +291,38 @@ class MainWindow(QMainWindow):
             cards.addWidget(c)
         pv.addLayout(cards)
 
+        self.enc_cards = QWidget()
+        enc = QHBoxLayout(self.enc_cards)
+        enc.setContentsMargins(0, 0, 0, 0)
+        enc.setSpacing(12)
+        self.card_lambda = Card("平均每滴细胞数 λ")
+        self.card_empty = Card("空滴")
+        self.card_single = Card("单包裹")
+        self.card_multi = Card("多包裹")
+        for c in (self.card_lambda, self.card_empty, self.card_single, self.card_multi):
+            enc.addWidget(c)
+        self.enc_cards.setVisible(False)
+        pv.addWidget(self.enc_cards)
+
         pv.addWidget(heading("复核图"))
         self.viewer = ReviewViewer()
         pv.addWidget(self.viewer, 3)
-        pv.addWidget(heading("粒径分布"))
+        charts = QHBoxLayout()
+        charts.setSpacing(24)
+        col = QVBoxLayout()
+        col.addWidget(heading("粒径分布"))
         self.hist = Histogram()
-        pv.addWidget(self.hist, 2)
+        col.addWidget(self.hist, 1)
+        charts.addLayout(col, 1)
+        self.count_box = QWidget()
+        col = QVBoxLayout(self.count_box)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.addWidget(heading("包裹数分布"))
+        self.count_chart = CountChart()
+        col.addWidget(self.count_chart, 1)
+        self.count_box.setVisible(False)
+        charts.addWidget(self.count_box, 1)
+        pv.addLayout(charts, 2)
         self.stack.addWidget(page)
         return self.stack
 
@@ -317,24 +363,45 @@ class MainWindow(QMainWindow):
         self._set_ready(True)
         return True
 
+    def recipe_name(self) -> str:
+        return RECIPE_CELLS if self.cells_check.isChecked() else RECIPE
+
     def overrides(self) -> dict[str, Any]:
-        """Recipe overrides for every setting that differs from the built-in recipe."""
+        """Recipe overrides for every setting that differs from the selected built-in recipe."""
+        defaults = self.recipe_defaults[self.recipe_name()]
         out: dict[str, Any] = {}
         for key, (spin, scale) in self.spins.items():
-            default = self.defaults[key]
+            if key not in defaults:
+                continue
+            default = defaults[key]
             value: Any = spin.value() / scale
-            if isinstance(default, int) and not isinstance(default, bool):
+            if key in AUTO_KEYS and spin.value() == spin.minimum():
+                value = None
+            elif isinstance(default, int) and not isinstance(default, bool):
                 value = int(round(value))
-            if abs(value - default) > 1e-9:
+            if value is None or default is None:
+                if value != default:
+                    out[key] = value
+            elif abs(value - default) > 1e-9:
                 out[key] = value
         flow = self.flow_combo.currentData()
-        if flow != self.defaults["droplets.flow_axis"]:
+        if flow != defaults["droplets.flow_axis"]:
             out["droplets.flow_axis"] = flow
+        if "inclusions.polarity" in defaults and self.polarity_combo.currentData() != defaults["inclusions.polarity"]:
+            out["inclusions.polarity"] = self.polarity_combo.currentData()
         return out
 
     def reset_advanced(self) -> None:
         for key, (spin, scale) in self.spins.items():
-            spin.setValue(self.defaults[key] * scale)
+            default = self.defaults[key]
+            spin.setValue(spin.minimum() if default is None else default * scale)
+
+    def _toggle_cells(self, on: bool) -> None:
+        self.form.setRowVisible(self.polarity_combo, on)
+        for key, (spin, _) in self.spins.items():
+            if key.startswith("inclusions."):
+                spin.setVisible(on)
+                self.spin_labels[key].setVisible(on)
 
     def _toggle_advanced(self, on: bool) -> None:
         self.adv_box.setVisible(on)
@@ -361,7 +428,7 @@ class MainWindow(QMainWindow):
         except ValueError:
             self.warn("标定有误", "像素尺寸和帧间隔必须是正数，或留空。")
             return False
-        recipe = Recipe.load(RECIPE).with_overrides(self.overrides())
+        recipe = Recipe.load(self.recipe_name()).with_overrides(self.overrides())
         try:
             recipe.resolve()
         except Exception as e:
@@ -434,7 +501,10 @@ class MainWindow(QMainWindow):
         self.empty_sub.setText("调整设置后可以重新开始。")
 
     def _set_running(self, running: bool) -> None:
-        for w in (self.open_btn, self.folder_btn, self.pixel_edit, self.interval_edit, self.flow_combo, self.adv_box):
+        for w in (
+            self.open_btn, self.folder_btn, self.pixel_edit, self.interval_edit, self.flow_combo,
+            self.cells_check, self.polarity_combo, self.adv_box,
+        ):  # fmt: skip
             w.setEnabled(not running)
         self.preview_btn.setVisible(not running)
         self.run_btn.setVisible(not running)
@@ -457,7 +527,8 @@ class MainWindow(QMainWindow):
         except (OSError, ValueError) as e:
             self.warn("无法读取结果", f"{run_dir}\n\n{e}")
             return False
-        s = next((v for v in summaries.values() if isinstance(v, dict) and "n_droplets" in v), {})
+        s = next((v for v in summaries.values() if isinstance(v, dict) and "count_line_px" in v), {})
+        enc = next((v for v in summaries.values() if isinstance(v, dict) and "frac_empty" in v), None)
         unit = _UNIT_LABEL.get(s.get("length_unit", "px"), s.get("length_unit", "px"))
         freq_unit = s.get("frequency_unit", "")
         freq_unit = "次/帧" if freq_unit == "1/frame" else freq_unit
@@ -475,6 +546,9 @@ class MainWindow(QMainWindow):
             diameters = pd.read_csv(table)["diameter"].to_numpy(dtype=np.float64)
         self.hist.set_data(diameters, unit)
         self.viewer.set_images(sorted((run_dir / "review").glob("*.png")))
+        self.viewer.legend = "红线为液滴轮廓，黄圈为检出的细胞" if enc is not None else "红线为分割轮廓"
+        self.viewer.show_index(0)
+        self._show_encapsulation(run_dir, enc)
 
         notes = []
         if preview:
@@ -485,6 +559,18 @@ class MainWindow(QMainWindow):
             notes.append("未标定：长度单位为像素。")
         if n == 0:
             notes.append("没有检测到液滴。先看复核图，再到“高级设置”里调整最低对比度或最小面积。")
+        if enc is not None and enc.get("n_droplets"):
+            if enc.get("chi2_p") is not None and enc["chi2_p"] < 0.05:
+                d = enc.get("dispersion_index")
+                trend = "，D > 1 提示细胞聚集或上样不均" if d and d > 1 else ("，D < 1 提示排布比随机更规则" if d else "")
+                notes.append(f"包裹分布与泊松分布差异显著（p = {enc['chi2_p']:.3g}，离散指数 D = {_fmt(d, 3)}{trend}）。")
+            if enc.get("n_low_agreement"):
+                notes.append(
+                    f"有 {enc['n_low_agreement']} 个液滴的细胞数在各帧之间不一致，计数可能不准，"
+                    "请在复核图中检查黄圈，必要时调整“细胞直径”或“细胞最低对比度”。"
+                )
+            if enc.get("n_excluded"):
+                notes.append(f"有 {enc['n_excluded']} 个液滴无法计数（内部区域太小），未计入包裹统计。")
         for step in provenance.get("steps", []):
             for v in step.get("qc_violations", []):
                 bounds = "，".join(f"{k} {v[k]:g}" for k in ("min", "max") if v.get(k) is not None)
@@ -498,6 +584,31 @@ class MainWindow(QMainWindow):
         self.run_dir = run_dir
         self.stack.setCurrentIndex(1)
         return True
+
+    def _show_encapsulation(self, run_dir: Path, enc: dict | None) -> None:
+        self.enc_cards.setVisible(enc is not None)
+        self.count_box.setVisible(enc is not None)
+        if enc is None:
+            return
+
+        def share(key: str) -> str:
+            return "–" if enc.get(key) is None else f"{100 * enc[key]:.1f} %"
+
+        lo, hi = enc.get("lambda_ci_low"), enc.get("lambda_ci_high")
+        self.card_lambda.set(_fmt(enc.get("lambda"), 3), f"95% 区间 {_fmt(lo, 3)} – {_fmt(hi, 3)}" if lo is not None else "")
+        self.card_empty.set(share("frac_empty"), f"泊松预期 {share('poisson_empty')}")
+        self.card_single.set(share("frac_single"), f"泊松预期 {share('poisson_single')}")
+        self.card_multi.set(share("frac_multi"), f"泊松预期 {share('poisson_multi')}")
+        dist = None
+        for path in sorted((run_dir / "tables").glob("*.csv")):
+            header = path.open(encoding="utf-8").readline().strip().split(",")
+            if {"k", "observed_fraction", "poisson_fraction"} <= set(header):
+                dist = pd.read_csv(path)
+                break
+        if dist is None or dist.empty:
+            self.count_chart.set_data(np.empty(0), np.empty(0), np.empty(0))
+        else:
+            self.count_chart.set_data(dist["k"].to_numpy(), dist["observed_fraction"].to_numpy(), dist["poisson_fraction"].to_numpy())
 
     # -- dialogs and system integration ------------------------------------------------------
 

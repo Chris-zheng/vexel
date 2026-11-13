@@ -144,6 +144,7 @@ class ReviewViewer(QWidget):
         layout.addLayout(nav)
 
         self.paths: list[Path] = []
+        self.legend = "红线为分割轮廓"
         self.index = 0
         self._pixmap: QPixmap | None = None
 
@@ -166,7 +167,7 @@ class ReviewViewer(QWidget):
         self._pixmap = QPixmap(str(path))
         match = re.search(r"(\d+)", path.stem)
         frame = f" · 第 {int(match.group(1))} 帧" if match else ""
-        self.caption.setText(f"{self.index + 1} / {n}{frame} · 红线为分割轮廓")
+        self.caption.setText(f"{self.index + 1} / {n}{frame} · {self.legend}")
         self._rescale()
 
     def open_current(self) -> None:
@@ -184,3 +185,70 @@ class ReviewViewer(QWidget):
             self.image.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
         )
         self.image.setPixmap(scaled)
+
+
+class CountChart(QWidget):
+    """Share of droplets with k cells: measured (filled) next to the Poisson expectation."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setMinimumHeight(140)
+        self.k = np.empty(0, dtype=int)
+        self.observed = np.empty(0)
+        self.expected = np.empty(0)
+        self._folded = False
+
+    def set_data(self, k: np.ndarray, observed: np.ndarray, expected: np.ndarray, max_classes: int = 8) -> None:
+        k = np.asarray(k, dtype=int)
+        observed = np.asarray(observed, dtype=np.float64)
+        expected = np.asarray(expected, dtype=np.float64)
+        self._folded = k.size > max_classes
+        if self._folded:  # fold the tail into the last class
+            observed = np.append(observed[: max_classes - 1], observed[max_classes - 1 :].sum())
+            expected = np.append(expected[: max_classes - 1], expected[max_classes - 1 :].sum())
+            k = k[:max_classes]
+        self.k, self.observed, self.expected = k, observed, expected
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        muted_color = QColor(MUTED)
+        text_color = self.palette().windowText().color()
+        if self.k.size == 0:
+            p.setPen(muted_color)
+            p.drawText(QRectF(self.rect()), Qt.AlignmentFlag.AlignCenter, "没有包裹数据")
+            return
+        area = QRectF(self.rect()).adjusted(4, 40, -4, -22)  # room for the legend and bar labels
+        top = max(float(self.observed.max()), float(self.expected.max()), 1e-9)
+        slot = area.width() / self.k.size
+        bar = min(28.0, slot * 0.36)
+        poisson_color = QColor(MUTED)
+        poisson_color.setAlpha(110)
+        for i, k in enumerate(self.k):
+            cx = area.left() + (i + 0.5) * slot
+            for value, color, dx in ((self.observed[i], QColor(ACCENT), -bar - 1), (self.expected[i], poisson_color, 1)):
+                h = area.height() * value / top
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(color)
+                p.drawRoundedRect(QRectF(cx + dx, area.bottom() - h, bar, h), 2, 2)
+            p.setPen(text_color)
+            p.drawText(
+                QRectF(cx - bar - 20, area.bottom() - area.height() * self.observed[i] / top - 16, bar + 40, 14),
+                Qt.AlignmentFlag.AlignHCenter,
+                f"{100 * self.observed[i]:.0f}%",
+            )
+            p.setPen(muted_color)
+            label = f"≥{k}" if (self._folded and i == self.k.size - 1) else str(k)
+            p.drawText(QRectF(cx - 30, area.bottom() + 4, 60, 16), Qt.AlignmentFlag.AlignHCenter, label)
+        # legend
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(ACCENT))
+        p.drawRoundedRect(QRectF(area.left(), 4, 10, 10), 2, 2)
+        p.setBrush(poisson_color)
+        p.drawRoundedRect(QRectF(area.left() + 60, 4, 10, 10), 2, 2)
+        p.setPen(text_color)
+        p.drawText(QRectF(area.left() + 14, 0, 44, 18), Qt.AlignmentFlag.AlignVCenter, "实测")
+        p.drawText(QRectF(area.left() + 74, 0, 80, 18), Qt.AlignmentFlag.AlignVCenter, "泊松预期")
+        p.setPen(muted_color)
+        p.drawText(QRectF(area.right() - 160, 0, 160, 18), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, "横轴：每滴细胞数")

@@ -4,6 +4,11 @@ Public droplet datasets lack size, tracking and frequency truth (roadmap §12), 
 videos are the reference for diameter CV, de-duplicated counting and generation
 frequency. Droplets are dark rings on a bright, unevenly lit channel, moving at constant
 speed along +x. The ring's outer edge is the true droplet boundary.
+
+With ``cell_lambda > 0`` each droplet also carries a Poisson-distributed number of
+cells (small dark discs) that travel with it; ``droplets.csv`` then records the true
+count per droplet in ``n_cells``. Cells are drawn from a separate random stream, so
+cell-free videos are identical to those of earlier versions.
 """
 
 from __future__ import annotations
@@ -35,6 +40,9 @@ class DropletSynthConfig:
     ring_width_px: float = 3.0
     ring_contrast: float = 90.0
     noise_sigma: float = 3.0
+    cell_lambda: float = 0.0  # mean cells per droplet (Poisson); 0 disables cells
+    cell_diameter_um: float = 10.0
+    cell_contrast: float = 50.0  # how much darker a cell is than the droplet interior
     seed: int = 0
 
     @property
@@ -45,6 +53,24 @@ class DropletSynthConfig:
 def _coverage(x: np.ndarray) -> np.ndarray:
     """Linear 1-pixel edge ramp: fraction of a pixel on the positive side."""
     return np.clip(x + 0.5, 0.0, 1.0)
+
+
+def _place_cells(rng: np.random.Generator, k: int, r_avail: float, min_sep: float) -> np.ndarray:
+    """``k`` points uniformly inside a disc of radius ``r_avail``, at least ``min_sep`` apart.
+
+    The separation keeps every cell individually countable, so the truth is unambiguous.
+    Returns fewer than ``k`` points only if they cannot be fitted after many attempts.
+    """
+    points: list[tuple[float, float]] = []
+    attempts = 0
+    while len(points) < k and attempts < 2000:
+        attempts += 1
+        rad = r_avail * np.sqrt(rng.random())
+        ang = 2 * np.pi * rng.random()
+        p = (rad * np.sin(ang), rad * np.cos(ang))
+        if all(np.hypot(p[0] - q[0], p[1] - q[1]) >= min_sep for q in points):
+            points.append(p)
+    return np.array(points, dtype=np.float64).reshape(-1, 2)
 
 
 def _background(cfg: DropletSynthConfig) -> np.ndarray:
@@ -85,6 +111,17 @@ def generate(cfg: DropletSynthConfig = DropletSynthConfig()) -> tuple[np.ndarray
         }
     )
 
+    cell_r = cfg.cell_diameter_um / cfg.pixel_size_um / 2.0
+    cells: list[np.ndarray] = [np.empty((0, 2))] * n
+    if cfg.cell_lambda > 0:
+        cell_rng = np.random.default_rng([cfg.seed, 1])  # separate stream: see module docstring
+        wanted = cell_rng.poisson(cfg.cell_lambda, n)
+        cells = [
+            _place_cells(cell_rng, int(k), radius[i] - cfg.ring_width_px - 2.0 * cell_r - 2.0, 2.4 * cell_r)
+            for i, k in enumerate(wanted)
+        ]
+        droplets["n_cells"] = [len(c) for c in cells]
+
     background = _background(cfg)
     video = np.empty((cfg.n_frames, cfg.height, cfg.width), dtype=np.uint8)
     rows = []
@@ -102,6 +139,9 @@ def generate(cfg: DropletSynthConfig = DropletSynthConfig()) -> tuple[np.ndarray
             inner = _coverage(r - cfg.ring_width_px - d)
             ring = _coverage(r - d) - inner
             frame[y0:y1, x0:x1] += 8.0 * inner - cfg.ring_contrast * ring
+            for dy, dx in cells[i]:
+                dc = np.hypot(yy - (cy + dy), xx - (cx + dx))
+                frame[y0:y1, x0:x1] -= cfg.cell_contrast * _coverage(cell_r - dc)
             visible = (cx - r >= 0) and (cx + r <= cfg.width - 1)
             rows.append((t, i, cx, cy, visible))
         frame += rng.normal(0.0, cfg.noise_sigma, frame.shape)

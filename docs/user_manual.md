@@ -47,13 +47,15 @@ uv run vexel gui
 
 载入后，文件名下方显示帧数、画面尺寸和数据类型。只读元数据，大文件也立即显示。多通道数据只分析第 1 个通道。
 
-### 2.2 第二步：标定
+### 2.2 第二步：设置
 
 | 项 | 说明 |
 | :--- | :--- |
 | 像素尺寸 (µm) | 每个像素对应的实际长度 |
 | 帧间隔 (ms) | 相邻两帧的采集时间间隔 |
 | 流动方向 | 液滴在画面中左右流动选“水平”，上下流动选“竖直” |
+| 包裹计数 | 勾选后统计每个液滴里的细胞数，给出空滴、单包裹、多包裹比例并与泊松分布比较（见 5.5 节） |
+| 细胞外观 | 勾选包裹计数后出现。明场下细胞通常比液滴内部暗；荧光通道下细胞比液滴内部亮 |
 
 文件里有标定信息时会自动填入，并提示“已从文件读取标定，请核对”。
 
@@ -63,7 +65,7 @@ uv run vexel gui
 
 ### 2.3 高级设置
 
-点 **高级设置** 展开。默认值与内置配方 `droplet_basic` 一致；鼠标悬停在每一项上有说明。改坏了点 **恢复默认**。
+点 **高级设置** 展开。默认值与内置配方一致（不勾选包裹计数时为 `droplet_basic`，勾选时为 `droplet_encapsulation`）；鼠标悬停在每一项上有说明。改坏了点 **恢复默认**。
 
 | 项 | 对应配方参数 | 什么时候调 |
 | :--- | :--- | :--- |
@@ -73,6 +75,8 @@ uv run vexel gui
 | 粘连分离距离 | `seg.min_distance` | 一个液滴被切成几块时调高；相邻液滴连成一个时调低 |
 | 最大帧间位移 | `track.max_distance_px` | 同一液滴被数成多个时调高；不同液滴被连成一条轨迹时调低 |
 | 计数线位置 | `droplets.count_line` | 计数线处有遮挡或流道结构时移开 |
+| 细胞直径 | `inclusions.cell_diameter_px` | 仅包裹计数。按实际细胞在图像中的像素直径填写；两个相邻细胞被数成一个时调小 |
+| 细胞最低对比度 | `inclusions.min_contrast` | 仅包裹计数。默认“自动”，按每帧估计的噪声设阈值；漏数细胞时填一个较小的值，空液滴被数出细胞时填一个较大的值 |
 
 各项的详细含义与调整思路见第 7 节。
 
@@ -90,9 +94,11 @@ uv run vexel gui
 右侧从上到下：
 
 - **四个关键数字**：液滴数、平均粒径、粒径 CV、生成频率，每项下方附一行补充（轨迹数、标准差、粒径范围、平均间距）。各项含义见 5.1 节。
+- **包裹统计**（勾选包裹计数时）：平均每滴细胞数 λ 及其 95% 置信区间；空滴、单包裹、多包裹的实测比例，下方附泊松预期。各项含义见 5.5 节。
 - **黄色提示条**（只在需要时出现）：预览结果、未标定、没有检测到液滴、质控规则提示等。出现时应先看复核图确认结果。
-- **复核图**：均匀抽取的 4 帧，红线为分割轮廓。用 **上一张 / 下一张** 翻看；点图片用系统看图软件打开原图。检查要点见 5.3 节。
+- **复核图**：均匀抽取的 4 帧，红线为液滴轮廓；包裹计数时黄圈为检出的细胞。用 **上一张 / 下一张** 翻看；点图片用系统看图软件打开原图。检查要点见 5.3 节。
 - **粒径分布**：每个液滴一个计数，虚线为均值。
+- **包裹数分布**（勾选包裹计数时）：每滴含 0、1、2… 个细胞的液滴比例，蓝色为实测，灰色为泊松预期。
 
 右上角 **打开结果文件夹** 打开保存目录，里面的表格、溯源记录与命令行运行的完全相同（见第 5 节）。
 
@@ -105,6 +111,8 @@ uv run vexel gui
 ```bash
 uv run vexel run <数据> -r droplet_basic --pixel-size <像素尺寸> --frame-interval <帧间隔(秒)>
 ```
+
+勾选包裹计数时，把 `droplet_basic` 换成 `droplet_encapsulation`。细胞外观选“比液滴内部亮”等同于 `--set inclusions.polarity=bright`。
 
 在高级设置里改过的参数，等同于命令行的 `--set`。实际使用的全部参数都记录在结果文件夹的 `recipe.json` 中。
 
@@ -286,6 +294,10 @@ runs/exp01/
 | `circularity` | 圆度 4πA/P²，1 为正圆 |
 | `velocity` | 沿流动方向的速度 |
 | `cross_position` | 垂直于流动方向的位置 |
+| `n_inclusions` | 液滴里的细胞数（仅 `droplet_encapsulation`）。取该液滴各完整帧计数的众数；无法计数时为 −1 |
+| `inclusion_agreement` | 与众数一致的帧所占比例（仅 `droplet_encapsulation`）。低于 0.8 说明各帧计数不稳定，应在复核图里核对 |
+
+`encapsulation.distribution.csv`（仅 `droplet_encapsulation`，每个细胞数 k 一行）：`k`、`observed`（含 k 个细胞的液滴数）、`observed_fraction`、`poisson_fraction`（泊松概率）、`poisson_expected`（泊松预期液滴数）。
 
 `measure.table.csv` 与 `track.table.csv`（每帧每个目标一行）：带 `_px` 后缀的列是像素单位，不带的是物理单位。`touches_border` 为真表示目标碰到画面边缘，测径时不采用。
 
@@ -298,11 +310,43 @@ runs/exp01/
 - 相邻液滴是否被连成一个，或一个液滴被切成几块；
 - 流道壁、杂质、气泡是否被误当成液滴。
 
+包裹计数时，图中检出的细胞以黄圈标出。另需检查：
+
+- 每个细胞是否都有黄圈，空液滴里是否出现多余的黄圈；
+- 紧挨着的两个细胞是否被各自圈出；
+- 贴近液滴边缘的细胞是否漏圈（见第 11 节的限制）。
+
 ### 5.4 溯源记录
 
 `provenance.json` 记录：运行状态、配方哈希、输入文件的 SHA-256 与标定、Python 与各依赖的版本、每一步的耗时与质控指标、各输出文件的哈希，以及总的 `result_digest`。
 
 **同一配方加同一数据，`result_digest` 必须相同。** 两次运行结果是否一致，比较这个值即可。
+
+### 5.5 包裹统计
+
+使用 `droplet_encapsulation` 配方（或在界面中勾选包裹计数）时，`summary.json` 多出 `encapsulation.summary`。统计对象与 5.1 节相同：越过计数线、每个只计一次的液滴。
+
+| 字段 | 含义 |
+| :--- | :--- |
+| `n_droplets` | 参与包裹统计的液滴数 |
+| `n_inclusions_total` | 细胞总数 |
+| `lambda` | 平均每滴细胞数 λ（泊松参数的最大似然估计） |
+| `lambda_ci_low` / `_high` | λ 的 95% 精确置信区间（按细胞总数的泊松区间） |
+| `frac_empty` / `frac_single` / `frac_multi` | 实测的空滴（0 个）、单包裹（1 个）、多包裹（≥2 个）比例 |
+| `poisson_empty` / `_single` / `_multi` | 同一 λ 下泊松分布的预期比例：e^−λ、λe^−λ、其余 |
+| `single_among_occupied` | 有细胞的液滴中单包裹所占比例，即单细胞包裹的纯度 |
+| `variance`、`dispersion_index` | 计数的样本方差，离散指数 D = 方差 ÷ λ。泊松分布时 D ≈ 1 |
+| `chi2`、`chi2_dof`、`chi2_p` | 实测分布对泊松分布的卡方拟合优度检验。预期数不足 5 的相邻类别会合并；类别太少时为空 |
+| `n_low_agreement` | 各帧计数一致率低于 0.8 的液滴数 |
+| `n_excluded` | 无法计数（液滴内部区域太小）而未计入的液滴数 |
+
+**怎么读：**
+
+- 细胞随机上样时，包裹数应服从泊松分布。`chi2_p` 小于 0.05 表示实测分布与泊松分布差异显著。
+- D 明显大于 1：细胞聚集、成团或上样浓度随时间漂移。D 明显小于 1：排布比随机更规则（例如惯性有序包裹）。
+- `n_low_agreement` 不为 0 时，这些液滴的计数可能不准，先在复核图中核对，再看统计结论。
+
+**计数方法：** 每一帧里，每个液滴先向内收缩 `edge_margin_px` 个像素以避开深色轮廓；用液滴内部的中位灰度作为该液滴的背景；平滑后比背景暗（或亮）超过阈值的局部极值记为一个细胞。阈值默认自动：从液滴内部估计噪声水平，取平滑后噪声的 6 倍（`noise_factor`），因此 8 位和 16 位图像都适用。每个液滴最终取它完整出现在画面内的各帧计数的众数。
 
 ---
 
@@ -317,6 +361,8 @@ uv run vexel recipes
 uv run vexel recipes --show droplet_basic
 ```
 
+内置两个配方：`droplet_basic` 做液滴粒径、计数与频率；`droplet_encapsulation` 在此基础上加包裹计数和泊松统计。
+
 `droplet_basic` 的五个步骤：
 
 | 步骤 id | 算子 | 作用 |
@@ -326,6 +372,13 @@ uv run vexel recipes --show droplet_basic
 | `measure` | `measure.regionprops` | 测量每个目标的位置、面积、粒径、圆度 |
 | `track` | `track.link` | 把逐帧检测连成轨迹 |
 | `droplets` | `droplet.summary` | 按计数线去重，输出每液滴表和汇总统计 |
+
+`droplet_encapsulation` 多两步，并让 `droplets` 步骤接收细胞计数：
+
+| 步骤 id | 算子 | 作用 |
+| :--- | :--- | :--- |
+| `inclusions` | `droplet.inclusions` | 逐帧数每个液滴里的细胞，并输出细胞标记供复核图使用 |
+| `encapsulation` | `droplet.poisson` | 汇总包裹数分布，与泊松分布比较 |
 
 ### 6.2 配方结构
 
@@ -354,7 +407,7 @@ uv run vexel recipes --show droplet_basic
 - `inputs`：每个输入接到哪里。`"source"` 是原始图像，其余写成 `"步骤id.输出名"`，只能引用前面的步骤。
 - `params`：省略的参数取默认值。写错参数名会报错，不会被悄悄忽略。
 - `qc`：可选的质控规则，见 6.4。
-- `review`：可选，指定复核图用哪个图像和哪个分割结果。
+- `review`：可选，指定复核图用哪个图像（`image`）和哪个分割结果（`labels`，红线）；`marks` 可再指定一组标记（黄圈），如检出的细胞。
 
 运行前会检查：算子是否存在、接线的数据类型是否匹配（图像 / 标签 / 表格 / 汇总）、参数是否合法。
 
@@ -396,7 +449,11 @@ uv run vexel run my_video.avi -r my_recipe.json
 | `measure.regionprops` | `n_objects`（带 `.mean/.min/.max`） |
 | `track.link` | `n_tracks`、`mean_track_length` |
 | `droplet.summary` | `n_droplets`、`diameter_cv_percent`、`circularity_median` |
+| `droplet.inclusions` | `n_inclusions`、`contrast_threshold`（各带 `.mean/.min/.max`） |
+| `droplet.poisson` | `n_droplets`、`dispersion_index`、`chi2_p`、`low_agreement_fraction` |
 | `stats.describe` | `n` |
+
+`droplet_encapsulation` 默认对 `low_agreement_fraction` 设了上限 0.1：计数不稳定的液滴超过 10% 时给出警告。
 
 ---
 
@@ -419,6 +476,12 @@ uv run vexel run my_video.avi -r my_recipe.json
 | 液滴沿竖直方向流动 | `--set droplets.flow_axis=y` |
 | 计数线处有遮挡或流道结构 | 调整 `droplets.count_line`（0 到 1 之间，沿流动方向的比例位置） |
 | 背景扣除后液滴残影明显 | 液滴过密，同一像素超过一半时间被液滴覆盖，时间中值不再是背景。调高 `bg.max_frames`；仍不行则该方法不适用 |
+| 细胞漏数（复核图中细胞没有黄圈） | 设定 `inclusions.min_contrast` 为一个较小的固定值（参考 `provenance.json` 中 `contrast_threshold.mean` 的自动值，从它的一半试起）；或调低 `inclusions.noise_factor` |
+| 空液滴里数出细胞（噪点、杂质被圈出） | 设定 `inclusions.min_contrast` 为一个较大的固定值；或调高 `inclusions.noise_factor` |
+| 两个紧挨的细胞被数成一个 | 调小 `inclusions.cell_diameter_px`；或设定 `inclusions.min_separation_px` |
+| 一个细胞被数成两个 | 调大 `inclusions.cell_diameter_px` |
+| 贴近液滴边缘的细胞漏数 | 调小 `inclusions.edge_margin_px`；但过小会把液滴的深色轮廓误数成细胞 |
+| 细胞比液滴内部亮（荧光） | `--set inclusions.polarity=bright` |
 
 **关于粒径偏差：** 阈值法测得的边界位置受平滑量和阈值影响。在合成数据上，`smooth_sigma` 为 1.0 时粒径均值偏大约 2.75%，为 0.5 时约 0.6%。对绝对粒径有要求时，应该用已知尺寸的样品或人工标注做一次校准（见第 9 节），不要直接相信默认参数。
 
@@ -444,13 +507,15 @@ uv run vexel ops
 | `measure.regionprops` | frame | 标签（+ 可选强度图像）→ 表格 | 位置、面积、等效直径、长短轴、偏心率、圆度、平均强度 |
 | `track.link` | window | 表格 → 表格 | 线性指派追踪，增加 `track_id` 列 |
 | `stats.describe` | window | 表格 → 汇总 | 某一列的 n、均值、标准差、CV、中位数、范围 |
-| `droplet.summary` | window | 表格 → 表格 + 汇总 | 计数线去重、粒径统计、生成频率、速度、间距 |
+| `droplet.summary` | window | 表格（+ 可选细胞计数表）→ 表格 + 汇总 | 计数线去重、粒径统计、生成频率、速度、间距；有细胞计数表时为每个液滴给出细胞数 |
+| `droplet.inclusions` | frame | 图像 + 标签 → 表格 + 标签 | 数每个液滴内的细胞（暗点或亮点），输出每帧计数和细胞标记 |
+| `droplet.poisson` | window | 表格 → 表格 + 汇总 | 包裹数分布、λ、空滴/单包裹/多包裹比例、泊松预期、离散指数、卡方检验 |
 
 ---
 
 ## 9. 用真值验证
 
-`vexel validate` 把一次运行的汇总结果与真值比对，四项全部在容差内才算通过。
+`vexel validate` 把一次运行的汇总结果与真值比对，所有检查项都在容差内才算通过。基本检查四项：液滴数、粒径均值、粒径 CV、生成频率。运行用了 `droplet_encapsulation` 且真值带细胞数时，另加五项：逐液滴细胞数错误率、λ、空滴比例、单包裹比例、多包裹比例。
 
 ```bash
 uv run vexel validate runs/exp01 --truth path/to/truth
@@ -462,6 +527,9 @@ uv run vexel validate runs/exp01 --truth path/to/truth
 | `--diameter-tol` | 0.02 | 粒径均值允许的相对误差 |
 | `--cv-tol` | 1.0 | CV 允许的绝对误差，百分点 |
 | `--frequency-tol` | 0.02 | 生成频率允许的相对误差 |
+| `--mismatch-tol` | 0.05 | 细胞数数错的液滴允许占的比例 |
+| `--lambda-tol` | 0.05 | λ 允许的相对误差 |
+| `--fraction-tol` | 0.03 | 空滴、单包裹、多包裹比例允许的绝对误差 |
 
 **默认容差是占位值**，尚未与实际使用方约定。
 
@@ -475,6 +543,14 @@ uv run vexel validate runs/exp01 --truth path/to/truth
 droplet_id,diameter_um
 0,58.2
 1,60.1
+```
+
+要验证包裹计数，再加一列 `n_cells`（该液滴里的细胞数）：
+
+```text
+droplet_id,diameter_um,n_cells
+0,58.2,1
+1,60.1,0
 ```
 
 `positions.csv`，每个液滴在每一帧的中心 x 坐标（像素）：
@@ -491,7 +567,7 @@ frame,droplet_id,x_px
 {"frame_interval_s": 0.001}
 ```
 
-比对时会用与分析相同的计数线和帧范围，从 `positions.csv` 算出哪些液滴越线，再比较这些液滴的数量、粒径均值、CV 和频率。
+比对时会用与分析相同的计数线和帧范围，从 `positions.csv` 算出哪些液滴越线，再比较这些液滴的数量、粒径均值、CV 和频率。细胞数按液滴逐个比对：测得的液滴与真值液滴按越线时刻配对（相差不超过 1 帧），再看细胞数是否相同。
 
 限制：运行必须已标定为 um；目前只支持沿 x 方向流动的数据。
 
@@ -508,9 +584,12 @@ uv run vexel synth data/noisy --frames 1000 --noise 8 --diameter 40 --cv 5 --fre
 | `--cv` | 3 | 粒径 CV，% |
 | `--frequency` | 100 | 生成频率，Hz |
 | `--noise` | 3 | 相机噪声标准差，灰度级 |
+| `--cells` | 0 | 平均每滴细胞数 λ，按泊松分布放入细胞；0 为不放细胞 |
 | `--seed` | 0 | 随机种子 |
 
-合成视频固定为 256×768、2 um/像素、1 ms/帧、流速 20 mm/s。它是理想化的：液滴为正圆、匀速、不粘连、轮廓清晰。**在合成数据上通过不代表在真实数据上准确。**
+合成视频固定为 256×768、2 um/像素、1 ms/帧、流速 20 mm/s。细胞为直径 10 µm（5 像素）的深色圆点，比液滴内部暗 50 个灰度级，随液滴平移，彼此至少相隔 1 个像素。它是理想化的：液滴为正圆、匀速、不粘连、轮廓清晰；细胞形状一致、不转动、不贴边。**在合成数据上通过不代表在真实数据上准确。**
+
+在合成数据上的包裹计数准确度（每组 40 个液滴，共 14 组）：λ 从 0.3 到 3、噪声 3 到 12 个灰度级、细胞对比度低至 15 个灰度级时，逐液滴细胞数全部正确；只有细胞对比度 15 且噪声 6 时（信噪比约 2.5），40 个液滴中有 3 个数错，且这 3 个的帧间一致率都低于 0.4。
 
 ---
 
@@ -542,11 +621,13 @@ uv run vexel licenses
 ## 11. 当前版本的限制
 
 - 桌面界面只覆盖单个文件的分析与结果查看；HTML 报告、批量处理、目录监视、实时回放、在图上手工纠错都还没有。
-- 桌面界面只能使用内置配方 `droplet_basic`；自定义配方需用命令行。
+- 桌面界面只能使用两个内置配方 `droplet_basic` 与 `droplet_encapsulation`；自定义配方需用命令行。
 - 只处理 2D 时序。多通道或多 z 平面的数据一次只分析一个通道、一个平面；3D 算子尚不执行。
 - 分割只有阈值加分水岭一种方法。对比度低、轮廓不闭合、严重粘连的液滴效果有限。
 - 粒径是 2D 投影的等效直径，没有压扁液滴的体积换算。
-- 没有包裹计数、泊松统计、荧光强度分析。
+- 没有荧光强度分析（粒径对强度散点图、阳性率）。
+- 包裹计数只用一个通道：液滴分割和细胞计数在同一个通道上进行。还不能用明场通道分割液滴、用荧光通道数细胞。
+- 包裹计数要求细胞在液滴内部可分辨。紧贴液滴边缘（`edge_margin_px` 以内）的细胞会漏数；成团、重叠的细胞会少数；液滴内部亮度很不均匀（如明场下的透镜效应）时，自动阈值偏保守。
 - 准确度只在合成数据上验证过，尚未在真实液滴数据上验证。
 - 视频按 RGB 三通道解码，灰度视频会多占内存。
 - 每个处理块最多占用约 2 GB 内存（系统内存的 10%，上限 2 GB）。

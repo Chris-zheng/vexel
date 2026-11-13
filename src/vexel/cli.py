@@ -142,12 +142,15 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_validate(args: argparse.Namespace) -> int:
     from vexel.packs.droplet.validate import Tolerances, validate_run
 
-    tol = Tolerances(args.count_tol, args.diameter_tol, args.cv_tol, args.frequency_tol)
+    tol = Tolerances(
+        args.count_tol, args.diameter_tol, args.cv_tol, args.frequency_tol, args.mismatch_tol, args.lambda_tol, args.fraction_tol
+    )
     checks = validate_run(args.run, args.truth, tol)
     print(f"{'metric':<22}{'measured':>12}{'truth':>12}{'error':>12}{'tolerance':>14}  result")
     for c in checks:
-        err = "-" if c.error is None else (f"{100 * c.error:.2f}%" if c.kind == "rel" else f"{c.error:.3g}")
-        tolerance = f"{100 * c.tolerance:g}%" if c.kind == "rel" else f"{c.tolerance:g}"
+        pct = c.kind in ("rel", "share")
+        err = "-" if c.error is None else (f"{100 * c.error:.2f}%" if pct else f"{c.error:.3g}")
+        tolerance = f"{100 * c.tolerance:g}%" if pct else f"{c.tolerance:g}"
         print(f"{c.name:<22}{_fmt(c.measured):>12}{_fmt(c.truth):>12}{err:>12}{tolerance:>14}  {'PASS' if c.passed else 'FAIL'}")
     ok = all(c.passed for c in checks)
     print("\nvalidation " + ("PASSED" if ok else "FAILED"))
@@ -164,6 +167,7 @@ def cmd_synth(args: argparse.Namespace) -> int:
         diameter_cv=args.cv / 100.0,
         frequency_hz=args.frequency,
         noise_sigma=args.noise,
+        cell_lambda=args.cells,
     )
     path = write_dataset(args.out, cfg)
     print(f"video  {path}")
@@ -257,6 +261,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--diameter-tol", type=float, default=0.02, help="allowed relative error of mean diameter")
     p.add_argument("--cv-tol", type=float, default=1.0, help="allowed absolute error of CV, percentage points")
     p.add_argument("--frequency-tol", type=float, default=0.02, help="allowed relative error of generation frequency")
+    p.add_argument("--mismatch-tol", type=float, default=0.05, help="allowed share of droplets with a wrong cell count")
+    p.add_argument("--lambda-tol", type=float, default=0.05, help="allowed relative error of lambda (mean cells per droplet)")
+    p.add_argument("--fraction-tol", type=float, default=0.03, help="allowed absolute error of empty/single/multiple shares")
     p.set_defaults(func=cmd_validate)
 
     p = sub.add_parser("synth", help="generate a synthetic droplet video with exact ground truth")
@@ -267,6 +274,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cv", type=float, default=3.0, help="diameter CV, percent")
     p.add_argument("--frequency", type=float, default=100.0, help="generation frequency, Hz")
     p.add_argument("--noise", type=float, default=3.0, help="camera noise sigma, gray levels")
+    p.add_argument("--cells", type=float, default=0.0, help="mean cells per droplet (Poisson); 0 = no cells")
     p.set_defaults(func=cmd_synth)
 
     p = sub.add_parser("convert", help="convert an input to an OME-Zarr pyramid")

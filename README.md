@@ -18,6 +18,8 @@ uv run vexel gui
 uv run vexel synth data/demo                       # 合成液滴视频 + 精确真值
 uv run vexel run data/demo/droplets.ome.tif -r droplet_basic -o runs/demo
 uv run vexel validate runs/demo --truth data/demo/truth
+uv run vexel synth data/cells --cells 1.0                # 液滴内按泊松分布放入细胞
+uv run vexel run data/cells/droplets.ome.tif -r droplet_encapsulation -o runs/cells
 uv run pytest
 ```
 

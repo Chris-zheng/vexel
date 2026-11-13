@@ -131,3 +131,31 @@ def test_previous_results_can_be_reopened(window, droplet_dataset):
     assert runs, "depends on test_full_run_matches_cli_and_is_saved_next_to_data"
     assert window.load_results(runs[-1])
     assert window.result_path.text() == str(runs[-1])
+
+
+def test_cell_counting_switches_recipe_and_shows_encapsulation(window, cells_dataset):
+    assert window.recipe_name() == "droplet_basic"
+    window.cells_check.setChecked(True)
+    assert window.recipe_name() == "droplet_encapsulation" and window.overrides() == {}
+    window.polarity_combo.setCurrentIndex(1)
+    window.spins["inclusions.min_contrast"][0].setValue(20)
+    assert window.overrides() == {"inclusions.polarity": "bright", "inclusions.min_contrast": 20.0}
+    window.polarity_combo.setCurrentIndex(0)
+    window.reset_advanced()
+    assert window.overrides() == {}
+
+    window.open_path(cells_dataset / "droplets.ome.tif")
+    assert window.start()
+    wait_until_idle(window)
+    assert window.warnings == []
+    provenance = json.loads((window.run_dir / "provenance.json").read_text())
+    assert provenance["recipe"]["sha256"] == Recipe.load("droplet_encapsulation").resolve().digest()
+    summary = json.loads((window.run_dir / "summary.json").read_text())["encapsulation.summary"]
+    assert window.enc_cards.isVisibleTo(window) and window.count_box.isVisibleTo(window)
+    assert window.card_empty.value.text() == f"{100 * summary['frac_empty']:.1f} %"
+    assert window.count_chart.k.size >= 3
+    assert "黄圈" in window.viewer.caption.text()
+
+    window.cells_check.setChecked(False)
+    window.load_results(window.run_dir)  # still shows encapsulation for a run that has it
+    assert window.enc_cards.isVisibleTo(window)
