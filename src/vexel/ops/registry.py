@@ -135,6 +135,9 @@ def load_builtin_ops() -> None:
     """Import every module that registers operators (idempotent)."""
     from vexel.ops import classify, measure, preprocess, segment, stats, track  # noqa: F401
     from vexel.packs.droplet import ops as _droplet  # noqa: F401
+    from vexel.plugins import load_plugins
+
+    load_plugins()  # operators from installed plugins (entry point group "vexel.plugins")
 
 
 def get_op(name: str) -> OpSpec:

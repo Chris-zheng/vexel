@@ -202,6 +202,87 @@ def cmd_convert(args: argparse.Namespace) -> int:
 _FLAGGED = ("gpl", "agpl", "non-commercial", "noncommercial", "cc-by-nc", "cc by-nc")
 
 
+def cmd_batch_init(args: argparse.Namespace) -> int:
+    from vexel.batch.design import scan_folder
+
+    out = Path(args.output) if args.output else Path(args.folder) / "design.csv"
+    if out.exists() and not args.overwrite:
+        raise FileExistsError(f"{out} exists; pass --overwrite to replace it")
+    table = scan_folder(args.folder)
+    if table.empty:
+        print(f"no recordings found under {args.folder}", file=sys.stderr)
+        return 2
+    if out.resolve().parent != Path(args.folder).resolve():
+        table["file"] = [str((Path(args.folder) / f).resolve()) for f in table["file"]]
+    table.to_csv(out, index=False, encoding="utf-8-sig")  # with BOM: Excel opens it with the right encoding
+    print(f"{len(table)} recordings -> {out}")
+    print("fill in group (condition) and replicate (independent chip / day / preparation), then:")
+    print(f"  vexel batch run {out} -r <recipe> -o <output folder>")
+    return 0
+
+
+def cmd_batch_run(args: argparse.Namespace) -> int:
+    from vexel.batch import Design, run_batch
+    from vexel.batch.design import scan_folder
+    from vexel.engine import Recipe
+
+    source = Path(args.design)
+    design = Design.from_frame(scan_folder(source), base=source) if source.is_dir() else Design.load(source)
+    missing = design.missing()
+    if missing:
+        print(f"warning: {len(missing)} file(s) not found, they will be reported as missing:", file=sys.stderr)
+        for r in missing[:10]:
+            print(f"  row {r.index}: {r.file}", file=sys.stderr)
+    recipe = Recipe.load(args.recipe)
+    out = Path(args.out) if args.out else Path("runs") / f"batch-{recipe.name}-{datetime.now():%Y%m%d-%H%M%S}"
+    print(f"batch   {len(design.rows)} files, {len(design.groups)} group(s)  recipe {recipe.name}  ->  {out}")
+    result = run_batch(design, recipe, out, settings=_parse_overrides(args.set) if args.set else None, resume=not args.no_resume,
+                       hash_input=not args.no_input_hash, max_frames=args.max_frames, workers=args.workers, progress=print)  # fmt: skip
+    a = result.stats
+    print(f"\n{result.n_ok} / {len(result.outcomes)} files completed")
+    for o in result.failed:
+        print(f"  ! row {o.row} {Path(o.file).name}: {o.status} {o.error}")
+    if a is not None and not a.comparisons.empty:
+        print("\ncomparisons (unit: " + a.unit_column + ")")
+        for r in a.comparisons.itertuples():
+            p = r.p_holm if isinstance(r.p_holm, float) and r.p_holm == r.p_holm else r.p
+            print(f"  {r.metric:<32} {r.comparison:<24} p={_fmt(p)}  {r.effect_name}={_fmt(r.effect)}")
+    for z, e in (a.notes if a is not None else []):
+        print(f"  note: {e}")
+    print(f"\nreport   {out / 'report.html'}\ntables   {out / 'results.csv'}, groups.csv, comparisons.csv\nreproduce  python {out / 'reproduce.py'}")
+    return 0 if not result.failed else 4
+
+
+def cmd_plugins(args: argparse.Namespace) -> int:
+    from vexel.ops import list_ops
+    from vexel.plugins import file_status, load_plugins, model_cards
+
+    list_ops()  # loads built-in operators and plugins
+    plugins, cards = load_plugins(), model_cards()
+    if args.json:
+        print(json.dumps({"plugins": [p.__dict__ for p in plugins],
+                          "models": [c.to_json() | {"file_status": file_status(c)} for c in cards]}, indent=2, ensure_ascii=False))  # fmt: skip
+        return 0
+    if not plugins and not cards:
+        print("no plugins installed (entry point group 'vexel.plugins'); see docs/plugin_interface.md")
+        return 0
+    for p in plugins:
+        head = f"{p.name}  {p.distribution} {p.version}".rstrip()
+        print(f"{head}  [{p.status}]" + (f"  {p.error}" if p.error else ""))
+        for op in p.ops:
+            print(f"  op     {op}")
+        for m in p.models:
+            print(f"  model  {m}")
+    if cards:
+        print("\nmodels")
+        for c in cards:
+            use = {True: "commercial use ok", False: "NON-COMMERCIAL", None: "licence to check"}[c.commercial_use]
+            data = ", ".join(f"{d.name} ({d.license})" for d in c.training_data) or "training data not declared"
+            print(f"  {c.ref:<32} {c.task:<18} {c.framework:<8} weights: {c.license}; {data}; {use}")
+            print(f"  {'':<32} file: {file_status(c)}")
+    return 1 if any(p.status == "failed" for p in plugins) else 0
+
+
 def cmd_bugreport(args: argparse.Namespace) -> int:
     from vexel.bugreport import write_bundle
 
@@ -642,6 +723,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--overwrite", action="store_true")
     _add_calibration(p)
     p.set_defaults(func=cmd_convert)
+
+    p = sub.add_parser("batch", help="analyse many recordings with one recipe; group statistics from a design table")
+    bsub = p.add_subparsers(dest="batch_command", required=True)
+    b = bsub.add_parser("init", help="draft a design table (CSV) for every recording under a folder")
+    b.add_argument("folder")
+    b.add_argument("-o", "--output", help="design table to write (default: <folder>/design.csv)")
+    b.add_argument("--overwrite", action="store_true")
+    b.set_defaults(func=cmd_batch_init)
+    b = bsub.add_parser("run", help="run a recipe on every file of a design table (or every recording under a folder)")
+    b.add_argument("design", help="design table (CSV) or a folder")
+    b.add_argument("-r", "--recipe", required=True, help="built-in recipe name or recipe JSON (e.g. from vexel plan)")
+    b.add_argument("-o", "--out", help="batch output folder; run the same command again to resume")
+    b.add_argument("--set", action="append", metavar="KEY=VALUE", help="setting for every file (repeatable)")
+    b.add_argument("--no-resume", action="store_true", help="re-run files that already completed")
+    b.add_argument("--no-input-hash", action="store_true")
+    b.add_argument("--max-frames", type=int)
+    b.add_argument("--workers", type=int)
+    b.set_defaults(func=cmd_batch_run)
+
+    p = sub.add_parser("plugins", help="installed plugins and models: operators, licences, training data, weight files")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_plugins)
 
     p = sub.add_parser("bugreport", help="write a diagnostics zip for a problem report (no images, no keys)")
     p.add_argument("runs", nargs="*", help="run folders the problem is about")

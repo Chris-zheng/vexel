@@ -36,6 +36,7 @@ from vexel.engine.corrections import Corrections, apply_label_edits, apply_table
 from vexel.engine.qc import QCGateError, Violation, aggregate_frames, evaluate
 from vexel.engine.recipe import SOURCE, Recipe, Step
 from vexel.ops.registry import Context, Kind, OpResult, OpSpec, Scope, get_op
+from vexel.plugins import model_record
 
 _CHUNK_BYTES = 16 * 1024**2
 _RUN_MARKERS = ("provenance.json", "recipe.json")
@@ -369,6 +370,7 @@ def run_recipe(
                     "duration_s": round(time.perf_counter() - ts, 4),
                     "qc": _finite(metrics),
                     "qc_violations": [v.to_json() for v in failed],
+                    **({"model": m} if (m := model_record(params, spec)) else {}),
                 }
             )
             for v in failed:

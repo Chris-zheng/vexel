@@ -198,6 +198,10 @@ class MainWindow(QMainWindow):
         self.live_btn.setToolTip("边采集（或边回放）边分析：滚动统计、漂移报警、处理帧率与丢帧")
         self.live_btn.clicked.connect(self.open_live)
         v.addWidget(self.live_btn)
+        self.batch_btn = QPushButton("批量分析（多个文件、分组统计）…")
+        self.batch_btn.setToolTip("用当前的设置分析一个文件夹或一张设计表里的所有录像，按组比较结果")
+        self.batch_btn.clicked.connect(self.open_batch)
+        v.addWidget(self.batch_btn)
         self.file_label = QLabel("未选择数据")
         self.file_label.setObjectName("fileName")
         self.file_label.setWordWrap(True)
@@ -1134,6 +1138,27 @@ class MainWindow(QMainWindow):
         self.review_window.show()
         self.review_window.raise_()
 
+    def open_batch(self) -> bool:
+        from vexel.ui.batch import BatchWindow
+
+        if getattr(self, "batch_window", None) is not None and self.batch_window.is_running():
+            self.batch_window.show()
+            self.batch_window.raise_()
+            return True
+        try:
+            pixel = _parse_positive(self.pixel_edit.text())
+            interval = _parse_positive(self.interval_edit.text())
+            recipe = self.build_recipe()
+            recipe.resolve()
+        except Exception as e:  # noqa: BLE001
+            self.warn("设置有误", str(e))
+            return False
+        changed = self.overrides()
+        label = f"配方 {recipe.name}" + (f"，改动的设置 {len(changed)} 项" if changed else "，默认设置") + "（来自主窗口当前的选择）"
+        self.batch_window = BatchWindow(recipe, label, pixel, interval / 1000.0 if interval else None)
+        self.batch_window.show()
+        return True
+
     def open_live(self) -> None:
         from vexel.ui.live import LiveWindow
 
@@ -1143,7 +1168,9 @@ class MainWindow(QMainWindow):
         self.live_window.raise_()
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        for name in ("live_window", "review_window"):
+        if getattr(self, "batch_window", None) is not None and self.batch_window.is_running():
+            self.batch_window.shutdown()
+        for name in ("live_window", "review_window", "batch_window"):
             if getattr(self, name, None) is not None:
                 getattr(self, name).close()
         if self._worker is not None:

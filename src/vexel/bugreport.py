@@ -60,6 +60,15 @@ def environment() -> dict[str, Any]:
                 planning[name]["base_url"] = "custom"
     out["planning_models"] = planning
     out["vexel_home_set"] = "VEXEL_HOME" in os.environ
+    try:
+        from vexel.ops import list_ops
+        from vexel.plugins import file_status, load_plugins, model_cards
+
+        list_ops()
+        out["plugins"] = [{"name": p.name, "version": p.version, "status": p.status, "error": p.error} for p in load_plugins()]
+        out["models"] = [{"ref": c.ref, "file": file_status(c)} for c in model_cards()]
+    except Exception as e:  # noqa: BLE001
+        out["plugins"] = {"error": type(e).__name__}
     return out
 
 

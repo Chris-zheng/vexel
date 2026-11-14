@@ -48,6 +48,7 @@ from vexel.engine.qc import Violation, aggregate_frames, evaluate
 from vexel.engine.recipe import SOURCE, Recipe
 from vexel.ops.registry import Context, Kind, Scope, get_op
 from vexel.ops.track import LinkParams, displacements, global_flow, pair_shift
+from vexel.plugins import model_record
 from vexel.sources.replay import Frame, StreamSource
 
 _BACKGROUND = "preprocess.static_background"
@@ -746,6 +747,7 @@ def run_stream(
             "id": step.id, "op": spec.name, "op_version": spec.version, "scope": spec.scope.value,
             "streamed": step.id in backgrounds or step.id == plan.track,
             "duration_s": round(step_time[step.id], 4), "qc": _finite(metrics), "qc_violations": [v.to_json() for v in failed],
+            **({"model": m} if (m := model_record(params[step.id], spec)) else {}),
         })  # fmt: skip
 
     lat = np.array(latencies) * 1e3

@@ -1,6 +1,6 @@
 [project]
 name = "vexel"
-version = "0.5.0b1"
+version = "0.6.0b1"
 description = "Agent-native scientific image analysis: LLM plans, deterministic operators compute."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

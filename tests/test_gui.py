@@ -508,3 +508,39 @@ def test_export_bugreport_from_the_window(window, tmp_path):
     out = window.export_bugreport(tmp_path / "bug.zip")
     assert out.exists() and "environment.json" in zipfile.ZipFile(out).namelist()
     assert "诊断包已保存" in window.status.text()
+
+
+def test_batch_window_runs_a_folder(window, tmp_path):
+    import pandas as pd
+
+    from vexel.synthetic.droplets import DropletSynthConfig, write_dataset
+
+    for g, d in (("A", 50.0), ("B", 64.0)):
+        for k in range(2):
+            write_dataset(tmp_path / "data" / g / f"chip{k}", DropletSynthConfig(n_frames=100, height=128, width=384, diameter_mean_um=d, seed=k))
+    window.pixel_edit.setText("2.0")
+    assert window.open_batch()
+    bw = window.batch_window
+    bw.warnings = []
+    bw.warn = lambda title, text: bw.warnings.append((title, text))
+    assert bw.load_folder(tmp_path / "data") == 4
+    assert [bw._cell(i, 1) for i in range(4)] == ["A", "A", "B", "B"]
+    bw.table.item(3, 2).setText("chip0")  # B's two files are one chip: averaged into one replicate
+    design = bw.save_design(tmp_path / "design.csv")
+    saved = pd.read_csv(design, encoding="utf-8-sig")
+    assert list(saved["replicate"]) == ["chip0", "chip1", "chip0", "chip0"] and set(saved["pixel_size_um"]) == {2.0}
+    bw.out_edit.setText(str(tmp_path / "out"))
+    assert bw.start()
+    loop = QEventLoop()
+    poll = QTimer()
+    poll.timeout.connect(lambda: None if bw.is_running() else loop.quit())
+    poll.start(30)
+    loop.exec()
+    poll.stop()
+    assert bw.warnings == [] and bw.result is not None and bw.result.n_ok == 4
+    assert [bw._cell(i, 5) for i in range(4)] == ["完成"] * 4
+    assert bw.report_btn.isEnabled() and "完成：4 / 4" in bw.status.text()
+    units = pd.read_csv(tmp_path / "out" / "replicates.csv")
+    assert len(units) == 3  # A: two chips; B: one chip
+    window.batch_window = None
+    _dispose(bw)

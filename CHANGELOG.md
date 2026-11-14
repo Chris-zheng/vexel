@@ -1,5 +1,17 @@
 # 更新记录
 
+## 0.6.0b1（内测版，2026-11）
+
+第六阶段：批处理与实验级统计。
+
+- `vexel batch init` / `vexel batch run` 与桌面界面的“批量分析（多个文件、分组统计）…”：一个配方分析设计表里的每个录像；单个文件出错只记录不中断；中途停止后再运行同一命令从停下处继续。
+- 设计表：文件、组、重复、单文件标定与设置、任意元数据列；可从文件夹自动起草（子文件夹名作组与重复）；Excel 存的 UTF-8 / GBK CSV 都能读。
+- 分组统计以重复为单位（同组同一重复的文件先平均）：描述统计与 95% 置信区间；两组 Welch t、均值差 CI、Hedges' g、Mann–Whitney U；多组 Welch ANOVA、Kruskal–Wallis、η²、两两 Welch t 加 Holm 校正；设计薄弱时给出提示。
+- 批量报告（分组图、表、文件列表、方法、溯源）、`results.csv` / `replicates.csv` / `groups.csv` / `comparisons.csv`。
+- `reproduce.py`：在新进程中重跑全部文件、重算统计，并逐个核对结果摘要。
+- 英文方法段落：单次报告与批量报告都附英文 Methods，另存 `methods_en.txt`。
+- 模型插件接口：入口点 `vexel.plugins`、模型卡（版本、权重 SHA-256、许可证、训练数据、能否商用）、任务约定、溯源记录；`vexel plugins` 命令。见 docs/plugin_interface.md。
+
 ## 0.5.0b1（内测版，2026-11）
 
 第一个对外的内测版本，覆盖路线图第一至第五阶段。详见 [用户手册](docs/user_manual.md) 与 [内测说明](docs/closed_testing/README.md)。

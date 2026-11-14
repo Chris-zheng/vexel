@@ -269,6 +269,30 @@ def corrections_section(c: dict[str, Any]) -> list[str]:
     return out
 
 
+_DESCRIBED = {
+    "preprocess.static_background", "segment.threshold_watershed", "segment.circles", "measure.regionprops", "droplet.inclusions",
+    "droplet.intensity", "track.link", "droplet.summary", "droplet.poisson", "droplet.positivity", "droplet.flags",
+}  # fmt: skip
+
+
+def _other_step(step: dict[str, Any], provenance: dict[str, Any], lang: str) -> str:
+    """A step without a hand-written methods sentence (plugins, newer operators): name the
+    operator and, when it uses a trained model, the model, its training data and licence."""
+    rec = next((s for s in provenance.get("steps", []) if s.get("id") == step["id"]), {})
+    model = rec.get("model")
+    if lang == "zh":
+        text = f"步骤 {step['id']} 使用算子 {step['op']}（版本 {rec.get('op_version', '')}；参数见配方）"
+        if model:
+            data = "、".join(f"{d['name']}（{d['license']}）" for d in model.get("training_data", [])) or "未声明"
+            text += f"，其中使用训练好的模型 {model['ref']}（{model['framework']}，权重 SHA-256 {model.get('sha256', '')[:16]}…，许可证 {model['license']}；训练数据：{data}）"
+        return text + "。"
+    text = f"Step {step['id']} used operator {step['op']} (version {rec.get('op_version', '')}; parameters in the recipe)"
+    if model:
+        data = ", ".join(f"{d['name']} ({d['license']})" for d in model.get("training_data", [])) or "not declared"
+        text += f", with the trained model {model['ref']} ({model['framework']}, weights SHA-256 {model.get('sha256', '')[:16]}…, licence {model['license']}; training data: {data})"
+    return text + "."
+
+
 def methods_text(recipe: dict[str, Any], provenance: dict[str, Any]) -> list[str]:
     """A methods paragraph per step, generated from the frozen recipe."""
     out: list[str] = []
@@ -353,6 +377,8 @@ def methods_text(recipe: dict[str, Any], provenance: dict[str, Any]) -> list[str
                 f"以 {p['column']} 判定阴阳性（{method}）。阳性比例 p 的置信区间为 Wilson 95% 区间，"
                 "每滴平均拷贝数按 λ = −ln(1 − p) 计算，浓度为 λ 除以平均液滴体积。"
             )
+        elif op not in _DESCRIBED:
+            out.append(_other_step(step, provenance, "zh"))
     env = provenance.get("environment", {})
     pk = env.get("packages", {})
     libs = "、".join(f"{k} {pk[k]}" for k in ("numpy", "scipy", "scikit-image", "laptrack", "scikit-learn") if k in pk)
@@ -362,6 +388,112 @@ def methods_text(recipe: dict[str, Any], provenance: dict[str, Any]) -> list[str
         out.append(
             f"自动分析结果经人工复核：在复核界面中对分割轮廓与逐液滴结果做了 {corr.get('n_applied', 0)} 处修正"
             "（删除误检、补画漏检、修改细胞数或阴阳性、排除杂质等），并按修正重新运行同一配方；修改记录随结果保存，可复现。"
+        )
+    return out
+
+
+def methods_text_en(recipe: dict[str, Any], provenance: dict[str, Any]) -> list[str]:
+    """The methods paragraphs of :func:`methods_text`, in English."""
+    out: list[str] = []
+    inp = recipe.get("input", {})
+    channels = inp.get("channels", {})
+    if channels:
+        names = ", ".join(f"{k} in channel {v}" for k, v in channels.items())
+        out.append(f"Droplets were segmented in channel {inp.get('channel', 0)}; {names} (channels numbered from 0).")
+    for step in recipe.get("steps", []):
+        p, op = step.get("params", {}), step["op"]
+        if op == "preprocess.static_background":
+            out.append(f"The static background (channel walls, uneven illumination) was estimated as the temporal median of {p['max_frames']} evenly spaced frames and removed from every frame ({p['mode']}).")
+        elif op == "segment.threshold_watershed":
+            thr = f"a fixed threshold of {p['threshold']}" if p["method"] == "fixed" else f"an automatic {p['method']} threshold (lower bound {p['min_threshold']})"
+            out.append(
+                f"After Gaussian smoothing (sigma = {p['smooth_sigma']} px), images were segmented with {thr}; holes were filled, "
+                f"an opening with radius {p['opening_radius']} px was applied, objects smaller than {p['min_area']} px were removed, "
+                f"and touching droplets were separated by a distance-transform watershed (minimum centre distance {p['min_distance']} px)."
+            )
+        elif op == "segment.circles":
+            if p.get("min_diameter_px") and p.get("max_diameter_px"):
+                rng = f"diameters of {p['min_diameter_px']}–{p['max_diameter_px']} px"
+            else:
+                rng = "a diameter range set automatically from the typical droplet size in each frame"
+            out.append(
+                f"Edges were extracted from the raw images with a Canny detector (sigma = {p['edge_sigma']} px), keeping only regions that "
+                f"differ from the background by more than a threshold ({p['motion_threshold']}, raised adaptively with the noise level). "
+                f"Circles with {rng} were detected by a Hough transform, requiring at least {p['min_score']:.0%} of the circumference on edges; "
+                "of overlapping circles the higher-scoring one was kept. Centres were refined by a least-squares fit to the edge points and "
+                "the radius taken at the outer droplet boundary (steepest drop of the radial contrast profile)."
+            )
+        elif op == "measure.regionprops":
+            out.append("For each droplet the centroid, area, equivalent-area diameter and circularity (4πA/P²) were measured.")
+        elif op == "droplet.inclusions":
+            thr = f"{p['noise_factor']} times the noise level estimated inside the droplet in each frame" if p.get("min_contrast") is None else f"a fixed contrast of {p['min_contrast']}"
+            look = "darker" if p["polarity"] == "dark" else "brighter"
+            if p.get("background") == "radial":
+                bg = (
+                    "the droplet's own radial intensity profile served as background (median of the central region and, outside it, the median "
+                    "at each radius), and the dark rim of the droplet was excluded sector by sector (8 sectors)"
+                    f", together with a margin of {p['edge_margin_px']} px from the edge"
+                )
+            else:
+                bg = f"the droplet's median intensity served as background (excluding {p['edge_margin_px']} px from the edge)"
+            floor = (
+                f"; when a frame contained clear cells, at least {p['relative_floor']:.0%} of their median contrast was also required"
+                if p.get("relative_floor")
+                else ""
+            )
+            out.append(
+                f"Inside each droplet {bg}. Local extrema {look} than the background by more than a threshold ({thr}{floor}) were counted as cells "
+                f"(cell diameter {p['cell_diameter_px']} px). Droplets cut by the image border were not counted; each droplet's count is the mode "
+                "of its counts over the frames in which it was fully in view."
+            )
+        elif op == "droplet.intensity":
+            bg = "after subtracting the median of the pixels outside droplets in the same frame, " if p["background"] == "outside" else ""
+            out.append(f"In the fluorescence channel, {bg}the mean fluorescence inside each droplet (excluding {p['edge_margin_px']} px from the edge) was measured; each droplet takes the median over its complete frames.")
+        elif op == "track.link":
+            flow = "The overall frame-to-frame flow displacement was first estimated from the detected positions and removed; then droplets " if p.get("estimate_shift") else "Droplets "
+            out.append(f"{flow}were linked across frames by linear assignment (laptrack) with a maximum displacement of {p['max_distance_px']} px per frame and gaps of up to {p['max_gap_frames']} frames.")
+        elif op == "droplet.summary":
+            vol = (
+                f"droplet volumes were computed for a channel height of {p['channel_height_um']} µm (droplets wider than the channel as flattened discs: a central cylinder with a half-torus rim)"
+                if p.get("channel_height_um")
+                else "droplet volumes were computed as spheres"
+            )
+            out.append(
+                f"Each droplet was counted once, when its track crossed a virtual counting line at {p['count_line'] * 100:.0f}% of the field of view; "
+                "its size is the median over the frames in which it was fully in view; the generation frequency is (number of droplets − 1) divided by "
+                f"the time between the first and last crossings; {vol}."
+            )
+        elif op == "droplet.poisson":
+            out.append(
+                "The cell-count distribution was compared with a Poisson distribution with the mean number of cells per droplet λ "
+                "(maximum likelihood, exact 95% interval), and the dispersion index (variance/mean) and a chi-squared goodness-of-fit test "
+                "(adjacent classes merged to an expected count of at least 5) are reported."
+            )
+        elif op == "droplet.positivity":
+            method = {
+                "auto": f"automatic: when a two-component Gaussian mixture lowered the BIC by more than {p['min_bic_gain']} over one component, "
+                f"the density dip between the populations was below {p['max_dip_ratio']} and Ashman's D was at least {p['min_separation']}, the threshold "
+                f"was where both components are equally likely; otherwise the median plus {p['outlier_k']} robust standard deviations",
+                "fixed": f"a fixed threshold of {p['threshold']}",
+                "otsu": "an exact Otsu threshold",
+                "outlier": f"the median plus {p['outlier_k']} robust standard deviations",
+            }[p["method"]]
+            out.append(
+                f"Droplets were called positive or negative on {p['column']} ({method}). The positive fraction p has a Wilson 95% interval; "
+                "mean copies per droplet were computed as λ = −ln(1 − p), and concentrations as λ divided by the mean droplet volume."
+            )
+        elif op not in _DESCRIBED:
+            out.append(_other_step(step, provenance, "en"))
+    env = provenance.get("environment", {})
+    pk = env.get("packages", {})
+    libs = ", ".join(f"{k} {pk[k]}" for k in ("numpy", "scipy", "scikit-image", "laptrack", "scikit-learn") if k in pk)
+    out.append(f"Analysis used Vexel {env.get('vexel', '')} (Python {env.get('python', '')}; {libs}); recipe SHA-256 {provenance.get('recipe', {}).get('sha256', '')[:16]}….")
+    corr = provenance.get("corrections")
+    if corr:
+        out.append(
+            f"Automatic results were reviewed by hand: {corr.get('n_applied', 0)} corrections were made to outlines and per-droplet results "
+            "(removing false detections, adding missed droplets, changing cell counts or positive calls, excluding debris), and the same recipe "
+            "was re-run with these corrections; the correction record is stored with the results."
         )
     return out
 
@@ -516,6 +648,7 @@ def build_report(run_dir: str | Path) -> str:
 
     # methods
     body.append('<h2>方法</h2><div class="methods">' + "".join(f"<p>{_e(t)}</p>" for t in methods_text(recipe, prov)) + "</div>")
+    body.append('<details class="methods"><summary>Methods (English)</summary>' + "".join(f"<p>{_e(t)}</p>" for t in methods_text_en(recipe, prov)) + "</details>")
 
     # provenance
     sp = inp.get("spacing", {})

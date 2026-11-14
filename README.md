@@ -1,7 +1,7 @@
 # Vexel
 
 智能体原生的科学图像分析平台：LLM 负责规划，确定性算子负责计算，每个结果可复核、可复现。
-使用说明见 [用户手册](docs/user_manual.md)，规划见 [vexel_roadmap_0.0.3.md](vexel_roadmap_0.0.3.md)。当前版本：**0.5.0b1 内测版**（[更新记录](CHANGELOG.md)，[内测说明](docs/closed_testing/README.md)，[微流控开发进度评估](docs/progress_microfluidics.md)）。Phase 1–5 完成：引擎与 CLI、液滴包与质控、流式执行（验收见 [docs/phase3_acceptance.md](docs/phase3_acceptance.md)）、界面与人工纠错（见 [docs/corrections.md](docs/corrections.md)；“15 分钟上手”待真人测试，方案见 [docs/usability_test.md](docs/usability_test.md)）、智能体（探针、规划器、配方记忆、可选 Claude / DeepSeek / 通义千问 / Gemini / 本地模型 / 离线规则、MCP 服务；验收见 [docs/phase5_acceptance.md](docs/phase5_acceptance.md)）。Phase 6（批处理）与 Phase 7（安装包）未开始。
+使用说明见 [用户手册](docs/user_manual.md)，规划见 [vexel_roadmap_0.0.3.md](vexel_roadmap_0.0.3.md)。当前版本：**0.6.0b1 内测版**（[更新记录](CHANGELOG.md)，[内测说明](docs/closed_testing/README.md)，[微流控开发进度评估](docs/progress_microfluidics.md)）。Phase 1–6 完成：引擎与 CLI、液滴包与质控、流式执行（验收见 [docs/phase3_acceptance.md](docs/phase3_acceptance.md)）、界面与人工纠错（见 [docs/corrections.md](docs/corrections.md)；“15 分钟上手”待真人测试，方案见 [docs/usability_test.md](docs/usability_test.md)）、智能体（探针、规划器、配方记忆、可选 Claude / DeepSeek / 通义千问 / Gemini / 本地模型 / 离线规则、MCP 服务；验收见 [docs/phase5_acceptance.md](docs/phase5_acceptance.md)）。批处理与分组统计（`vexel batch`，界面里的“批量分析…”；以重复为统计单位；导出可独立复现的脚本；中英文方法段落；验收见 [docs/phase6_acceptance.md](docs/phase6_acceptance.md)）；模型插件接口已确定（[docs/plugin_interface.md](docs/plugin_interface.md)）。Phase 7（安装包）未开始。
 
 ## 快速开始
 
@@ -25,6 +25,14 @@ uv run vexel synth data/fluo --fluo 0.7                  # 加荧光通道（数
 uv run vexel run data/fluo/droplets.ome.tif -r droplet_fluorescence -o runs/fluo
 uv run pytest                    # 常规测试
 uv run pytest -m benchmark       # 回归基准（约 2 分钟）
+```
+
+批量与分组统计：
+
+```bash
+uv run vexel batch init data/exp01                  # 写出 data/exp01/design.csv，填写 group 与 replicate
+uv run vexel batch run data/exp01/design.csv -r droplet_encapsulation -o runs/exp01
+python runs/exp01/reproduce.py                      # 独立复现全部结果并核对
 ```
 
 对自己的数据：
@@ -61,6 +69,8 @@ uv run vexel run   my_video.avi -r my_recipe.json --set seg.min_score=0.5
 | `vexel validate` | 把液滴运行结果与真值比对 |
 | `vexel synth` | 生成带真值的合成液滴视频 |
 | `vexel convert` | 转为 OME-Zarr 多分辨率金字塔 |
+| `vexel batch` | 批量：`init` 从文件夹起草设计表，`run` 用一个配方分析表里每个文件（无人值守、可续跑），按组统计并导出报告、方法段落与复现脚本 |
+| `vexel plugins` | 已安装的插件与模型：算子、许可证、训练数据、权重文件状态 |
 | `vexel bugreport` | 导出诊断包（版本、设置、配方、汇总；不含图像和密钥），用于报告问题 |
 | `vexel licenses` | 已安装依赖的许可证清单，标出 GPL / 非商用项 |
 
