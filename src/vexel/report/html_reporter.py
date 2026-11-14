@@ -343,6 +343,13 @@ def methods_text(recipe: dict[str, Any], provenance: dict[str, Any]) -> list[str
                 f"在每个液滴内部{bg}，将比背景{look}、对比度超过阈值（{thr}{floor}）的局部极值记为细胞"
                 f"（细胞直径设为 {p['cell_diameter_px']} 像素）；被画面边缘截断的液滴不计，"
                 "每个液滴取其完整出现在视场内各帧计数的众数。"
+                + (
+                    "一个斑点的范围（对比度不低于其峰值一半的区域）约为同一帧典型斑点的 2 倍或 3 倍、且强度不低于该帧最强斑点一半时，"
+                    "按 2 个或 3 个细胞计（平滑后合并成一个峰的相邻细胞）。"
+                    if p.get("split_touching", True)
+                    else ""
+                )
+                + (f"范围小于单个细胞面积 {p['min_size_fraction']:.0%} 的斑点视为杂质，不计。" if p.get("min_size_fraction") else "")
             )
         elif op == "droplet.intensity":
             bg = "减去同一帧液滴外像素的中位数作为背景，" if p["background"] == "outside" else ""
@@ -445,6 +452,14 @@ def methods_text_en(recipe: dict[str, Any], provenance: dict[str, Any]) -> list[
                 f"Inside each droplet {bg}. Local extrema {look} than the background by more than a threshold ({thr}{floor}) were counted as cells "
                 f"(cell diameter {p['cell_diameter_px']} px). Droplets cut by the image border were not counted; each droplet's count is the mode "
                 "of its counts over the frames in which it was fully in view."
+                + (
+                    " A spot whose extent (where its contrast is at least half its peak) is about two or three times the frame's "
+                    "typical spot, and at least half as strong as the frame's strongest, counts as two or three cells (neighbouring "
+                    "cells merged into one peak by smoothing)."
+                    if p.get("split_touching", True)
+                    else ""
+                )
+                + (f" Spots smaller than {p['min_size_fraction']:.0%} of a cell's area were treated as debris." if p.get("min_size_fraction") else "")
             )
         elif op == "droplet.intensity":
             bg = "after subtracting the median of the pixels outside droplets in the same frame, " if p["background"] == "outside" else ""

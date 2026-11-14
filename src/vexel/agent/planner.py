@@ -153,6 +153,15 @@ def draft(fp: Fingerprint, goal: Goal, memory: RecipeMemory | None = None) -> Pl
     elif fp.flow_axis == "x" and d is not None:
         direction = "从左向右" if d.flow_px[1] > 0 else "从右向左"
         reasons.append(f"液滴沿水平方向流动（{direction}，每帧约 {abs(d.flow_px[1]):.0f} 像素）")
+    if d is not None and d.seg_hint:
+        overrides.update(d.seg_hint)
+        reasons.append(
+            f"默认的液滴识别不可信（液滴在帧间几乎不动，或找到的是很多小颗粒）：按尺寸扫描找到直径约 "
+            f"{0.5 * (d.seg_hint['seg.min_diameter_px'] + d.seg_hint['seg.max_diameter_px']) / 1.025:.0f} 像素的液滴，"
+            f"识别范围设为 {d.seg_hint['seg.min_diameter_px']:g}–{d.seg_hint['seg.max_diameter_px']:g} 像素，并关闭运动门控"
+        )
+        if fp.flow_axis is None:
+            reasons.append("没有测出流动：若液滴确实不流动（静态阵列、停流），跨帧去重计数不适用，请以逐帧结果为准")
     if d is not None and d.object_diameter_px:
         reasons.append(f"液滴直径约 {d.object_diameter_px:.0f} 像素，圆度 {d.object_circularity:.2f}")
 

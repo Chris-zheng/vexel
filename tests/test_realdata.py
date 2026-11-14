@@ -96,14 +96,14 @@ def test_wscnet_cells_per_droplet(wscnet_run):
     sure = [(m, d["n_cells"]) for m, d in zip(table["n_inclusions"], truth["droplets"]) if "uncertain" not in d]
     measured, expected = np.array(sure).T
     wrong = measured != expected
-    assert wrong.mean() <= 0.10, f"{wrong.sum()} of {len(sure)} droplets miscounted"
+    assert wrong.mean() <= 0.06, f"{wrong.sum()} of {len(sure)} droplets miscounted"  # 5 of 132 (3.8%) since touching cells are split
     assert not ((expected == 0) & (measured > 0)).any(), "an empty droplet was given cells"
     assert ((measured <= expected) | ~wrong).all(), "errors so far are cells hidden behind each other (undercounts)"
     summary = json.loads((out / "summary.json").read_text())["encapsulation.summary"]
     all_truth = np.array([d["n_cells"] for d in truth["droplets"]])
     assert summary["frac_empty"] == pytest.approx(np.mean(all_truth == 0), abs=0.03)
-    # Measured 1.49 against 1.57: the undercounts above (overlapping cells) bias lambda low.
-    assert summary["lambda"] == pytest.approx(all_truth.mean(), rel=0.07)
+    # Measured 1.52 against 1.57: the remaining undercounts (cells hidden behind each other) bias lambda low.
+    assert summary["lambda"] == pytest.approx(all_truth.mean(), rel=0.05)
 
 
 # -- the same recordings replayed through the stream executor -------------------------------

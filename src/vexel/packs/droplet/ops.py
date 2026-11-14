@@ -263,6 +263,18 @@ class InclusionParams(Params):
     skip_border: bool = Field(
         True, description="do not count cells in droplets cut by the image border (reported as NaN for that frame)"
     )
+    min_size_fraction: float = Field(
+        0.0,
+        ge=0,
+        lt=1,
+        description="drop spots whose extent (area at half their contrast) is below this fraction of a cell's area "
+        "(pi (d/2)^2): specks and dust. 0 disables",
+    )
+    split_touching: bool = Field(
+        True,
+        description="count a single spot as 2 or 3 cells when its extent is about 2 or 3 cells' area (touching cells "
+        "that smoothing merged into one peak)",
+    )
     background: Literal["median", "radial"] = Field(
         "median",
         description="median: one interior level per droplet; radial: the droplet's own median profile by distance "
@@ -368,6 +380,38 @@ def _rim_limit(
     return inside
 
 
+def _size_rules(
+    peaks: np.ndarray, contrast: np.ndarray, interior: np.ndarray, params: "InclusionParams", threshold: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Spot extents: the area (holes filled) where the smoothed contrast stays above half the
+    spot's peak, shared between the peaks it holds. Specks are dropped; a clear single peak
+    (at least half as strong as the frame's strongest: faint shading patches are large but
+    not cells) whose extent is about two or three times the frame's typical spot counts as
+    two or three."""
+    expected = math.pi * (params.cell_diameter_px / 2.0) ** 2
+    heights = contrast[tuple(peaks.T)]
+    areas = np.zeros(len(peaks))
+    for i, ((y, x), h) in enumerate(zip(peaks, heights)):
+        r = int(math.ceil(2.5 * params.cell_diameter_px))
+        y0, x0 = max(0, y - r), max(0, x - r)
+        win_c = contrast[y0 : y + r + 1, x0 : x + r + 1]
+        win_l = interior[y0 : y + r + 1, x0 : x + r + 1]
+        reg, _ = ndi.label((win_c >= 0.5 * h) & (win_l == interior[y, x]))
+        k = reg[y - y0, x - x0]
+        if k:
+            blob = ndi.binary_fill_holes(reg == k)
+            others = sum(1 for (yy, xx) in peaks if y0 <= yy < y0 + blob.shape[0] and x0 <= xx < x0 + blob.shape[1] and blob[yy - y0, xx - x0])
+            areas[i] = blob.sum() / max(others, 1)
+    keep = areas >= params.min_size_fraction * expected
+    weight = np.ones(len(peaks), dtype=np.int64)
+    if params.split_touching:
+        # most spots are single cells: their typical extent in this frame is the reference
+        ref = float(np.median(areas[keep])) if keep.sum() >= 3 else expected
+        weight = np.clip(np.rint(areas / ref), 1, 3).astype(np.int64)
+        weight[(areas < 1.8 * ref) | (heights < 0.5 * heights.max())] = 1
+    return peaks[keep], weight[keep]
+
+
 @register_op(
     "droplet.inclusions",
     scope=Scope.FRAME,
@@ -448,8 +492,11 @@ def inclusions(params: InclusionParams, ctx: Context, *, image: np.ndarray, labe
             if floor > threshold:
                 peaks = peaks[heights >= floor]
                 threshold = floor
+    weight = np.ones(len(peaks), dtype=np.int64)
+    if len(peaks) and (params.min_size_fraction > 0 or params.split_touching):
+        peaks, weight = _size_rules(peaks, contrast, interior, params, threshold)
     owner = interior[tuple(peaks.T)] if len(peaks) else np.empty(0, dtype=np.int64)
-    counts = np.bincount(owner, minlength=n + 1)[1:]
+    counts = np.bincount(owner, weights=weight, minlength=n + 1)[1:].astype(np.int64)
     radius = max(1.0, params.cell_diameter_px / 2.0)
     for j, (y, x) in enumerate(peaks, 1):
         rr, cc = draw_disk((y, x), radius, shape=labels.shape)

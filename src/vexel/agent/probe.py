@@ -29,6 +29,7 @@ from vexel.core.volume import SpatialVolume
 
 N_SAMPLES = 24  # frames sampled for the statistics
 N_OBJECT_FRAMES = 6  # frames on which objects are detected
+UNGATED_MIN_SCORE = 0.5  # without the motion gate edges are everywhere: ask more of each circle's outline
 
 
 @dataclass
@@ -56,6 +57,7 @@ class ChannelStats:
     spot_contrast: float | None = None
     outside_level: float | None = None  # median level outside objects
     inside_level: float | None = None  # median level inside objects
+    seg_hint: dict[str, Any] | None = None  # segmentation settings found by the size scan, when the default failed
 
 
 @dataclass
@@ -164,9 +166,13 @@ def _objects(stats: ChannelStats, frames: np.ndarray, background: np.ndarray) ->
 
     seg, inc = get_op("segment.circles"), get_op("droplet.inclusions")
     ctx = Context(frame_shape=frames.shape[1:], n_frames=1)
+    frames = frames.astype(np.float32)
+    hint = _size_scan(frames, background) if _implausible(stats, frames, background) else None
+    stats.seg_hint = hint
+    seg_params = seg.params(**{k.split(".", 1)[1]: v for k, v in hint.items()}) if hint else seg.params()
     counts, diam, circ, contrast, centre_rim, spots, strict, spot_c, outside, inside = [], [], [], [], [], [], [], [], [], []
-    for f in frames.astype(np.float32):
-        lab = seg.fn(seg.params(), ctx, image=f, contrast=np.abs(f - background)).outputs["labels"]
+    for f in frames:
+        lab = seg.fn(seg_params, ctx, image=f, contrast=np.abs(f - background)).outputs["labels"]
         props = [p for p in regionprops(lab) if 0 not in p.bbox[:2] and p.bbox[2] < lab.shape[0] and p.bbox[3] < lab.shape[1]]
         counts.append(len(props))
         if not props:
@@ -204,6 +210,70 @@ def _objects(stats: ChannelStats, frames: np.ndarray, background: np.ndarray) ->
     stats.spot_contrast = float(np.mean(spot_c)) if spot_c else None
     stats.outside_level = float(np.median(outside)) if outside else None
     stats.inside_level = float(np.median(inside)) if inside else None
+
+
+def _implausible(stats: ChannelStats, frames: np.ndarray, background: np.ndarray) -> bool:
+    """Whether the default droplet detection (motion-gated, automatic size) is likely to have
+    locked onto the wrong things: droplets that hardly move between the sampled frames
+    (frames sampled from a video, stopped flow, a static array) vanish from the motion
+    contrast, and small moving debris or beads are found instead."""
+    from skimage.measure import regionprops
+
+    from vexel.ops import get_op
+    from vexel.ops.registry import Context
+
+    seg = get_op("segment.circles")
+    f = frames[len(frames) // 2]
+    props = regionprops(seg.fn(seg.params(), Context(frame_shape=f.shape, n_frames=1), image=f, contrast=np.abs(f - background)).outputs["labels"])
+    if not props:
+        return True
+    d = float(np.median([p.equivalent_diameter_area for p in props]))
+    no_flow = abs(stats.flow_px[0]) < 0.5 and abs(stats.flow_px[1]) < 0.5
+    return d < 12.0 or len(props) > 30 or (no_flow and stats.moving_fraction < 0.2)
+
+
+def _size_scan(frames: np.ndarray, background: np.ndarray) -> dict[str, Any] | None:
+    """Circle detection without the motion gate in diameter bands. Each band is scored by
+    the share of the image its circles cover divided by the square root of how many there
+    are per frame: a few large, consistent droplets beat a swarm of small circles on debris,
+    beads or outline fragments. The best band with a circle in most frames gives the
+    segmentation settings. Bands are searched on frames downsampled so that the band starts
+    at about 24 pixels (fast at any size)."""
+    from skimage.measure import regionprops
+    from skimage.transform import rescale
+
+    from vexel.ops import get_op
+    from vexel.ops.registry import Context
+
+    seg = get_op("segment.circles")
+    sample = frames[np.linspace(0, len(frames) - 1, min(3, len(frames))).round().astype(int)]
+    h, w = frames.shape[1:]
+    best, best_cover = None, 0.0
+    lo = 10.0
+    while lo * 1.25 < min(h, w):
+        hi = min(lo * 2.0, float(min(h, w)))
+        scale = min(1.0, 24.0 / lo)
+        params = seg.params(min_diameter_px=lo * scale, max_diameter_px=hi * scale, motion_threshold=0.0, min_score=UNGATED_MIN_SCORE)
+        cover, found, sizes, count = 0.0, 0, [], 0
+        for f in sample:
+            g = rescale(f, scale, anti_aliasing=True, preserve_range=True) if scale < 1 else f
+            gh, gw = g.shape
+            props = regionprops(seg.fn(params, Context(frame_shape=g.shape, n_frames=1), image=g, contrast=np.abs(g - np.median(g))).outputs["labels"])
+            inner = [p for p in props if 0 not in p.bbox[:2] and p.bbox[2] < gh and p.bbox[3] < gw]
+            cover += sum(p.area for p in inner) / (gh * gw)
+            found += bool(inner)
+            count += len(inner)
+            sizes += [p.equivalent_diameter_area / scale for p in inner]
+        score = cover / np.sqrt(max(count / len(sample), 1.0))
+        if found >= 0.5 * len(sample) and score > best_cover:
+            best_cover, best = score, float(np.median(sizes))
+        if hi >= min(h, w):
+            break
+        lo = hi / 1.5  # overlapping bands
+    if best is None:
+        return None
+    return {"seg.min_diameter_px": round(0.8 * best, 1), "seg.max_diameter_px": round(1.25 * best, 1), "seg.motion_threshold": 0.0,
+            "seg.min_score": UNGATED_MIN_SCORE}  # fmt: skip
 
 
 def probe(volume: SpatialVolume, *, z: int = 0, max_frames: int | None = None) -> Fingerprint:

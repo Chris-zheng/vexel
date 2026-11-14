@@ -158,3 +158,36 @@ def test_cli_synth_cells_and_validate(tmp_path, capsys):
     assert "inclusion_mismatch" in out and "validation PASSED" in out
     summary = json.loads((tmp_path / "run" / "summary.json").read_text())
     assert summary["encapsulation.summary"]["n_inclusions_total"] > 0
+
+
+def _frame_with(spots: list[tuple[float, float, float, float]], noise: float = 2.0):
+    """Droplet (radius 30) with spots given as (dy, dx, radius, contrast), all dark."""
+    rng = np.random.default_rng(1)
+    yy, xx = np.mgrid[:120, :120]
+    d = np.hypot(yy - 60, xx - 60)
+    img = np.full((120, 120), 180.0)
+    img[(d > 27) & (d <= 30)] -= 90
+    for dy, dx, r, c in spots:
+        img[np.hypot(yy - 60 - dy, xx - 60 - dx) <= r] -= c
+    img += rng.normal(0, noise, img.shape)
+    return img.astype(np.float32), (d <= 30).astype(np.int32)
+
+
+def test_inclusions_split_cells_merged_into_one_spot():
+    singles = [(-15, 0, 3.0, 50), (15, 0, 3.0, 50), (0, 15, 3.0, 50)]
+    pair = [(0, -2.8, 3.0, 50), (0, 2.8, 3.0, 50)]  # two cells just touching: smoothing merges them into one peak
+    img, labels = _frame_with(singles + pair)
+    assert int(_count(img, labels, split_touching=False).outputs["table"]["n_inclusions"].iloc[0]) == 4
+    assert int(_count(img, labels).outputs["table"]["n_inclusions"].iloc[0]) == 5
+
+
+def test_inclusions_faint_large_patch_is_not_split():
+    img, labels = _frame_with([(-12, 0, 2.5, 60), (10, 6, 7.0, 14)])  # a cell and a broad faint shadow
+    split = int(_count(img, labels).outputs["table"]["n_inclusions"].iloc[0])
+    assert split == int(_count(img, labels, split_touching=False).outputs["table"]["n_inclusions"].iloc[0])
+
+
+def test_inclusions_drop_specks_when_asked():
+    img, labels = _frame_with([(-10, 0, 2.5, 50), (10, 0, 0.8, 60)])  # a cell and a one-pixel speck
+    assert int(_count(img, labels).outputs["table"]["n_inclusions"].iloc[0]) == 2
+    assert int(_count(img, labels, min_size_fraction=0.5).outputs["table"]["n_inclusions"].iloc[0]) == 1

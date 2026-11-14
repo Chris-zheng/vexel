@@ -388,3 +388,40 @@ def test_mcp_over_stdio(droplet_dataset, tmp_path):
 
     names, result = asyncio.run(asyncio.wait_for(session(), 60))
     assert "plan_analysis" in names and "droplet_basic" in result.content[0].text
+
+
+def _static_droplets(n_frames: int = 20) -> np.ndarray:
+    """Three ring droplets (50 px) that do not move between frames, among many small dark
+    particles that do: frames sampled from a video, stopped flow, or a static array."""
+    rng = np.random.default_rng(3)
+    h, w = 112, 480
+    yy, xx = np.mgrid[:h, :w]
+    base = np.full((h, w), 170.0)
+    for cx in (80, 240, 400):
+        d = np.hypot(yy - 56, xx - cx)
+        base[(d > 21) & (d <= 25)] -= 90
+    frames = []
+    for _ in range(n_frames):
+        f = base.copy()
+        for y, x in zip(rng.uniform(5, h - 5, 15), rng.uniform(5, w - 5, 15)):
+            f[np.hypot(yy - y, xx - x) <= 3] -= 70
+        frames.append(f + rng.normal(0, 2.0, (h, w)))
+    return np.stack(frames).astype(np.float32)
+
+
+def test_probe_finds_droplets_that_do_not_move():
+    from vexel.agent.planner import draft
+
+    volume = SpatialVolume.from_array(_static_droplets(), "TYX")
+    fp = probe(volume)
+    d = fp.channels[0]
+    assert d.seg_hint is not None and d.seg_hint["seg.motion_threshold"] == 0.0
+    assert d.seg_hint["seg.min_diameter_px"] < 50 < d.seg_hint["seg.max_diameter_px"]
+    assert 40 < d.object_diameter_px < 60 and 2 <= d.objects_per_frame <= 4
+    plan = draft(fp, Goal.parse(""))
+    assert plan.overrides["seg.motion_threshold"] == 0.0 and "按尺寸扫描" in " ".join(plan.reasons)
+
+
+def test_probe_leaves_flowing_droplets_alone(droplet_dataset):
+    fp = probe(open_volume(droplet_dataset / "droplets.ome.tif"))
+    assert fp.channels[0].seg_hint is None

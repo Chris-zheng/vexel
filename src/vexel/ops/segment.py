@@ -103,7 +103,8 @@ class CirclesParams(Params):
     auto_max_diameter_px: float = Field(400.0, gt=4, description="upper bound of the automatic size estimate, pixels")
     edge_sigma: float = Field(1.0, gt=0, description="Gaussian sigma of the Canny edge detector, pixels")
     motion_threshold: float = Field(
-        8.0, ge=0, description="edges count only where the contrast image exceeds this (ignores static walls and text)"
+        8.0, ge=0, description="edges count only where the contrast image exceeds this (ignores static walls and text); "
+        "0 = no motion gate, for droplets that do not move (sampled frames, stopped flow, static arrays)"
     )
     min_score: float = Field(0.35, gt=0, le=1, description="minimum fraction of a circle's perimeter that must lie on edges")
     min_separation: float = Field(
@@ -224,25 +225,46 @@ def circles(params: CirclesParams, ctx: Context, *, image: np.ndarray, contrast:
     from skimage.feature import canny
 
     raw = image.astype(np.float32)
-    con = ndi.gaussian_filter(contrast.astype(np.float32), 0.5)
     empty_qc = {"n_objects": 0.0, "radius_median_px": 0.0, "score_median": 0.0, "foreground_fraction": 0.0}
     empty = OpResult({"labels": np.zeros(raw.shape, np.int32)}, empty_qc)
-    # Where something differs from the static scene. The floor adapts to the noise of the
-    # contrast image (mostly background pixels, so its median and MAD describe the noise).
-    smooth = ndi.gaussian_filter(con, 1.0)
-    med = float(np.median(smooth))
-    mad = 1.4826 * float(np.median(np.abs(smooth - med)))
-    floor = max(params.motion_threshold, med + 6.0 * mad)
-    present = smooth > floor
+    if params.motion_threshold == 0:
+        # No motion gate (droplets that do not move: sampled frames, stopped flow, static
+        # arrays): edges count everywhere, and outlines are measured on the image's own
+        # deviation from its typical level instead of the difference from the background.
+        con = np.abs(ndi.gaussian_filter(raw, 0.5) - float(np.median(raw)))
+        present = np.ones(raw.shape, dtype=bool)
+    else:
+        con = ndi.gaussian_filter(contrast.astype(np.float32), 0.5)
+        # Where something differs from the static scene. The floor adapts to the noise of
+        # the contrast image (mostly background pixels, so its median and MAD describe the noise).
+        smooth = ndi.gaussian_filter(con, 1.0)
+        med = float(np.median(smooth))
+        mad = 1.4826 * float(np.median(np.abs(smooth - med)))
+        floor = max(params.motion_threshold, med + 6.0 * mad)
+        present = smooth > floor
     if not present.any():
         return empty
     moving = ndi.binary_dilation(present, morphology.disk(3))
 
     grad = filters.sobel(ndi.gaussian_filter(raw, params.edge_sigma))[moving]
-    low, high = np.percentile(grad, 50), np.percentile(grad, 80)
-    if high <= 0:
-        return empty
-    edges = canny(raw, sigma=params.edge_sigma, low_threshold=low, high_threshold=high) & moving
+    # Gated, the edge thresholds come from where things move (mostly droplet outlines);
+    # ungated, from the whole frame, which is mostly flat background: only its strongest
+    # gradients are outlines.
+    if params.motion_threshold == 0:
+        # The whole frame, mostly flat background whose gradient median is the noise level:
+        # an outline is at least the top 5% and 4x that level (2x to continue an edge).
+        # Expressed as quantiles, which canny applies on its own gradient scale.
+        typical = float(np.median(grad))
+        if typical <= 0:
+            return empty
+        q_low = max(0.85, float(np.mean(grad < 2.0 * typical)))
+        q_high = max(0.95, float(np.mean(grad < 4.0 * typical)))
+        edges = canny(raw, sigma=params.edge_sigma, low_threshold=min(q_low, q_high), high_threshold=q_high, use_quantiles=True)
+    else:
+        low, high = np.percentile(grad, 50), np.percentile(grad, 80)
+        if high <= 0:
+            return empty
+        edges = canny(raw, sigma=params.edge_sigma, low_threshold=low, high_threshold=high) & moving
 
     if params.min_diameter_px is None or params.max_diameter_px is None:
         # Typical size from a coarse fill of the contrast image: rings closed and filled,

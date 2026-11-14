@@ -10,6 +10,9 @@
 - 批量报告（分组图、表、文件列表、方法、溯源）、`results.csv` / `replicates.csv` / `groups.csv` / `comparisons.csv`。
 - `reproduce.py`：在新进程中重跑全部文件、重算统计，并逐个核对结果摘要。
 - 英文方法段落：单次报告与批量报告都附英文 Methods，另存 `methods_en.txt`。
+- 包裹计数：平滑后合并成一个峰的相邻细胞按斑点大小拆分（默认开启），WSCNet 真实数据上 92% → 96%；可选的小杂质过滤 `inclusions.min_size_fraction`。
+- 液滴不动（抽帧、停流、静态阵列）时，探针按尺寸扫描找出液滴、规划器自动设置识别范围并关闭运动门控；`seg.motion_threshold=0` 表示不用运动门控。
+- 液滴内计数评估（WSCNet 与 Droplet-Bead 两套真实数据）与“是否需要小模型”的决定条件：docs/eval_cell_counting.md。
 - 模型插件接口：入口点 `vexel.plugins`、模型卡（版本、权重 SHA-256、许可证、训练数据、能否商用）、任务约定、溯源记录；`vexel plugins` 命令。见 docs/plugin_interface.md。
 
 ## 0.5.0b1（内测版，2026-11）
