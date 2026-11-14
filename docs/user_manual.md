@@ -1,6 +1,6 @@
 # Vexel 用户手册
 
-适用版本：0.1.0（Phase 1–4：引擎与命令行、液滴包与质控、流式执行、界面与人工纠错）
+适用版本：0.5.0b1 内测版（Phase 1–5：引擎与命令行、液滴包与质控、流式执行、界面与人工纠错、智能体）
 
 本手册说明当前版本能做什么、怎么用、结果怎么读。当前版本提供桌面界面（第 2 节）和命令行（第 3 节起）两种用法，两者调用同一个分析引擎，默认设置下结果完全相同；
 分析对象是**微流控液滴的 2D 明场时序图像**（录好的视频或图像序列）。
@@ -9,12 +9,28 @@
 
 ## 1. 安装
 
-需要 [uv](https://docs.astral.sh/uv/) 和 Python 3.12（uv 会自动准备）。
+需要 [uv](https://docs.astral.sh/uv/)（会自动准备 Python 3.12）。还没有 uv 时：
+
+- macOS / Linux：`curl -LsSf https://astral.sh/uv/install.sh | sh`
+- Windows（PowerShell）：`powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
+
+装完重新打开终端。然后二选一：
+
+**从安装文件**（内测时收到的 `.whl`）：
+
+```bash
+uv tool install ./vexel-0.5.0b1-py3-none-any.whl
+vexel gui
+```
+
+这样装好后命令直接写 `vexel ...`；卸载用 `uv tool uninstall vexel`。
+
+**从源码**：
 
 ```bash
 git clone https://github.com/Chris-zheng/vexel.git
 cd vexel
-uv sync
+uv sync                  # 要用 Claude 规划或 MCP 服务时：uv sync --extra agent
 ```
 
 确认安装成功：
@@ -23,9 +39,11 @@ uv sync
 uv run vexel --help
 ```
 
-桌面界面随同安装，不需要额外步骤。
+桌面界面随同安装，不需要额外步骤。DeepSeek、通义千问、Gemini、本地模型不需要额外安装（见 4.7 节）。
 
-下文所有命令都写成 `uv run vexel ...`。如果已激活虚拟环境（`source .venv/bin/activate`），可以直接写 `vexel ...`。
+下文所有命令都写成 `uv run vexel ...`（源码方式）。如果已激活虚拟环境（`source .venv/bin/activate`），或用安装文件装的，直接写 `vexel ...`。
+
+测试平台：macOS（Apple Silicon）上完整测试；Windows、Linux 预期可用，尚未测试。
 
 ---
 
@@ -40,6 +58,8 @@ uv run vexel gui
 也可以启动时直接打开数据：`uv run vexel gui data/demo/droplets.ome.tif`。没有数据时，先用 `uv run vexel synth data/demo` 生成一段合成视频来熟悉界面。
 
 窗口分左右两栏：左侧按 1、2、3 三步操作，右侧显示结果。右侧顶部的蓝色 **引导栏** 随时告诉你下一步做什么，并给出对应的按钮：没有数据时可以点 **试用示例数据**（生成一段带细胞的合成视频）；载入后先 **快速预览**；预览后判断红线是否套准，再 **开始分析** 或改用 **画笔训练**；分析完有可疑液滴时引导去 **复核与纠错**。熟悉之后点引导栏右边的 × 关掉，需要时从菜单 **帮助 → 显示引导** 打开。
+
+**帮助** 菜单里还有：**打开示例数据**；**规划模型设置…**（自动规划时请哪个大模型帮忙，或完全离线，见 4.7 节）；**导出诊断包…**（报告问题时附上，不含图像和密钥，见第 10 节）。
 
 ### 2.1 第一步：数据
 
@@ -396,6 +416,71 @@ uv run vexel watch D:/acquisition/run1 -r droplet_encapsulation --pixel-size 2.0
 - **终算：** 采集结束后自动对 `frames.zarr` 再做一次批式全量分析，结果在输出目录的 `final/` 下，并打印在线与全量的液滴数。在线结果用于采集中的监控，`final/` 是正式结果。`--no-final` 跳过。
 
 其余选项（`--queue`、`--update-every`、`--window`、`--workers`、`--set`）与 `replay` 相同；输出目录多一个 `frames.zarr` 和 `final/`。`provenance.json` 的 `stream.source` 记录监视的文件夹、收到的图像数和结束原因。
+
+### 4.7 自动规划：探针、规划器与配方记忆
+
+不知道该用哪个配方、哪些参数时，让 Vexel 先看数据、起草一个方案、在前几百帧上试跑，再交给你确认：
+
+```bash
+uv run vexel probe my_video.avi                          # 只看数据的“指纹”
+uv run vexel probe my_video.avi --montage diag.png       # 另存一张四宫格诊断图
+uv run vexel plan my_video.avi -g "数每个液滴里的细胞"     # 起草并试跑，写出 recipe.json
+uv run vexel plan my_video.avi -g "ddPCR 阳性比例" --run   # 接受方案并分析全部帧
+```
+
+**探针**（`vexel probe`，几秒钟，不改任何数据）从均匀抽取的帧里算出：亮度范围、偏度、双峰分离度、噪声与信噪比、静止背景与运动区域的比例、流动方向与每帧位移（帧间相关）、静止背景的帧间抖动；在几帧上找圆和数斑点，得到液滴数、直径、圆度，以及液滴里是否有稳定的小深色斑点（细胞或珠子：提高阈值后数量基本不变的斑点；液滴内的反光、明暗会随阈值消失，不算）。多通道时判断哪个通道看液滴（亮背景、圆形运动目标），哪个是荧光（暗背景上的亮目标）。四宫格诊断图依次是：一帧、时间中值（背景）、时间标准差（运动区域）、找圆结果。
+
+**规划器**（`vexel plan`）：
+
+1. 从 `-g` 的文字里读出要测什么（中英文均可）：“细胞、包裹、珠子、泊松”表示数细胞，“荧光、阳性、ddPCR、digital”表示阴阳判读；“不数细胞”“不看荧光”表示不要。没说的按数据决定（看到稳定斑点就数细胞，有荧光通道就判读），并在理由里写明怎么取消。
+2. 选内置配方，设好通道、流动方向等，每一项都附理由。
+3. 在前 300 帧上试跑。没分割出目标就放宽找圆；没有液滴越过计数线就换流动方向、移动计数线；细胞计数不稳就提高细胞检测阈值；最多三轮，保留质控问题最少的一次。
+4. 给出状态：**ready**（试跑通过全部质控规则）、**check**（能跑，但有质控提示，理由里列出）、**needs_user**（没有可用的分割，建议画笔训练；返回码 1）。
+
+输出文件夹里有 `recipe.json`（可直接 `vexel run -r`）和 `plan.json`（指纹、理由、每次试跑的指标）。方案只是草案：加 `--run`，或自己用 `vexel run` 运行，才算接受。
+
+**配方记忆**：用 `vexel plan --run` 运行过的方案会记下来（数据指纹、配方与设置、质控是否通过），存在 `~/.vexel/memory/recipes.jsonl`（环境变量 `VEXEL_HOME` 可改位置）。下次规划时，先按通道布局和分析类型硬过滤，再按标准化的指纹特征找最近的历史记录，显示其来源和历史通过率；足够接近且通过率不低于一半时，沿用它的设置并在理由里注明。`--no-memory` 既不用也不记。
+
+**桌面界面**：载入数据后，在左栏“想测什么？”里写下目标（可以不写），点 **自动规划…**。几秒后弹出方案：状态、由谁起草、每条理由；点 **采用** 就把方案填进左侧设置（是否数细胞、是否判读荧光、通道、流动方向、高级设置），之后照常预览或分析。
+
+**语言模型（可选）**：规划器可以请大语言模型帮忙理解目标、在试运行失败后再提一次建议。模型只能在一份白名单里提出设置（流动方向、计数线、找圆参数、细胞检测阈值等，每项有类型和范围），回答用 JSON 结构约束；不合格的建议被丢弃并写进理由，合格的照样试运行、由你确认。所有测量结果都由 Vexel 的算子计算，模型不产生数字。
+
+可选的模型来源：
+
+| 来源 | 默认模型 | 默认服务地址 | 密钥环境变量 | 说明 |
+| :--- | :--- | :--- | :--- | :--- |
+| Claude | `claude-opus-5-5` | Anthropic | `ANTHROPIC_API_KEY`（或 `ant auth login`） | 需 `uv sync --extra agent` |
+| DeepSeek | `deepseek-chat` | `https://api.deepseek.com` | `DEEPSEEK_API_KEY` | 服务器在中国大陆 |
+| 通义千问（阿里云百炼） | `qwen-plus` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `DASHSCOPE_API_KEY` | 国际站账号改用 `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` |
+| Google Gemini | `gemini-2.5-flash` | `https://generativelanguage.googleapis.com/v1beta/openai` | `GEMINI_API_KEY` | OpenAI 兼容接口 |
+| 其他兼容服务 | 自填 | 自填 | 自填 `api_key_env` | 任何提供 OpenAI 风格 `/chat/completions` 的服务（如 vLLM、LM Studio、公司内网网关） |
+| 本地模型 | 自填 | `http://localhost:11434` | 不需要 | Ollama，数据不离开本机/局域网 |
+| 规则引擎 | – | – | 不需要 | 离线，总是可用，也是最后的退路 |
+
+模型名会随服务商更新，以服务商当前的模型列表为准，可以在设置里改。**密钥只从环境变量读取，Vexel 不保存、不写入配置文件**；在 macOS/Linux 的 `~/.zshrc` 或 `~/.bashrc` 里写 `export DEEPSEEK_API_KEY=...`，Windows 用“系统属性 → 环境变量”，然后重新打开终端或 Vexel。
+
+**在桌面界面里选择**：帮助 → **规划模型设置…**。选模型来源，按需改模型名和服务地址，界面显示对应的密钥环境变量是否已设置；点 **测试连接** 发一次不含数据的小请求确认能用；**保存** 后，自动规划先问所选模型，不可用（没有密钥、断网、超时、拒答、答非所问）时自动改用规则引擎，方案里写明由谁起草、跳过了谁及原因。
+
+**在命令行里选择**：`vexel plan --model claude|deepseek|qwen|gemini|custom|local|rules`（只试该来源，失败退回规则引擎）；`--model auto`（默认）按配置文件里的顺序。
+
+配置文件 `~/.vexel/config.json`（`VEXEL_HOME` 可改位置），桌面界面保存的也是它：
+
+```json
+{"models": {"order": ["deepseek", "rules"],
+            "deepseek": {"model": "deepseek-chat", "base_url": "https://api.deepseek.com", "api_key_env": "DEEPSEEK_API_KEY", "send_images": false},
+            "custom": {"model": "my-model", "base_url": "http://gpu-box:8000/v1", "api_key_env": "", "send_images": false},
+            "local": {"url": "http://localhost:11434", "model": "qwen2.5vl:7b", "send_images": false}}}
+```
+
+**数据与隐私**：默认只发：你写的目标、数据指纹里的数字（尺寸、亮度统计、流速、液滴数和直径等）、草案设置，以及试运行的汇总指标与质控提示。**不发图像、文件路径和逐个液滴的结果表**；`send_images: true` 时才附上降采样的四宫格诊断图（需要模型支持看图）。选用云端模型即表示这些数字会发到对应服务商，受其数据政策约束；数据不能出本单位时，用本地模型、内网兼容服务或规则引擎。设置环境变量 `VEXEL_OFFLINE=1` 只用规则引擎，不发出任何网络请求。
+
+**MCP 服务**：`uv run vexel mcp` 以 stdio 方式提供 MCP 服务，让 AI 助手（如 Claude Desktop、Claude Code）调用 Vexel：`list_recipes`、`show_recipe`、`list_operators`、`probe_data`、`plan_analysis`、`run_analysis`、`read_results`。一切在本机运行，数据不经由它外传。在 Claude Desktop 的配置里加入：
+
+```json
+{"mcpServers": {"vexel": {"command": "uv", "args": ["--directory", "/path/to/Vexel", "run", "vexel", "mcp"]}}}
+```
+
+验收结果见 [第五阶段验收记录](phase5_acceptance.md)。
 
 ---
 
@@ -945,6 +1030,14 @@ uv run vexel convert my_video.avi my_video.zarr --pixel-size 2.0 --frame-interva
 uv run vexel report runs/exp01
 ```
 
+**导出诊断包**（报告问题时附上；界面里是 帮助 → 导出诊断包…）：
+
+```bash
+uv run vexel bugreport runs/exp01 -o vexel-bugreport.zip --note "细胞数明显偏少"
+```
+
+包里有软件与依赖版本、操作系统、规划模型设置（只记是否设置了密钥，不记密钥本身）、每个结果文件夹的 `provenance.json`、`recipe.json`、`summary.json`、方案与修改记录、可疑液滴表、在线报警。**不含图像、视频、报告和密钥**；绝对路径只保留文件名（`--keep-paths` 保留全路径）。加 `--tables` 才附上逐个液滴的表格。
+
 **依赖许可证清单**（`CHECK` 标记 GPL 或非商用条款，`UNKNOWN` 表示包未声明）：
 
 ```bash
@@ -966,6 +1059,7 @@ uv run vexel licenses
 
 - 桌面界面覆盖单个文件的分析、结果查看、画笔训练（2.7 节）、在线监控（2.8 节）与复核纠错（2.9 节）；批量处理还没有。
 - 画笔分类器只区分“液滴”和“背景”两类；细胞的画笔训练、从人工修正中自动学习尚未实现。
+- 自动规划只覆盖内置的液滴配方；语言模型只能在白名单内调整设置，不能设计新的处理流程。联网模型（Claude、DeepSeek、通义千问、Gemini）的规划效果尚未在有凭据的环境中测量。
 - “新用户 15 分钟内完成一次分析”尚待真人测试（方案见 [新用户可用性测试](usability_test.md)）。
 - 人工修正后总是整段重算，长视频可能要几分钟；轮廓修改只作用于单帧；3D 数据还不能修正。
 - 桌面界面只能使用四个内置配方；自定义配方需用命令行。
@@ -981,6 +1075,9 @@ uv run vexel licenses
 - 视频按 RGB 三通道解码，灰度视频会多占内存。
 - 每个处理块最多占用约 2 GB 内存（系统内存的 10%，上限 2 GB）。
 - 只在 macOS（Apple Silicon）上运行过，Windows 与 Linux 未测试。
+- 批量处理多个文件、实验分组统计尚未提供（下一阶段）。
+
+内测期间的已知问题汇总在 [内测已知问题](closed_testing/known_issues.md)。
 
 ---
 
@@ -1009,3 +1106,12 @@ uv run vexel licenses
 
 **大文件运行很慢才开始**
 开始前的元数据读取是即时的；结束时的 `hashing input` 需要完整读一遍输入文件。可用 `--no-input-hash` 跳过。
+
+**自动规划提示“跳过了 deepseek / qwen / gemini …”**
+方案里写着跳过的原因：`API key not set` 表示没设置对应的环境变量（设置后要重新打开终端或 Vexel）；`HTTP 401/403` 是密钥无效或没开通；`HTTP 404` 多半是模型名已被服务商更改，在 帮助 → 规划模型设置 里改成当前的模型名；`not reachable` 是网络不通。无论哪种，规划都会改用离线规则引擎完成。
+
+**界面打不开 / 启动报错**
+在终端里运行 `uv run vexel gui`（或 `vexel gui`），把终端里的完整报错和 `uv run vexel bugreport -o 诊断包.zip` 生成的诊断包一起发给我们。
+
+**怎样报告问题**
+填 [反馈表](closed_testing/feedback_template.md)，附上诊断包（第 10 节）；结果不对时，最好附上录像片段和你的参照值。

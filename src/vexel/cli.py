@@ -202,6 +202,15 @@ def cmd_convert(args: argparse.Namespace) -> int:
 _FLAGGED = ("gpl", "agpl", "non-commercial", "noncommercial", "cc-by-nc", "cc by-nc")
 
 
+def cmd_bugreport(args: argparse.Namespace) -> int:
+    from vexel.bugreport import write_bundle
+
+    out = write_bundle(args.output, args.runs, note=args.note or "", tables=args.tables, keep_paths=args.keep_paths)
+    print(f"wrote {out}")
+    print("contains versions, settings, recipes and summaries; no images, no API keys. Look inside before sending it.")
+    return 0
+
+
 def cmd_licenses(args: argparse.Namespace) -> int:
     """License inventory of the installed environment, with copyleft / non-commercial terms flagged."""
     rows = []
@@ -247,6 +256,79 @@ def _speed(text: str) -> float | None:
     if value <= 0:
         raise argparse.ArgumentTypeError("speed must be positive, or 'max'")
     return value
+
+
+def cmd_probe(args: argparse.Namespace) -> int:
+    from vexel.agent.probe import montage, probe
+    from vexel.readers import open_volume
+
+    volume = open_volume(args.input, **_calibration(args))
+    fp = probe(volume)
+    if args.montage:
+        print(f"montage  {montage(volume, fp, args.montage)}")
+    if args.json:
+        print(json.dumps(fp.to_json(), indent=2, ensure_ascii=False))
+        return 0
+    print(f"input     {args.input}  {fp.shape}  {fp.dtype}  reader {fp.reader}")
+    print(f"calibrated {fp.calibrated}  pixel {_fmt(fp.pixel_size)} {fp.space_unit}  interval {_fmt(fp.frame_interval_s)} s")
+    for c in fp.channels:
+        role = " (droplets)" if c.index == fp.droplet_channel else (" (fluorescence)" if c.index == fp.fluorescence_channel else "")
+        print(f"\nchannel {c.index}{role}")
+        print(f"  intensity p1 {_fmt(c.p1)}  p50 {_fmt(c.p50)}  p99 {_fmt(c.p99)}  skew {_fmt(c.skewness)}  bimodality D {_fmt(c.bimodality)}")
+        print(f"  noise {_fmt(c.noise)}  SNR {_fmt(c.snr)}  static {c.static_fraction:.0%}  moving {c.moving_fraction:.0%}")
+        print(f"  flow (dy, dx) {c.flow_px} px/frame  jitter {_fmt(c.jitter_px)} px")
+        if c.objects_per_frame:
+            print(f"  objects/frame {_fmt(c.objects_per_frame)}  diameter {_fmt(c.object_diameter_px)} px  circularity {_fmt(c.object_circularity)}"
+                  f"  spots/object {_fmt(c.spots_per_object)} (stability {_fmt(c.spot_stability)})")  # fmt: skip
+    print(f"\nflow axis {fp.flow_axis}")
+    for n in fp.notes:
+        print(f"note      {n}")
+    return 0
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    from vexel.agent.memory import RecipeMemory
+    from vexel.agent.planner import make_plan, remember
+    from vexel.engine import run_recipe
+    from vexel.readers import open_volume
+
+    from vexel.agent import models
+
+    volume = open_volume(args.input, **_calibration(args))
+    memory = None if args.no_memory else RecipeMemory()
+    cfg = models.load_config()
+    if args.model != "auto":
+        cfg["order"] = [args.model, "rules"]
+    chain = models.tiers(cfg)
+    plan = make_plan(volume, args.goal, memory=memory, trial=not args.no_trial, chain=chain)
+    status = {"ready": "ready: passed the trial run", "check": "check: runs, with QC warnings", "needs_user": "needs you",
+              "draft": "draft (not tried)"}[plan.status]  # fmt: skip
+    planner = plan.planner + (f" ({plan.model})" if plan.model and plan.model != "rules" else "")
+    print(f"plan     {plan.base}  {plan.overrides or ''}\nstatus   {status}\nplanner  {planner}")
+    for s in plan.skipped:
+        print(f"         skipped {s}")
+    print()
+    for r in plan.reasons:
+        print(f"  - {r}")
+    for i, a in enumerate(plan.attempts, 1):
+        print(f"  trial {i}: {a.change}  ->  droplets {a.metrics.get('n_droplets')}" + (f", {a.failure}" if a.failure else "")
+              + (f", {len(a.violations)} QC warning(s)" if a.violations else ""))  # fmt: skip
+    for h in plan.memory:
+        print(f"  memory: {h['base']} {h['overrides']} distance {h['distance']:.2f}, passed {h['passed']}/{h['runs']}")
+    out = Path(args.out) if args.out else Path("runs") / f"{Path(args.input).name.split('.')[0]}-plan-{datetime.now():%Y%m%d-%H%M%S}"
+    recipe_path = plan.save(out)
+    print(f"\nrecipe   {recipe_path}   (plan details: {out / 'plan.json'})")
+    if not args.run:
+        print(f"accept and run:  vexel run {args.input} -r {recipe_path}   (or re-plan with --run)")
+        return 0 if plan.status != "needs_user" else 1
+    if plan.status == "needs_user":
+        print("not run: the plan needs you (see above)", file=sys.stderr)
+        return 1
+    result = run_recipe(plan.recipe(), volume, out / "run", progress=print, hash_input=not args.no_input_hash)
+    if memory is not None:
+        remember(memory, plan, result)
+    print(f"\nrun      {out / 'run'}   ({len(result.violations)} QC warning(s))")
+    return 0
 
 
 def cmd_brush(args: argparse.Namespace) -> int:
@@ -419,6 +501,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("input", nargs="?", help="data to open on start")
     p.set_defaults(func=cmd_gui)
 
+    p = sub.add_parser("probe", help="fingerprint a dataset: statistics, motion, objects, channel roles")
+    p.add_argument("input")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--montage", help="also write a 2 x 2 diagnostic picture here (PNG)")
+    _add_calibration(p)
+    p.set_defaults(func=cmd_probe)
+
+    p = sub.add_parser("plan", help="draft a recipe for a dataset and a goal, check it on a trial run")
+    p.add_argument("input")
+    p.add_argument("--goal", "-g", default="", help="what to measure, in words (e.g. '数每个液滴里的细胞', 'positive droplets')")
+    p.add_argument("--out", "-o", help="folder for plan.json and recipe.json (default: runs/<input>-plan-<timestamp>)")
+    p.add_argument("--no-trial", action="store_true", help="draft only; do not try the recipe")
+    p.add_argument("--no-memory", action="store_true", help="neither use nor update recipe memory")
+    p.add_argument("--model", choices=["auto", "claude", "deepseek", "qwen", "gemini", "custom", "local", "rules"], default="auto",
+                   help="planning model: auto follows ~/.vexel/config.json; rules is offline; others fall back to rules")  # fmt: skip
+    p.add_argument("--run", action="store_true", help="accept the plan and run it on all frames (remembered in recipe memory)")
+    p.add_argument("--no-input-hash", action="store_true")
+    _add_calibration(p)
+    p.set_defaults(func=cmd_plan)
+
+    p = sub.add_parser("mcp", help="serve the operator registry and recipe engine to AI assistants (MCP, stdio)")
+    p.set_defaults(func=lambda _a: __import__("vexel.agent.mcp_server", fromlist=["main"]).main())
+
     p = sub.add_parser("brush", help="train a pixel classifier by painting strokes; writes a recipe that uses it")
     p.add_argument("input", help="data to paint on")
     p.add_argument("--recipe", "-r", default="droplet_basic", help="recipe whose segmentation the classifier replaces")
@@ -537,6 +642,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--overwrite", action="store_true")
     _add_calibration(p)
     p.set_defaults(func=cmd_convert)
+
+    p = sub.add_parser("bugreport", help="write a diagnostics zip for a problem report (no images, no keys)")
+    p.add_argument("runs", nargs="*", help="run folders the problem is about")
+    p.add_argument("-o", "--output", default="vexel-bugreport.zip")
+    p.add_argument("--note", help="what happened, in your words")
+    p.add_argument("--tables", action="store_true", help="also include the per-droplet tables (CSV)")
+    p.add_argument("--keep-paths", action="store_true", help="keep full file paths (default: file names only)")
+    p.set_defaults(func=cmd_bugreport)
 
     p = sub.add_parser("licenses", help="license inventory of installed dependencies")
     p.add_argument("--markdown", action="store_true")

@@ -1,14 +1,14 @@
 # Vexel
 
 智能体原生的科学图像分析平台：LLM 负责规划，确定性算子负责计算，每个结果可复核、可复现。
-使用说明见 [用户手册](docs/user_manual.md)，规划见 [vexel_roadmap_0.0.3.md](vexel_roadmap_0.0.3.md)。当前进度：Phase 1–3 完成（引擎与 CLI、液滴包与质控、流式执行），Phase 4 完成（新手引导、画笔训练、复核与纠错，见 [docs/corrections.md](docs/corrections.md)；“15 分钟上手”待真人测试，方案见 [docs/usability_test.md](docs/usability_test.md)）；第三阶段验收见 [docs/phase3_acceptance.md](docs/phase3_acceptance.md)，客户长录像上的验收待数据。
+使用说明见 [用户手册](docs/user_manual.md)，规划见 [vexel_roadmap_0.0.3.md](vexel_roadmap_0.0.3.md)。当前版本：**0.5.0b1 内测版**（[更新记录](CHANGELOG.md)，[内测说明](docs/closed_testing/README.md)，[微流控开发进度评估](docs/progress_microfluidics.md)）。Phase 1–5 完成：引擎与 CLI、液滴包与质控、流式执行（验收见 [docs/phase3_acceptance.md](docs/phase3_acceptance.md)）、界面与人工纠错（见 [docs/corrections.md](docs/corrections.md)；“15 分钟上手”待真人测试，方案见 [docs/usability_test.md](docs/usability_test.md)）、智能体（探针、规划器、配方记忆、可选 Claude / DeepSeek / 通义千问 / Gemini / 本地模型 / 离线规则、MCP 服务；验收见 [docs/phase5_acceptance.md](docs/phase5_acceptance.md)）。Phase 6（批处理）与 Phase 7（安装包）未开始。
 
 ## 快速开始
 
 桌面界面：
 
 ```bash
-uv sync
+uv sync                 # 加 --extra agent 安装可选的 Claude SDK 与 MCP 服务
 uv run vexel gui
 ```
 
@@ -46,6 +46,9 @@ uv run vexel run   my_video.avi -r my_recipe.json --set seg.min_score=0.5
 | `vexel gui` | 打开桌面界面 |
 | `vexel report` | 重新生成一次运行的 HTML 报告 |
 | `vexel run` | 在录好的数据上执行配方 |
+| `vexel probe` | 数据指纹：亮度、噪声、运动、液滴尺寸、细胞、通道角色；可存四宫格诊断图 |
+| `vexel plan` | 自动规划：按数据和目标起草配方，在前几百帧试跑并调整，`--run` 接受后分析并记入配方记忆 |
+| `vexel mcp` | MCP 服务（stdio）：让 AI 助手调用探针、规划、运行与读取结果 |
 | `vexel brush` | 画笔训练：在图上标出液滴和背景，训练像素分类器，写出使用它的配方 |
 | `vexel review` | 打开复核与纠错窗口：修正轮廓、细胞数、阴阳性，排除杂质 |
 | `vexel correct` | 按修改记录（corrections.json）重算，结果写入 `<结果>/corrected` |
@@ -58,6 +61,7 @@ uv run vexel run   my_video.avi -r my_recipe.json --set seg.min_score=0.5
 | `vexel validate` | 把液滴运行结果与真值比对 |
 | `vexel synth` | 生成带真值的合成液滴视频 |
 | `vexel convert` | 转为 OME-Zarr 多分辨率金字塔 |
+| `vexel bugreport` | 导出诊断包（版本、设置、配方、汇总；不含图像和密钥），用于报告问题 |
 | `vexel licenses` | 已安装依赖的许可证清单，标出 GPL / 非商用项 |
 
 `batch` 属于后续阶段（Phase 6）。
@@ -91,7 +95,8 @@ src/vexel/
 ├── sources/   文件、回放、监视文件夹数据源；相机仅接口
 ├── ops/       算子注册表（frame / window / volume 范围声明）与基础算子
 ├── packs/     领域分析包；droplet/ 含汇总算子、内置配方、真值校验
-├── engine/    配方、批式执行器、流式执行器、质控、溯源
+├── engine/    配方、批式执行器、流式执行器、质控、溯源、人工修正
+├── agent/     探针、规划器、配方记忆、模型抽象层、MCP 服务
 ├── synthetic/ 合成样本生成器
 ├── ui/        桌面界面与在线监控看板（PySide6，经 qtpy），只调用引擎
 └── cli.py

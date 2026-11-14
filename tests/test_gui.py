@@ -455,3 +455,56 @@ def test_guide_leads_a_new_user_through_an_analysis(app, tmp_path):
     w.show_guide()
     assert w.guide.isVisibleTo(w)
     _dispose(w)
+
+
+def test_auto_plan_fills_the_settings(window, cells_dataset, monkeypatch):
+    monkeypatch.setenv("VEXEL_OFFLINE", "1")
+    monkeypatch.setenv("VEXEL_HOME", str(cells_dataset.parent / "vexel-home-gui"))
+    window.open_path(cells_dataset / "droplets.ome.tif")
+    window.cells_check.setChecked(False)
+    window.goal_edit.setText("数每个液滴里的细胞")
+    shown = []
+    window.confirm_plan = lambda dialog: shown.append(dialog) or True
+    assert window.auto_plan()
+    loop = QEventLoop()
+    poll = QTimer()
+    poll.timeout.connect(lambda: None if window.planning() else loop.quit())
+    poll.start(30)
+    loop.exec()
+    poll.stop()
+    assert window.warnings == []
+    plan = window.last_plan
+    assert plan.status == "ready" and plan.planner == "rules"
+    assert shown and shown[0].accept_btn.isEnabled()
+    assert window.cells_check.isChecked() and window.recipe_name() == "droplet_encapsulation"
+    assert "自动规划" in window.status.text()
+    window.cells_check.setChecked(False)
+
+
+def test_model_settings_dialog_saves_the_choice(app, tmp_path, monkeypatch):
+    from vexel.agent import models
+    from vexel.ui.model_settings import ModelSettingsDialog
+
+    monkeypatch.setenv("VEXEL_HOME", str(tmp_path))
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("VEXEL_OFFLINE", raising=False)
+    dialog = ModelSettingsDialog()
+    dialog.provider.setCurrentIndex(dialog.provider.findData("gemini"))
+    assert "GEMINI_API_KEY" in dialog.key_label.text() and "未设置" in dialog.key_label.text()
+    assert dialog.model_edit.text() == models.COMPATIBLE["gemini"]["model"]
+    assert dialog.test() is False and "不可用" in dialog.result.text()
+    dialog.model_edit.setText("gemini-2.5-pro")
+    dialog.save()
+    cfg = models.load_config()
+    assert cfg["order"] == ["gemini", "rules"] and cfg["gemini"]["model"] == "gemini-2.5-pro"
+    dialog.provider.setCurrentIndex(dialog.provider.findData("rules"))
+    assert not dialog.model_edit.isEnabled()
+    _dispose(dialog)
+
+
+def test_export_bugreport_from_the_window(window, tmp_path):
+    import zipfile
+
+    out = window.export_bugreport(tmp_path / "bug.zip")
+    assert out.exists() and "environment.json" in zipfile.ZipFile(out).namelist()
+    assert "诊断包已保存" in window.status.text()

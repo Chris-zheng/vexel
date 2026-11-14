@@ -62,3 +62,39 @@ def test_replay_command(tmp_path, capsys):
     assert (out / "stream" / "rolling.csv").exists() and (out / "report.html").exists()
     with pytest.raises(SystemExit):  # rejected by the argument parser
         main(["replay", str(data / "droplets.ome.tif"), "-r", "droplet_basic", "--speed", "-1"])
+
+
+def test_bugreport_has_no_images_paths_or_keys(tmp_path, monkeypatch):
+    import zipfile
+
+    monkeypatch.setenv("VEXEL_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-secret-value")
+    run = tmp_path / "run"
+    (run / "tables").mkdir(parents=True)
+    (run / "review").mkdir()
+    secret_path = str(tmp_path / "private" / "patient_42.avi")
+    (run / "provenance.json").write_text(json.dumps({"input": {"source": secret_path}, "api_key": "sk-x", "status": "completed"}))
+    (run / "summary.json").write_text(json.dumps({"droplets": {"n_droplets": 3}}))
+    (run / "recipe.json").write_text(json.dumps({"name": "droplet_basic"}))
+    (run / "tables" / "flags.table.csv").write_text("label,reason\n1,edge\n")
+    (run / "tables" / "measure.table.csv").write_text("label,diameter\n1,50\n")
+    (run / "review" / "frame_000000.png").write_bytes(b"\x89PNG")
+    (run / "report.html").write_text("<img>")
+    (tmp_path / "home").mkdir()
+    (tmp_path / "home" / "config.json").write_text(json.dumps({"models": {"order": ["deepseek", "rules"]}}))
+
+    out = tmp_path / "bug.zip"
+    assert main(["bugreport", str(run), "-o", str(out), "--note", "count looks low"]) == 0
+    with zipfile.ZipFile(out) as zf:
+        names = zf.namelist()
+        text = "".join(zf.read(n).decode() for n in names)
+        env = json.loads(zf.read("environment.json"))
+    assert "run1_run/tables/flags.table.csv" in names and "note.txt" in names
+    assert not any(n.endswith((".png", ".html")) for n in names) and "run1_run/tables/measure.table.csv" not in names
+    assert "sk-secret-value" not in text and "sk-x" not in text and str(tmp_path) not in text
+    assert ".../patient_42.avi" in text
+    assert env["planning_models"]["deepseek"]["api_key_set"] is True and env["vexel"]
+
+    main(["bugreport", str(run), "-o", str(out), "--tables"])
+    with zipfile.ZipFile(out) as zf:
+        assert "run1_run/tables/measure.table.csv" in zf.namelist()

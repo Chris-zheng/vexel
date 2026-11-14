@@ -158,6 +158,9 @@ class MainWindow(QMainWindow):
         help_menu = self.menuBar().addMenu("帮助")
         help_menu.addAction("显示引导", self.show_guide)
         help_menu.addAction("打开示例数据", self.open_sample)
+        help_menu.addAction("规划模型设置…", self.open_model_settings)
+        help_menu.addSeparator()
+        help_menu.addAction("导出诊断包…", lambda: self.export_bugreport())
         self._set_ready(False)
         self.guide.setVisible(self.settings.value("guide_hidden", "false") != "true")
         self.update_guide()
@@ -181,6 +184,16 @@ class MainWindow(QMainWindow):
         row.addWidget(self.open_btn)
         row.addWidget(self.folder_btn)
         v.addLayout(row)
+        plan_row = QHBoxLayout()
+        self.goal_edit = QLineEdit()
+        self.goal_edit.setPlaceholderText("想测什么？例如：数每个液滴里的细胞")
+        self.plan_btn = QPushButton("自动规划…")
+        self.plan_btn.setToolTip("看一遍数据，起草设置，在前几百帧上试运行，再交给你确认。用哪个大模型帮忙：帮助 → 规划模型设置")
+        self.plan_btn.clicked.connect(self.auto_plan)
+        plan_row.addWidget(self.goal_edit, 1)
+        plan_row.addWidget(self.plan_btn)
+        v.addLayout(plan_row)
+        self.plan_extra: dict[str, Any] = {}  # planned settings that have no control in this window
         self.live_btn = QPushButton("在线监控（回放录像 / 监视采集文件夹）…")
         self.live_btn.setToolTip("边采集（或边回放）边分析：滚动统计、漂移报警、处理帧率与丢帧")
         self.live_btn.clicked.connect(self.open_live)
@@ -453,6 +466,7 @@ class MainWindow(QMainWindow):
         self.path = path
         self.settings.setValue("last_dir", str(path.parent))
         self.brush = None  # trained on other data
+        self.plan_extra = {}
         self.brush_btn.setText("训练…")
         self.seg_combo.setCurrentIndex(0)
         sizes = volume.sizes
@@ -581,6 +595,10 @@ class MainWindow(QMainWindow):
             out["droplets.flow_axis"] = flow
         if "inclusions.polarity" in defaults and self.polarity_combo.currentData() != defaults["inclusions.polarity"]:
             out["inclusions.polarity"] = self.polarity_combo.currentData()
+        for key, value in self.plan_extra.items():
+            step = key.split(".", 1)[0]
+            if any(k.startswith(step + ".") for k in defaults) and key not in out:
+                out[key] = value
         return out
 
     def reset_advanced(self) -> None:
@@ -713,7 +731,7 @@ class MainWindow(QMainWindow):
         for w in (
             self.open_btn, self.folder_btn, self.pixel_edit, self.interval_edit, self.height_edit, self.flow_combo, self.channel_combo,
             self.cells_check, self.cells_channel_combo, self.polarity_combo, self.fluo_check, self.fluo_channel_combo,
-            self.adv_box, self.seg_combo, self.brush_btn,
+            self.adv_box, self.seg_combo, self.brush_btn, self.plan_btn, self.goal_edit,
         ):  # fmt: skip
             w.setEnabled(not running)
         self.preview_btn.setVisible(not running)
@@ -728,6 +746,7 @@ class MainWindow(QMainWindow):
     def _set_ready(self, ready: bool) -> None:
         self.preview_btn.setEnabled(ready)
         self.run_btn.setEnabled(ready)
+        self.plan_btn.setEnabled(ready)
 
     # -- results ------------------------------------------------------------------------------
 
@@ -968,8 +987,8 @@ class MainWindow(QMainWindow):
         else:
             calib = "已从文件读取标定，请核对。" if self.pixel_edit.text() else "不知道像素尺寸可以先留空，粒径会以像素为单位。"
             g.set_step("preview", "第二步：核对设置，快速预览",
-                       f"在左侧核对像素尺寸和帧间隔（{calib}）。要数细胞或判读荧光就勾选相应项。然后先用前 {PREVIEW_FRAMES} 帧快速预览，检查识别得对不对。",
-                       [("快速预览", lambda: self.start(preview=True))])  # fmt: skip
+                       f"在左侧核对像素尺寸和帧间隔（{calib}）。要数细胞或判读荧光就勾选相应项，或写下想测什么、点“自动规划”让 Vexel 起草设置。然后先用前 {PREVIEW_FRAMES} 帧快速预览，检查识别得对不对。",
+                       [("快速预览", lambda: self.start(preview=True)), ("自动规划…", self.auto_plan)])  # fmt: skip
 
     def _n_flagged(self) -> int:
         try:
@@ -997,6 +1016,110 @@ class MainWindow(QMainWindow):
         if ok:
             self.status.setText("示例：合成的液滴视频，每个液滴里随机有 0–3 个细胞。可以勾选“统计每个液滴里的细胞数”试试。")
         return ok
+
+    def export_bugreport(self, path: str | Path | None = None) -> Path | None:
+        """A zip for a problem report: versions, settings and the current run's recipe and
+        summary, without images or keys (see ``vexel bugreport``)."""
+        from vexel.bugreport import write_bundle
+
+        if path is None:
+            default = str(Path.home() / f"vexel-bugreport-{datetime.now():%Y%m%d-%H%M}.zip")
+            path, _ = QFileDialog.getSaveFileName(self, "导出诊断包", default, "Zip (*.zip)")
+            if not path:
+                return None
+        runs = [self.run_dir] if self.run_dir is not None and self.run_dir.is_dir() else []
+        out = write_bundle(path, runs)
+        self.status.setText(f"诊断包已保存：{out}（含版本、设置、配方与汇总；不含图像和密钥）。发送前可以打开看一看。")
+        return out
+
+    # -- automatic planning --------------------------------------------------------------
+
+    def open_model_settings(self) -> None:
+        from vexel.ui.model_settings import ModelSettingsDialog
+
+        self.model_dialog = ModelSettingsDialog(self)
+        self.model_dialog.show()
+
+    def auto_plan(self) -> bool:
+        from qtpy.QtCore import QThread
+
+        from vexel.ui.plan import PlanWorker
+
+        if self.path is None or self.is_running() or getattr(self, "_plan_thread", None) is not None:
+            return False
+        try:
+            pixel = _parse_positive(self.pixel_edit.text())
+            interval = _parse_positive(self.interval_edit.text())
+        except ValueError:
+            self.warn("标定有误", "像素尺寸和帧间隔必须是正数，或留空。")
+            return False
+        self._plan_worker = PlanWorker(self.path, self.goal_edit.text(), {"pixel": pixel, "interval": interval / 1000.0 if interval else None})
+        self._plan_thread = QThread()
+        self._plan_worker.moveToThread(self._plan_thread)
+        self._plan_thread.started.connect(self._plan_worker.run)
+        self._plan_worker.finished.connect(self._on_plan)
+        self._plan_worker.failed.connect(self._on_plan_failed)
+        self.plan_btn.setEnabled(False)
+        self.status.setText("正在规划：看数据、起草设置、试运行…")
+        self._plan_thread.start()
+        return True
+
+    def planning(self) -> bool:
+        return getattr(self, "_plan_thread", None) is not None
+
+    def _release_plan(self) -> None:
+        thread, worker = self._plan_thread, self._plan_worker
+        self._plan_thread = self._plan_worker = None
+        thread.quit()
+        thread.wait()
+        for obj in (worker, thread):
+            if obj.thread() is self.thread():
+                obj.setParent(self)
+                obj.deleteLater()
+        self.plan_btn.setEnabled(True)
+
+    def _on_plan(self, plan: Any) -> None:
+        from vexel.ui.plan import PlanDialog
+
+        self._release_plan()
+        self.last_plan = plan
+        self.status.setText("")
+        dialog = PlanDialog(plan, self)
+        self.plan_dialog = dialog
+        if self.confirm_plan(dialog):
+            self.apply_plan(plan)
+
+    def confirm_plan(self, dialog: Any) -> bool:
+        return dialog.exec() == dialog.DialogCode.Accepted
+
+    def _on_plan_failed(self, message: str) -> None:
+        self._release_plan()
+        self.status.setText("规划未完成。")
+        self.warn("规划未完成", message)
+
+    def apply_plan(self, plan: Any) -> None:
+        """Put a plan's choices into the window's settings."""
+        self.cells_check.setChecked("encapsulation" in plan.base)
+        self.fluo_check.setChecked("fluorescence" in plan.base)
+        o = dict(plan.overrides)
+        for key, combo in (("input.channel", self.channel_combo), ("input.channels.cells", self.cells_channel_combo),
+                           ("input.channels.fluo", self.fluo_channel_combo)):  # fmt: skip
+            if key in o:
+                i = combo.findData(o.pop(key))
+                if i >= 0:
+                    combo.setCurrentIndex(i)
+        if "droplets.flow_axis" in o:
+            self.flow_combo.setCurrentIndex(self.flow_combo.findData(o.pop("droplets.flow_axis")))
+        if "inclusions.polarity" in o:
+            self.polarity_combo.setCurrentIndex(self.polarity_combo.findData(o.pop("inclusions.polarity")))
+        if "droplets.channel_height_um" in o:
+            self.height_edit.setText(f"{o.pop('droplets.channel_height_um'):g}")
+        for key in list(o):
+            if key in self.spins:
+                spin, scale = self.spins[key]
+                spin.setValue(float(o.pop(key)) * scale)
+        self.plan_extra = o
+        self.status.setText(f"已采用自动规划（{plan.base}）。可以直接“开始分析”，或先快速预览。")
 
     def open_review(self) -> None:
         from vexel.ui.review import ReviewWindow
