@@ -319,6 +319,10 @@ class MainWindow(QMainWindow):
         self.open_dir_btn = QPushButton("打开结果文件夹")
         self.open_dir_btn.clicked.connect(self._open_run_dir)
         top.addWidget(self.open_dir_btn, 0, Qt.AlignmentFlag.AlignTop)
+        self.review_btn = QPushButton("复核与纠错…")
+        self.review_btn.setToolTip("逐个查看可疑目标，修正轮廓、细胞数、阴阳性或排除目标，然后重算")
+        self.review_btn.clicked.connect(self.open_review)
+        top.addWidget(self.review_btn, 0, Qt.AlignmentFlag.AlignTop)
         pv.addLayout(top)
 
         self.notes = QLabel()
@@ -691,6 +695,7 @@ class MainWindow(QMainWindow):
         self.result_title.setText("预览结果" if preview else "分析结果")
         self.result_path.setText("临时目录，关闭程序后删除" if preview else str(run_dir))
         self.run_dir = run_dir
+        self.review_btn.setVisible(not preview)  # a preview is temporary: nothing to correct
         self.stack.setCurrentIndex(1)
         return True
 
@@ -841,6 +846,19 @@ class MainWindow(QMainWindow):
         if urls:
             self.open_path(urls[0].toLocalFile())
 
+    def open_review(self) -> None:
+        from vexel.ui.review import ReviewWindow
+
+        if self.run_dir is None:
+            return
+        try:
+            self.review_window = ReviewWindow(self.run_dir)
+        except Exception as e:  # noqa: BLE001 - e.g. the input file was moved
+            self.warn("无法复核", f"{type(e).__name__}: {e}")
+            return
+        self.review_window.show()
+        self.review_window.raise_()
+
     def open_live(self) -> None:
         from vexel.ui.live import LiveWindow
 
@@ -850,8 +868,9 @@ class MainWindow(QMainWindow):
         self.live_window.raise_()
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        if getattr(self, "live_window", None) is not None:
-            self.live_window.close()
+        for name in ("live_window", "review_window"):
+            if getattr(self, name, None) is not None:
+                getattr(self, name).close()
         if self._worker is not None:
             self._worker.cancel()
         if self._thread is not None:

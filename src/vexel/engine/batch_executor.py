@@ -32,6 +32,7 @@ from skimage.segmentation import mark_boundaries
 from vexel.core.device import plan_block_frames, select_device
 from vexel.core.volume import SpatialVolume
 from vexel.engine import provenance as prov
+from vexel.engine.corrections import Corrections, apply_label_edits, apply_table_edits
 from vexel.engine.qc import QCGateError, Violation, aggregate_frames, evaluate
 from vexel.engine.recipe import SOURCE, Recipe, Step
 from vexel.ops.registry import Context, Kind, OpResult, OpSpec, Scope, get_op
@@ -121,6 +122,8 @@ def _run_frame_step(
     step_id: str,
     pool: ThreadPoolExecutor,
     tick: Callable[[int, int], None],
+    label_edits: dict[str, dict[int, list[Any]]] | None = None,
+    edit_log: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, float]]:
     names = list(inputs)
     n = ctx.n_frames
@@ -142,6 +145,13 @@ def _run_frame_step(
             return result
 
         results = list(pool.map(one, range(stop - start)))
+        for o in writers:  # human corrections to this step's labels, before anyone reads them
+            for t, edits in (label_edits or {}).get(f"{step_id}.{o}", {}).items():
+                if start <= t < stop:
+                    fixed, status = apply_label_edits(results[t - start].outputs[o], edits)
+                    results[t - start].outputs[o] = fixed
+                    if edit_log is not None:
+                        edit_log.extend({"edit": e.model_dump(mode="json"), "status": st} for e, st in zip(edits, status))
         for o, writer in writers.items():
             writer.write(start, np.stack([r.outputs[o] for r in results]))
         for o, parts in table_parts.items():
@@ -262,6 +272,7 @@ def run_recipe(
     progress: Progress | None = None,
     tick: Tick | None = None,
     report: bool = True,
+    corrections: Corrections | None = None,
 ) -> RunResult:
     """Resolve and execute ``recipe`` on ``volume``; write tables, summary, review overlays
     and provenance into ``out_dir``."""
@@ -313,6 +324,14 @@ def run_recipe(
     status = "completed"
     stop_error: QCGateError | None = None
     workers = workers or min(8, os.cpu_count() or 1)
+    label_edits = corrections.label_edits() if corrections else {}
+    table_edits = corrections.table_edits() if corrections else {}
+    edit_log: list[dict[str, Any]] = []
+    if corrections:
+        known = set(resolved.kinds())
+        unknown = sorted({e.target for e in corrections.edits} - known)
+        if unknown:
+            raise ValueError(f"corrections refer to values this recipe does not produce: {unknown}")
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for i, step in enumerate(resolved.steps, 1):
@@ -328,12 +347,17 @@ def run_recipe(
 
             step_tick(0, 1)
             if spec.scope is Scope.FRAME:
-                outputs, metrics = _run_frame_step(spec, params, inputs, ctx, scratch, step.id, pool, step_tick)
+                outputs, metrics = _run_frame_step(spec, params, inputs, ctx, scratch, step.id, pool, step_tick, label_edits, edit_log)
             else:
                 outputs, metrics = _run_window_step(spec, params, inputs, ctx, scratch, step.id, step_tick)
             step_tick(1, 1)
             for name, value in outputs.items():
-                values[f"{step.id}.{name}"] = value
+                ref = f"{step.id}.{name}"
+                if ref in table_edits and isinstance(value, pd.DataFrame):
+                    tables_now = {r: v for r, v in values.items() if isinstance(v, pd.DataFrame)}
+                    value, applied = apply_table_edits(value, table_edits[ref], tables_now)
+                    edit_log.extend({"edit": e.model_dump(mode="json"), "status": st} for e, st in zip(table_edits[ref], applied))
+                values[ref] = value
             failed = evaluate(step.id, metrics, step.qc)
             violations.extend(failed)
             step_records.append(
@@ -415,6 +439,14 @@ def run_recipe(
         "intermediates": intermediates,
         "result_digest": result_digest,
     }
+    if corrections:
+        record["corrections"] = {
+            "sha256": corrections.digest(),
+            "base": corrections.base,
+            "n_edits": len(corrections.edits),
+            "n_applied": sum(1 for x in edit_log if x["status"] == "applied"),
+            "edits": edit_log,
+        }
     prov.write_json(out_dir / "provenance.json", record)
     if report:
         from vexel.report import write_report

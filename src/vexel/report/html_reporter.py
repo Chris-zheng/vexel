@@ -249,6 +249,26 @@ def stream_section(run_dir: Path, prov: dict[str, Any], unit: str) -> list[str]:
     return out
 
 
+_EDIT_TEXT = {"labels.delete": "删除轮廓", "labels.merge": "合并", "labels.paint": "补画", "labels.erase": "擦除",
+              "table.set": "修改", "table.exclude": "排除"}  # fmt: skip
+
+
+def corrections_section(c: dict[str, Any]) -> list[str]:
+    edits = c.get("edits", [])
+    out = [f'<h2>人工修正</h2><p class="meta">本结果按 {c.get("n_edits", 0)} 处人工修正重新计算，其中 {c.get("n_applied", 0)} 处生效。'
+           f"修改记录与原结果放在一起（corrections.json，SHA-256 {_e(str(c.get('sha256', ''))[:16])}…），原结果未改动。</p>"]  # fmt: skip
+    if edits:
+        out.append("<table><tr><th>帧</th><th>修改</th><th>对象</th><th>内容</th><th>结果</th></tr>")
+        for item in edits:
+            e = item["edit"]
+            what = "，".join(f"{k} = {v}" for k, v in (e.get("values") or {}).items()) or (e.get("note") or "")
+            ok = "生效" if item["status"] == "applied" else f"未生效：{item['status']}"
+            out.append(f'<tr><td class="num">{e["frame"]}</td><td>{_e(_EDIT_TEXT.get(e["kind"], e["kind"]))}</td>'
+                       f"<td><code>{_e(e['target'])}</code></td><td>{_e(what)}</td><td>{_e(ok)}</td></tr>")  # fmt: skip
+        out.append("</table>")
+    return out
+
+
 def methods_text(recipe: dict[str, Any], provenance: dict[str, Any]) -> list[str]:
     """A methods paragraph per step, generated from the frozen recipe."""
     out: list[str] = []
@@ -337,6 +357,12 @@ def methods_text(recipe: dict[str, Any], provenance: dict[str, Any]) -> list[str
     pk = env.get("packages", {})
     libs = "、".join(f"{k} {pk[k]}" for k in ("numpy", "scipy", "scikit-image", "laptrack", "scikit-learn") if k in pk)
     out.append(f"分析使用 Vexel {env.get('vexel', '')}（Python {env.get('python', '')}；{libs}），配方 SHA-256 为 {provenance.get('recipe', {}).get('sha256', '')[:16]}…。")
+    corr = provenance.get("corrections")
+    if corr:
+        out.append(
+            f"自动分析结果经人工复核：在复核界面中对分割轮廓与逐液滴结果做了 {corr.get('n_applied', 0)} 处修正"
+            "（删除误检、补画漏检、修改细胞数或阴阳性、排除杂质等），并按修正重新运行同一配方；修改记录随结果保存，可复现。"
+        )
     return out
 
 
@@ -485,6 +511,8 @@ def build_report(run_dir: str | Path) -> str:
 
     if prov.get("mode") == "stream":
         body.extend(stream_section(run_dir, prov, unit))
+    if prov.get("corrections"):
+        body.extend(corrections_section(prov["corrections"]))
 
     # methods
     body.append('<h2>方法</h2><div class="methods">' + "".join(f"<p>{_e(t)}</p>" for t in methods_text(recipe, prov)) + "</div>")

@@ -321,3 +321,50 @@ def test_main_window_opens_the_dashboard(window):
     window.open_live()
     assert window.live_window.isVisible()
     window.live_window.close()
+
+
+# -- review and correction ---------------------------------------------------------------------
+
+
+def test_review_window_records_edits_and_reruns(app, hard_run):
+    from vexel.ui.review import ReviewWindow
+
+    (hard_run / "corrections.json").unlink(missing_ok=True)
+    w = ReviewWindow(hard_run)
+    w.warn = lambda *a: pytest.fail(f"unexpected warning {a}")
+    assert w.queue.count() > 0 and w.filter_combo.currentData() == "flagged"
+    w.queue.setCurrentRow(0)
+    assert w.selected is not None and w.selected["row"] is not None
+    assert w.canvas.view is not None  # zoomed on the selected droplet
+    w.field_widgets["n_inclusions"].setValue(7)
+    w.set_fields()
+    w.verify()
+    w.queue.setCurrentRow(1)
+    if w.selected is not None:
+        w.exclude()
+    w.tool_buttons["delete"].setChecked(True)
+    y, x = w.selected["y"], w.selected["x"]
+    w.selected = None
+    w._on_click(y, x)  # deletes the outline in this frame
+    kinds = [e.kind for e in w.corrections.edits]
+    assert kinds[0] == "table.set" and "labels.delete" in kinds
+    _, labels, _ = w.inspector.view(w.frame)
+    assert labels[int(round(y)), int(round(x))] == 0
+    w.undo()
+    assert w.corrections.edits[-1].kind != "labels.delete" or len(w.corrections.edits) < len(kinds)
+    saved = json.loads((hard_run / "corrections.json").read_text())
+    assert len(saved["edits"]) == len(w.corrections.edits)
+    assert w.apply()
+    wait_until_idle(w)
+    assert w.status.text().startswith("已按") and w.report_btn.isVisibleTo(w)
+    corrected = json.loads((hard_run / "corrected" / "provenance.json").read_text())
+    assert corrected["corrections"]["n_edits"] == len(w.corrections.edits)
+    _dispose(w)
+
+
+def test_review_button_on_results(window, hard_run):
+    window.load_results(hard_run)
+    assert window.review_btn.isVisibleTo(window)
+    window.open_review()
+    assert window.review_window.isVisible()
+    window.review_window.close()

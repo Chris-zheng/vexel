@@ -82,6 +82,13 @@ class DropletSummaryParams(Params):
     )
 
 
+def _verified(table: pd.DataFrame) -> np.ndarray:
+    """Rows a person confirmed in review (``verified`` set by a correction)."""
+    if "verified" not in table.columns:
+        return np.zeros(len(table), dtype=bool)
+    return table["verified"].fillna(False).astype(bool).to_numpy()
+
+
 def _mode(values: np.ndarray) -> tuple[int, float]:
     """Most frequent integer (ties: the smaller one) and the share of values equal to it."""
     uniq, counts = np.unique(values.astype(np.int64), return_counts=True)
@@ -503,7 +510,8 @@ def poisson(params: PoissonParams, ctx: Context, *, table: pd.DataFrame) -> OpRe
     counts = table[params.column].to_numpy(dtype=np.float64)
     keep = counts >= 0  # -1 marks droplets whose count could not be measured
     if "inclusion_agreement" in table.columns:
-        keep &= table["inclusion_agreement"].to_numpy(dtype=np.float64) >= params.min_agreement
+        agreed = table["inclusion_agreement"].to_numpy(dtype=np.float64) >= params.min_agreement
+        keep &= agreed | _verified(table)  # a count a person confirmed stands
     excluded = int((~keep).sum())
     counts = counts[keep].astype(np.int64)
     n = int(counts.size)
@@ -814,13 +822,19 @@ def positivity(params: PositivityParams, ctx: Context, *, table: pd.DataFrame) -
     out = table.copy()
     out["positive"] = (values > threshold) if threshold is not None else False
     out.loc[~finite, "positive"] = False
+    # calls a person made (review corrections) replace the automatic ones
+    manual = table["positive_manual"].notna().to_numpy() if "positive_manual" in table.columns else np.zeros(len(table), bool)
+    if manual.any():
+        out.loc[manual, "positive"] = table.loc[manual, "positive_manual"].astype(bool).to_numpy()
+    counted = finite | manual
     if threshold is not None and n:
         hi_v, lo_v = v[v > threshold], v[v <= threshold]
         scale = float(hi_v.mean() - lo_v.mean()) if (hi_v.size and lo_v.size) else params.outlier_k * max(spread, 1e-9)
         # signed distance to the threshold in units of the gap between the two groups;
         # values near 0 are the uncertain calls
         out["call_margin"] = (values - threshold) / max(scale, 1e-9)
-    k = int(out.loc[finite, "positive"].sum())
+    n = int(counted.sum())
+    k = int(out.loc[counted, "positive"].astype(bool).sum())
     p = k / n if n else None
     lo, hi = _wilson(k, n) if n else (None, None)
     pos, neg = v[v > threshold] if threshold is not None else v[:0], v[v <= threshold] if threshold is not None else v
@@ -828,7 +842,8 @@ def positivity(params: PositivityParams, ctx: Context, *, table: pd.DataFrame) -
         "column": params.column,
         "n_droplets": n,
         "n_positive": k,
-        "n_unmeasured": int((~finite).sum()),
+        "n_unmeasured": int((~counted).sum()),
+        "n_manual": int(manual.sum()),
         "positive_fraction": p,
         "positive_fraction_ci_low": lo,
         "positive_fraction_ci_high": hi,
@@ -919,6 +934,8 @@ def flags(params: FlagParams, ctx: Context, *, table: pd.DataFrame, tracks: pd.D
             frames = table["n_frames"].to_numpy(dtype=np.float64)
         for i in np.nonzero(frames < params.min_frames_fraction * float(np.median(frames)))[0]:
             reasons[i].append("few_frames")
+        for i in np.nonzero(_verified(table))[0]:  # a person has already looked at it
+            reasons[int(i)] = []
 
     rows = []
     by_track = {tid: g for tid, g in tracks.groupby("track_id")} if "track_id" in tracks.columns else {}

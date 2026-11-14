@@ -1,7 +1,7 @@
 # Vexel
 
 智能体原生的科学图像分析平台：LLM 负责规划，确定性算子负责计算，每个结果可复核、可复现。
-使用说明见 [用户手册](docs/user_manual.md)，规划见 [vexel_roadmap_0.0.3.md](vexel_roadmap_0.0.3.md)。当前进度：Phase 1–3 完成（引擎与 CLI、液滴包与质控、流式执行）；第三阶段验收见 [docs/phase3_acceptance.md](docs/phase3_acceptance.md)，客户长录像上的验收待数据。
+使用说明见 [用户手册](docs/user_manual.md)，规划见 [vexel_roadmap_0.0.3.md](vexel_roadmap_0.0.3.md)。当前进度：Phase 1–3 完成（引擎与 CLI、液滴包与质控、流式执行），Phase 4 进行中（复核与纠错的通用底层与液滴适配已完成，见 [docs/corrections.md](docs/corrections.md)）；第三阶段验收见 [docs/phase3_acceptance.md](docs/phase3_acceptance.md)，客户长录像上的验收待数据。
 
 ## 快速开始
 
@@ -46,6 +46,8 @@ uv run vexel run   my_video.avi -r my_recipe.json --set seg.min_score=0.5
 | `vexel gui` | 打开桌面界面 |
 | `vexel report` | 重新生成一次运行的 HTML 报告 |
 | `vexel run` | 在录好的数据上执行配方 |
+| `vexel review` | 打开复核与纠错窗口：修正轮廓、细胞数、阴阳性，排除杂质 |
+| `vexel correct` | 按修改记录（corrections.json）重算，结果写入 `<结果>/corrected` |
 | `vexel live` | 打开在线监控看板：回放录像或监视采集文件夹，实时显示当前帧、滚动统计与报警 |
 | `vexel watch` | 监视采集文件夹：每到一张图就分析，增量写入 OME-Zarr，采集结束后自动全量终算 |
 | `vexel replay` | 把录像按原始帧率（或倍速）逐帧送入流式执行器：滚动统计、漂移报警、处理帧率与丢帧 |
@@ -72,7 +74,9 @@ runs/demo/
 ├── provenance.json    # 输入哈希、配方哈希、依赖版本、各步耗时与质控指标、结果摘要
 ├── stream/            # 仅 replay / watch：rolling.csv 滚动统计，alarms.csv 警报，events/ 警报时的画面
 ├── frames.zarr        # 仅 watch：采集到的帧（OME-Zarr，逐帧追加）
-└── final/             # 仅 watch：采集结束后对 frames.zarr 的全量分析
+├── final/             # 仅 watch：采集结束后对 frames.zarr 的全量分析
+├── corrections.json   # 复核时所做的人工修改
+└── corrected/         # 按人工修改重算的结果（格式同上）
 ```
 
 同一配方加同一数据得到相同的 `result_digest`。

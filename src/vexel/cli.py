@@ -249,6 +249,37 @@ def _speed(text: str) -> float | None:
     return value
 
 
+def cmd_review(args: argparse.Namespace) -> int:
+    from vexel.ui.review import main as review_main
+
+    return review_main([args.run])
+
+
+def cmd_correct(args: argparse.Namespace) -> int:
+    from vexel.engine.corrections import Corrections
+    from vexel.engine.review import CORRECTIONS_FILE, rerun_with_corrections
+
+    run = Path(args.run)
+    source = Path(args.corrections) if args.corrections else run / CORRECTIONS_FILE
+    if not source.exists():
+        raise FileNotFoundError(f"no corrections at {source} (make them with `vexel review {run}`)")
+    corrections = Corrections.load(source)
+    print(f"run          {run}\ncorrections  {source}  ({len(corrections.edits)} edit(s))")
+    result = rerun_with_corrections(run, corrections, args.out, progress=print)
+    c = result.provenance["corrections"]
+    for item in c["edits"]:
+        e = item["edit"]
+        mark = "ok " if item["status"] == "applied" else "!! "
+        print(f"  {mark}frame {e['frame']:>5}  {e['kind']:<14} {e['target']:<20} {item['status']}")
+    print(f"\napplied {c['n_applied']} of {c['n_edits']} edit(s)")
+    for ref, summary in result.summary.items():
+        print(f"\n{ref}")
+        for key, value in summary.items():
+            print(f"  {key:<24} {_fmt(value)}")
+    print(f"\noutput       {result.out_dir}")
+    return 0 if c["n_applied"] == c["n_edits"] else 1
+
+
 def cmd_live(args: argparse.Namespace) -> int:
     from vexel.ui.live import main as live_main
 
@@ -357,6 +388,16 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("gui", help="open the desktop interface")
     p.add_argument("input", nargs="?", help="data to open on start")
     p.set_defaults(func=cmd_gui)
+
+    p = sub.add_parser("review", help="open the review and correction window for a run")
+    p.add_argument("run", help="run directory")
+    p.set_defaults(func=cmd_review)
+
+    p = sub.add_parser("correct", help="re-run a run with its corrections (corrections.json) into <run>/corrected")
+    p.add_argument("run", help="run directory")
+    p.add_argument("--corrections", help="corrections file (default: <run>/corrections.json)")
+    p.add_argument("--out", "-o", help="output directory (default: <run>/corrected)")
+    p.set_defaults(func=cmd_correct)
 
     p = sub.add_parser("live", help="open the live dashboard (replay a recording or watch an acquisition folder)")
     p.add_argument("input", nargs="?", help="recording to replay, or folder to watch")
