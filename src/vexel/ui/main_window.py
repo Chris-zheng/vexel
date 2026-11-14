@@ -22,6 +22,7 @@ import pandas as pd
 from qtpy.QtCore import QSettings, Qt, QThread, QUrl
 from qtpy.QtGui import QDesktopServices
 from qtpy.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -140,9 +141,26 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self._build_controls())
-        layout.addWidget(self._build_results(), 1)
+        right = QWidget()
+        rv = QVBoxLayout(right)
+        rv.setContentsMargins(16, 14, 16, 0)
+        rv.setSpacing(0)
+        from vexel.ui.guide import GuideBar
+
+        self.guide = GuideBar(self.hide_guide)
+        rv.addWidget(self.guide)
+        rv.addWidget(self._build_results(), 1)
+        layout.addWidget(right, 1)
         self.setCentralWidget(central)
+        self._previewed = False
+        self._has_results = False
+        self.sample_dir = Path.home() / "Vexel" / "示例数据"
+        help_menu = self.menuBar().addMenu("帮助")
+        help_menu.addAction("显示引导", self.show_guide)
+        help_menu.addAction("打开示例数据", self.open_sample)
         self._set_ready(False)
+        self.guide.setVisible(self.settings.value("guide_hidden", "false") != "true")
+        self.update_guide()
 
     # -- layout -------------------------------------------------------------------------
 
@@ -192,6 +210,19 @@ class MainWindow(QMainWindow):
         self.channel_combo = QComboBox()
         self.channel_combo.setToolTip("在哪个通道里分割液滴（液滴轮廓最清楚的通道，通常是明场）")
         form.addRow("液滴通道", self.channel_combo)
+        seg_row = QHBoxLayout()
+        self.seg_combo = QComboBox()
+        self.seg_combo.addItem("自动（找圆）", "circles")
+        self.seg_combo.addItem("画笔训练", "brush")
+        self.seg_combo.setToolTip("自动适用于圆形液滴；轮廓找不准时，改用画笔在图上标几笔，训练一个识别器")
+        self.seg_combo.currentIndexChanged.connect(self._seg_mode_changed)
+        self.brush_btn = QPushButton("训练…")
+        self.brush_btn.setToolTip("在图上用画笔标出液滴和背景")
+        self.brush_btn.clicked.connect(self.open_brush)
+        seg_row.addWidget(self.seg_combo, 1)
+        seg_row.addWidget(self.brush_btn)
+        form.addRow("液滴识别", seg_row)
+        self.brush: tuple[str, str] | None = None  # training file, SHA-256
         self.cells_check = QCheckBox("统计每个液滴里的细胞数")
         self.cells_check.setToolTip("包裹计数：空滴、单包裹、多包裹比例，并与泊松分布比较")
         self.polarity_combo = QComboBox()
@@ -421,6 +452,9 @@ class MainWindow(QMainWindow):
             return False
         self.path = path
         self.settings.setValue("last_dir", str(path.parent))
+        self.brush = None  # trained on other data
+        self.brush_btn.setText("训练…")
+        self.seg_combo.setCurrentIndex(0)
         sizes = volume.sizes
         channels = f" · {sizes['C']} 通道" if sizes["C"] > 1 else ""
         self.file_label.setText(path.name)
@@ -444,7 +478,49 @@ class MainWindow(QMainWindow):
         self.empty_title.setText(f"已载入 {path.name}")
         self.empty_sub.setText("核对左侧标定后，点“快速预览”检查设置，或直接“开始分析”。")
         self._set_ready(True)
+        self._previewed = self._has_results = False
+        self.update_guide()
         return True
+
+    def build_recipe(self) -> Recipe:
+        """The built-in recipe for the chosen analyses, with the settings applied and, when
+        brush training is chosen, its segmentation replaced by the trained classifier."""
+        overrides = self.overrides()
+        if self.seg_combo.currentData() == "brush" and self.brush is not None:
+            from vexel.ops.classify import use_in_recipe
+
+            seg_free = {k: v for k, v in overrides.items() if not k.startswith("seg.")}  # those settings are for circle detection
+            return use_in_recipe(Recipe.load(self.recipe_name()), *self.brush).with_overrides(seg_free)
+        return Recipe.load(self.recipe_name()).with_overrides(overrides)
+
+    def _seg_mode_changed(self, _index: int = 0) -> None:
+        brush = self.seg_combo.currentData() == "brush"
+        for key in ("seg.min_diameter_px", "seg.max_diameter_px", "seg.min_score", "seg.motion_threshold"):
+            spin, _ = self.spins[key]
+            spin.setEnabled(not brush)
+        if brush and self.brush is None and self.path is not None:
+            self.open_brush()
+
+    def open_brush(self) -> None:
+        from vexel.ui.brush import BrushWindow
+
+        if self.path is None:
+            return
+        try:
+            self.brush_window = BrushWindow(self.path, channel=int(self.channel_combo.currentData() or 0))
+        except Exception as e:  # noqa: BLE001
+            self.warn("无法训练", f"{type(e).__name__}: {e}")
+            return
+        self.brush_window.trained.connect(self._on_brush_trained)
+        self.brush_window.show()
+        self.brush_window.raise_()
+
+    def _on_brush_trained(self, path: str, sha: str, n_frames: int) -> None:
+        self.brush = (path, sha)
+        if self.seg_combo.currentData() != "brush":
+            self.seg_combo.setCurrentIndex(self.seg_combo.findData("brush"))
+        self.brush_btn.setText("重新训练…")
+        self.status.setText(f"画笔训练已完成（{n_frames} 帧上的笔画），分析将用它识别液滴。")
 
     def recipe_name(self) -> str:
         cells, fluo = self.cells_check.isChecked(), self.fluo_check.isChecked()
@@ -550,7 +626,10 @@ class MainWindow(QMainWindow):
         except ValueError:
             self.warn("标定有误", "像素尺寸、帧间隔和流道高度必须是正数，或留空。")
             return False
-        recipe = Recipe.load(self.recipe_name()).with_overrides(self.overrides())
+        if self.seg_combo.currentData() == "brush" and self.brush is None:
+            self.warn("还没有训练", "选择了“画笔训练”，请先点“训练…”在图上标出液滴和背景。")
+            return False
+        recipe = self.build_recipe()
         try:
             recipe.resolve()
         except Exception as e:
@@ -634,7 +713,7 @@ class MainWindow(QMainWindow):
         for w in (
             self.open_btn, self.folder_btn, self.pixel_edit, self.interval_edit, self.height_edit, self.flow_combo, self.channel_combo,
             self.cells_check, self.cells_channel_combo, self.polarity_combo, self.fluo_check, self.fluo_channel_combo,
-            self.adv_box,
+            self.adv_box, self.seg_combo, self.brush_btn,
         ):  # fmt: skip
             w.setEnabled(not running)
         self.preview_btn.setVisible(not running)
@@ -643,6 +722,8 @@ class MainWindow(QMainWindow):
         self.cancel_btn.setEnabled(running)
         self.progress.setVisible(running)
         self.progress.setValue(0)
+        if hasattr(self, "guide"):
+            self.update_guide()
 
     def _set_ready(self, ready: bool) -> None:
         self.preview_btn.setEnabled(ready)
@@ -696,7 +777,11 @@ class MainWindow(QMainWindow):
         self.result_path.setText("临时目录，关闭程序后删除" if preview else str(run_dir))
         self.run_dir = run_dir
         self.review_btn.setVisible(not preview)  # a preview is temporary: nothing to correct
+        self._has_results = True
+        self._previewed = self._previewed or preview
+        self._preview = preview
         self.stack.setCurrentIndex(1)
+        self.update_guide()
         return True
 
     def _show_flags(self, run_dir: Path, summary: dict | None) -> None:
@@ -845,6 +930,73 @@ class MainWindow(QMainWindow):
         urls = [u for u in event.mimeData().urls() if u.isLocalFile()]
         if urls:
             self.open_path(urls[0].toLocalFile())
+
+    # -- guide ------------------------------------------------------------------------------
+
+    def hide_guide(self) -> None:
+        self.guide.setVisible(False)
+        self.settings.setValue("guide_hidden", "true")
+
+    def show_guide(self) -> None:
+        self.settings.setValue("guide_hidden", "false")
+        self.guide.setVisible(True)
+        self.update_guide()
+
+    def update_guide(self) -> None:
+        """Point at the next thing to do, from the window's state."""
+        g = self.guide
+        if self.is_running():
+            g.set_step("running", "正在分析", "进度在左下角，可以随时取消。完成后结果显示在这里。")
+        elif self.path is None:
+            g.set_step("data", "第一步：选择数据",
+                       "把液滴视频（或图像序列文件夹）拖进窗口，或点左上角“选择文件…”。手头没有数据，可以先用一段示例视频熟悉流程。",
+                       [("试用示例数据", self.open_sample)])  # fmt: skip
+        elif self._has_results and not self._preview:
+            flagged = self._n_flagged()
+            if flagged:
+                g.set_step("review", "最后一步：复核可疑液滴",
+                           f"分析完成。有 {flagged} 个液滴需要人工看一眼（原因写在“可疑液滴”下）。逐个确认或修正后重算，结果更可靠。",
+                           [("复核与纠错…", self.open_review), ("打开报告", self._open_report)])  # fmt: skip
+            else:
+                g.set_step("done", "完成", "结果已保存在数据旁边的文件夹里。报告是单个 HTML 文件，可以直接发送或打印。",
+                           [("打开报告", self._open_report), ("分析另一个文件", self._choose_file)])  # fmt: skip
+        elif self._previewed:
+            g.set_step("check", "第三步：红线套准液滴了吗？",
+                       "看右侧复核图：每个液滴应被一圈红线套住，没有多余的圈。套准了就分析全部帧；"
+                       "没套准，改用“画笔训练”在图上标几笔，或在“高级设置”里调整。",
+                       [("开始分析", lambda: self.start(preview=False)), ("画笔训练…", self._brush_from_guide)])  # fmt: skip
+        else:
+            calib = "已从文件读取标定，请核对。" if self.pixel_edit.text() else "不知道像素尺寸可以先留空，粒径会以像素为单位。"
+            g.set_step("preview", "第二步：核对设置，快速预览",
+                       f"在左侧核对像素尺寸和帧间隔（{calib}）。要数细胞或判读荧光就勾选相应项。然后先用前 {PREVIEW_FRAMES} 帧快速预览，检查识别得对不对。",
+                       [("快速预览", lambda: self.start(preview=True))])  # fmt: skip
+
+    def _n_flagged(self) -> int:
+        try:
+            summary = json.loads((self.run_dir / "summary.json").read_text())
+        except (OSError, TypeError, ValueError):
+            return 0
+        return int(summary.get("flags.summary", {}).get("n_flagged") or 0)
+
+    def _brush_from_guide(self) -> None:
+        self.seg_combo.setCurrentIndex(self.seg_combo.findData("brush"))
+        if self.brush is not None:
+            self.open_brush()
+
+    def open_sample(self) -> bool:
+        """Generate a short synthetic video with cells (exact truth alongside) and open it."""
+        from vexel.synthetic.droplets import DropletSynthConfig, write_dataset
+
+        folder = self.sample_dir
+        video = folder / "droplets.ome.tif"
+        if not video.exists():
+            self.status.setText("正在生成示例数据…")
+            QApplication.processEvents()
+            write_dataset(folder, DropletSynthConfig(n_frames=300, seed=1, cell_lambda=1.0))
+        ok = self.open_path(video)
+        if ok:
+            self.status.setText("示例：合成的液滴视频，每个液滴里随机有 0–3 个细胞。可以勾选“统计每个液滴里的细胞数”试试。")
+        return ok
 
     def open_review(self) -> None:
         from vexel.ui.review import ReviewWindow

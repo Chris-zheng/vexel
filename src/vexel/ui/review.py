@@ -22,7 +22,6 @@ from qtpy.QtWidgets import (
     QComboBox,
     QFormLayout,
     QHBoxLayout,
-    QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -34,7 +33,7 @@ from qtpy.QtWidgets import (
 )
 
 from vexel.engine.corrections import Corrections, Edit
-from vexel.engine.review import CORRECTED_DIR, FrameInspector, review_adapter, rerun_with_corrections
+from vexel.engine.review import CORRECTED_DIR, FrameInspector, rerun_with_corrections, review_adapter
 from vexel.ui.widgets import heading, muted
 
 TOOLS = [

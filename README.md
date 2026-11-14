@@ -1,7 +1,7 @@
 # Vexel
 
 智能体原生的科学图像分析平台：LLM 负责规划，确定性算子负责计算，每个结果可复核、可复现。
-使用说明见 [用户手册](docs/user_manual.md)，规划见 [vexel_roadmap_0.0.3.md](vexel_roadmap_0.0.3.md)。当前进度：Phase 1–3 完成（引擎与 CLI、液滴包与质控、流式执行），Phase 4 进行中（复核与纠错的通用底层与液滴适配已完成，见 [docs/corrections.md](docs/corrections.md)）；第三阶段验收见 [docs/phase3_acceptance.md](docs/phase3_acceptance.md)，客户长录像上的验收待数据。
+使用说明见 [用户手册](docs/user_manual.md)，规划见 [vexel_roadmap_0.0.3.md](vexel_roadmap_0.0.3.md)。当前进度：Phase 1–3 完成（引擎与 CLI、液滴包与质控、流式执行），Phase 4 完成（新手引导、画笔训练、复核与纠错，见 [docs/corrections.md](docs/corrections.md)；“15 分钟上手”待真人测试，方案见 [docs/usability_test.md](docs/usability_test.md)）；第三阶段验收见 [docs/phase3_acceptance.md](docs/phase3_acceptance.md)，客户长录像上的验收待数据。
 
 ## 快速开始
 
@@ -46,6 +46,7 @@ uv run vexel run   my_video.avi -r my_recipe.json --set seg.min_score=0.5
 | `vexel gui` | 打开桌面界面 |
 | `vexel report` | 重新生成一次运行的 HTML 报告 |
 | `vexel run` | 在录好的数据上执行配方 |
+| `vexel brush` | 画笔训练：在图上标出液滴和背景，训练像素分类器，写出使用它的配方 |
 | `vexel review` | 打开复核与纠错窗口：修正轮廓、细胞数、阴阳性，排除杂质 |
 | `vexel correct` | 按修改记录（corrections.json）重算，结果写入 `<结果>/corrected` |
 | `vexel live` | 打开在线监控看板：回放录像或监视采集文件夹，实时显示当前帧、滚动统计与报警 |

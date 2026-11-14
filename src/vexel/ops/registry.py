@@ -133,7 +133,7 @@ def register_op(
 
 def load_builtin_ops() -> None:
     """Import every module that registers operators (idempotent)."""
-    from vexel.ops import measure, preprocess, segment, stats, track  # noqa: F401
+    from vexel.ops import classify, measure, preprocess, segment, stats, track  # noqa: F401
     from vexel.packs.droplet import ops as _droplet  # noqa: F401
 
 

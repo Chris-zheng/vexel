@@ -21,6 +21,9 @@ QPushButton#primary {
 }
 QPushButton#primary:hover { background: #1d4ed8; }
 QPushButton#primary:disabled { background: palette(mid); color: palette(window); }
+QFrame#guide { background: rgba(37, 99, 235, 0.10); border: 1px solid rgba(37, 99, 235, 0.35); border-radius: 8px; }
+QLabel#guideTitle { font-weight: 600; font-size: 14px; }
+QPushButton#guideClose { border: none; background: transparent; font-size: 16px; }
 QProgressBar { border: none; border-radius: 3px; background: palette(mid); }
 QProgressBar::chunk { border-radius: 3px; background: #2563eb; }
 """

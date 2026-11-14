@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
+import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -368,3 +370,88 @@ def test_review_button_on_results(window, hard_run):
     window.open_review()
     assert window.review_window.isVisible()
     window.review_window.close()
+
+
+# -- brush training and the guide ---------------------------------------------------------------
+
+
+def test_brush_window_trains_previews_and_saves(app, droplet_dataset, tmp_path):
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_brush import strokes_from_truth
+
+    from vexel.ops.classify import train
+    from vexel.ui.brush import BrushWindow
+
+    w = BrushWindow(droplet_dataset / "droplets.ome.tif", out_dir=tmp_path / "brush")
+    assert not w.done_btn.isEnabled()
+    _, strokes = strokes_from_truth(droplet_dataset, frames=(20,))
+    w.show_frame(20)
+    w.strokes[20] = strokes[20].copy()
+    w.retrain()
+    assert w.model is not None and w.done_btn.isEnabled() and "已在 1 帧上画" in w.frame_label.text()
+    prob, labels = w.segment(20)
+    assert labels.max() >= 3
+    got = []
+    w.trained.connect(lambda p, sha, n: got.append((p, sha, n)))
+    path, sha = w.finish()
+    assert got == [(path, sha, 1)] and Path(path).exists()
+    # the preview the person saw is exactly what the saved file gives
+    np.testing.assert_array_equal(train(path).probabilities(w.image(20)), w.model.probabilities(w.image(20)))
+    _dispose(w)
+
+
+def test_main_window_uses_brush_training(window, droplet_dataset, tmp_path):
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_brush import strokes_from_truth
+
+    from vexel.ops.classify import save_training
+
+    window.open_path(droplet_dataset / "droplets.ome.tif")
+    window.seg_combo.blockSignals(True)
+    window.seg_combo.setCurrentIndex(window.seg_combo.findData("brush"))
+    window.seg_combo.blockSignals(False)
+    assert not window.start()  # not trained yet
+    assert window.warnings[-1][0] == "还没有训练"
+    images, strokes = strokes_from_truth(droplet_dataset)
+    path = tmp_path / "b.npz"
+    sha = save_training(path, images, strokes, ["液滴", "背景"])
+    window._on_brush_trained(str(path), sha, 2)
+    recipe = window.build_recipe()
+    assert next(s for s in recipe.steps if s.id == "seg").op == "segment.pixel_classifier"
+    assert window.start(preview=True)
+    wait_until_idle(window)
+    assert window.warnings[1:] == []
+    p = json.loads((window.run_dir / "provenance.json").read_text())
+    assert next(s for s in p["steps"] if s["id"] == "seg")["op"] == "segment.pixel_classifier"
+    window.seg_combo.setCurrentIndex(0)
+
+
+def test_guide_leads_a_new_user_through_an_analysis(app, tmp_path):
+    from vexel.ui.main_window import MainWindow
+
+    w = MainWindow()
+    w.warn = lambda *a: pytest.fail(f"unexpected warning {a}")
+    w.sample_dir = tmp_path / "sample"
+    w.settings.setValue("guide_hidden", "false")
+    w.show_guide()
+    steps = [w.guide.step]
+    w.guide.buttons[0].click()  # 试用示例数据
+    steps.append(w.guide.step)
+    assert (tmp_path / "sample" / "droplets.ome.tif").exists()
+    w.guide.buttons[0].click()  # 快速预览
+    wait_until_idle(w)
+    steps.append(w.guide.step)
+    w.guide.buttons[0].click()  # 开始分析
+    steps.append(w.guide.step)
+    wait_until_idle(w)
+    steps.append(w.guide.step)
+    assert steps[:4] == ["data", "preview", "check", "running"] and steps[4] in ("done", "review")
+    w.hide_guide()
+    assert not w.guide.isVisible() and w.settings.value("guide_hidden") == "true"
+    w.show_guide()
+    assert w.guide.isVisibleTo(w)
+    _dispose(w)

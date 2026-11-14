@@ -249,6 +249,36 @@ def _speed(text: str) -> float | None:
     return value
 
 
+def cmd_brush(args: argparse.Namespace) -> int:
+    import sys as _sys
+
+    from qtpy.QtWidgets import QApplication
+
+    from vexel.engine import Recipe
+    from vexel.ops.classify import use_in_recipe
+    from vexel.ui.app import STYLE
+    from vexel.ui.brush import BrushWindow
+
+    base = Recipe.load(args.recipe)
+    app = QApplication.instance() or QApplication(_sys.argv[:1])
+    app.setStyleSheet(STYLE)
+    window = BrushWindow(args.input, channel=args.channel)
+    written: list[Path] = []
+
+    def save(path: str, sha: str, n: int) -> None:
+        recipe_path = Path(path).with_suffix(".recipe.json")
+        recipe_path.write_text(use_in_recipe(base, path, sha).model_dump_json(indent=2) + "\n", encoding="utf-8")
+        written.append(recipe_path)
+        print(f"training  {path}  ({n} painted frame(s), SHA-256 {sha[:12]}…)")
+        print(f"recipe    {recipe_path}")
+        print(f"run with  vexel run {args.input} -r {recipe_path}")
+
+    window.trained.connect(save)
+    window.show()
+    app.exec()
+    return 0 if written else 1
+
+
 def cmd_review(args: argparse.Namespace) -> int:
     from vexel.ui.review import main as review_main
 
@@ -388,6 +418,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("gui", help="open the desktop interface")
     p.add_argument("input", nargs="?", help="data to open on start")
     p.set_defaults(func=cmd_gui)
+
+    p = sub.add_parser("brush", help="train a pixel classifier by painting strokes; writes a recipe that uses it")
+    p.add_argument("input", help="data to paint on")
+    p.add_argument("--recipe", "-r", default="droplet_basic", help="recipe whose segmentation the classifier replaces")
+    p.add_argument("--channel", type=int, default=0, help="channel to paint on and classify")
+    p.set_defaults(func=cmd_brush)
 
     p = sub.add_parser("review", help="open the review and correction window for a run")
     p.add_argument("run", help="run directory")
