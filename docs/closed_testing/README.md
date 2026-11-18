@@ -19,23 +19,80 @@
 
 **目前不适合**（遇到请告诉我们，记为需求）：液滴不动的静态阵列或腔室芯片、长条形塞子或严重变形的液滴、双重乳液、多色荧光判读、3D 数据、各通道分存为不同文件。
 
-## 1. 安装（约 10 分钟）
+## 1. 安装（约 10–20 分钟）
 
-先装 [uv](https://docs.astral.sh/uv/)（Python 工具管理器，会自动准备 Python 3.12）：
+你会收到三个文件，放在同一个文件夹里：
 
-- macOS / Linux：在“终端”里运行 `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- Windows：在 PowerShell 里运行 `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
+| 文件 | 作用 |
+| :--- | :--- |
+| `vexel-0.6.0b1-py3-none-any.whl` | Vexel 本身 |
+| `vexel-0.6.0b1-constraints.txt` | 我们测试过的全部依赖的确切版本，安装时用它，保证你装到的和我们测的是同一套 |
+| `SHA256SUMS.txt` | 前两个文件的校验值 |
 
-装完**关闭并重新打开**终端。然后二选一：
+先在这个文件夹里打开终端（Windows 用 PowerShell），核对文件完整（可选，但推荐）：
 
-**A. 收到了安装文件**（`vexel-0.6.0b1-py3-none-any.whl`）：
+- macOS / Linux：`shasum -a 256 -c SHA256SUMS.txt`（每行应显示 OK）
+- Windows：`Get-FileHash .\vexel-0.6.0b1-py3-none-any.whl`，与 `SHA256SUMS.txt` 里的值对比
+
+然后按你所在的网络环境选一种安装方式。两种方式装出来的软件完全相同。
+
+### 1A. 海外网络
+
+1. 安装 [uv](https://docs.astral.sh/uv/)（Python 工具管理器，会自动准备 Python 3.12）：
+   - macOS / Linux：`curl -LsSf https://astral.sh/uv/install.sh | sh`
+   - Windows：`powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
+2. **关闭并重新打开**终端，回到放安装文件的文件夹，安装并启动：
 
 ```bash
-uv tool install ./vexel-0.6.0b1-py3-none-any.whl
+uv tool install ./vexel-0.6.0b1-py3-none-any.whl -c ./vexel-0.6.0b1-constraints.txt
 vexel gui
 ```
 
-**B. 被邀请访问了代码仓库**：
+### 1B. 中国大陆网络
+
+uv、Python 和依赖包默认都从境外服务器下载，在大陆可能很慢或失败。下面改用中国科学技术大学（USTC）和清华大学的镜像。
+
+**macOS / Linux**（在“终端”里依次运行）：
+
+```bash
+# 1. 从 USTC 镜像安装 uv
+export UV_DOWNLOAD_URL=https://mirrors.ustc.edu.cn/github-release/astral-sh/uv/LatestRelease
+curl -LsSf https://mirrors.ustc.edu.cn/github-release/astral-sh/uv/LatestRelease/uv-installer.sh | sh
+
+# 2. 让 uv 以后都从国内镜像下载 Python 和依赖包（写入启动配置，只需做一次）
+echo 'export UV_PYTHON_INSTALL_MIRROR=https://mirrors.ustc.edu.cn/github-release/astral-sh/python-build-standalone' >> ~/.zshrc
+echo 'export UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple' >> ~/.zshrc
+```
+
+（Linux 或使用 bash 时把 `~/.zshrc` 换成 `~/.bashrc`。）**关闭并重新打开**终端，回到放安装文件的文件夹：
+
+```bash
+uv tool install ./vexel-0.6.0b1-py3-none-any.whl -c ./vexel-0.6.0b1-constraints.txt
+vexel gui
+```
+
+**Windows**：
+
+1. 下载 uv：<https://mirrors.ustc.edu.cn/github-release/astral-sh/uv/LatestRelease/uv-x86_64-pc-windows-msvc.zip>（ARM 电脑下载 `uv-aarch64-pc-windows-msvc.zip`），解压后把 `uv.exe` 放到一个固定位置，例如 `C:\Users\你的用户名\.local\bin`。
+2. 在 PowerShell 里运行（只需一次，设置后**重新打开** PowerShell）：
+
+```powershell
+[Environment]::SetEnvironmentVariable("Path", $env:Path + ";$env:USERPROFILE\.local\bin", "User")
+[Environment]::SetEnvironmentVariable("UV_PYTHON_INSTALL_MIRROR", "https://mirrors.ustc.edu.cn/github-release/astral-sh/python-build-standalone", "User")
+[Environment]::SetEnvironmentVariable("UV_DEFAULT_INDEX", "https://pypi.tuna.tsinghua.edu.cn/simple", "User")
+```
+
+3. 回到放安装文件的文件夹：
+
+```powershell
+uv tool install .\vexel-0.6.0b1-py3-none-any.whl -c .\vexel-0.6.0b1-constraints.txt
+uv tool update-shell
+vexel gui
+```
+
+**镜像不可用时**：清华源可以换成阿里云 `https://mirrors.aliyun.com/pypi/simple`；Python 镜像可以换成 `https://registry.npmmirror.com/-/binary/python-build-standalone`。USTC 只保留 Python 的最新一批构建，个别文件不在镜像上时会自动转去 GitHub 下载，会慢一些但能完成。
+
+### 被邀请访问代码仓库时（两地都适用）
 
 ```bash
 git clone https://github.com/Chris-zheng/vexel.git
@@ -44,9 +101,12 @@ uv sync
 uv run vexel gui
 ```
 
-（用 B 方式时，下文的 `vexel ...` 都写成 `uv run vexel ...`。）
+用这种方式时，下文的 `vexel ...` 都写成 `uv run vexel ...`。大陆网络请先按 1B 设置好镜像。
 
-第一次启动需要下载依赖，可能要几分钟。打不开时，请把终端里的完整报错截图发给我们。
+### 常见问题
+
+- **`vexel` 命令找不到**：运行 `uv tool update-shell`，然后重新打开终端。
+- 第一次安装要下载约 300 MB，可能要几分钟。打不开时，请把终端里的完整报错截图发给我们。
 
 ## 2. 熟悉（约 15 分钟，请计时）
 
@@ -96,6 +156,6 @@ uv run vexel gui
 
 ## 7. 卸载
 
-- A 方式：`uv tool uninstall vexel`
-- B 方式：删除 `vexel` 文件夹
+- 用安装文件装的：`uv tool uninstall vexel`
+- 用代码仓库装的：删除 `vexel` 文件夹
 - 两种方式都可再删除 `~/.vexel`（配方记忆与模型设置）

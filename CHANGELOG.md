@@ -1,5 +1,14 @@
 # 更新记录
 
+## 未发布
+
+- 跨平台持续集成：Linux、Windows 每次提交运行全部测试，macOS 与回归基准每周；每次都构建 wheel 并按测试者的方式安装试运行（`.github/workflows/ci.yml`）。
+- `scripts/build_dist.sh`：生成 wheel、由 `uv.lock` 导出的依赖版本约束文件和 SHA-256 校验值；测试者用 `uv tool install <wheel> -c <constraints>` 安装到与测试相同的版本。
+- 内测说明分海外与中国大陆两套安装方式（大陆使用 USTC 与清华镜像）。
+- 命令行在无法显示某些字符的终端（如 GBK 编码的 Windows 控制台）上不再因输出而中断。
+- 批量报告：大数值坐标轴标注不再被截断。
+- 界面截图（docs/screenshots）、下阶段开发任务评估、路线图 0.0.4。
+
 ## 0.6.0b1（内测版，2026-11）
 
 第六阶段：批处理与实验级统计。

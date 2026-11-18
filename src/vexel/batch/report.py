@@ -48,7 +48,7 @@ def svg_groups(units: pd.DataFrame, m: Metric, groups: list[str]) -> str:
         return y1 - (v - lo) / (hi - lo) * (y1 - y0)
 
     parts = [f'<line x1="{x0}" y1="{y1}" x2="{x1}" y2="{y1}" class="grid"/>', f'<line x1="{x0}" y1="{y0}" x2="{x1}" y2="{y0}" class="grid"/>']
-    parts += [_text(x0 - 6, y0 + 4, f"{hi:.4g}", "end"), _text(x0 - 6, y1, f"{lo:.4g}", "end")]
+    parts += [_text(x0 - 6, y0 + 4, _fmt(hi), "end"), _text(x0 - 6, y1, _fmt(lo), "end")]
     step = (x1 - x0) / max(len(data), 1)
     for i, (g, v) in enumerate(data):
         cx = x0 + step * (i + 0.5)

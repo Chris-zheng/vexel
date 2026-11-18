@@ -4,8 +4,10 @@
 
 ## 发放前
 
-- [ ] 在一台 **Windows** 机器（最好再加一台 Linux 或 Intel Mac）上按 [内测说明](README.md) 从零安装，跑通示例数据和 `uv run pytest`。记录问题，必要时更新说明。
-- [ ] 构建安装文件：`uv build --wheel`，得到 `dist/vexel-0.6.0b1-py3-none-any.whl`。在干净环境里试装：`uv tool install ./dist/vexel-0.6.0b1-py3-none-any.whl && vexel gui`。
+- [ ] 确认 CI 在 Windows、Linux 上全绿（`.github/workflows/ci.yml`）；有条件时再在一台真实的 Windows 电脑上按 [内测说明](README.md) 从零安装一次，看界面显示。
+- [ ] 构建发放文件：`scripts/build_dist.sh`，得到 `dist/` 下的 wheel、依赖版本约束文件 `vexel-0.6.0b1-constraints.txt` 和 `SHA256SUMS.txt`（CI 每次也会构建同样的文件，并在 macOS、Windows、Linux 上按测试者的方式安装和试运行）。三个文件一起发放。
+- [ ] 分发：同一套文件放两处——GitHub Releases（海外测试者）和一个国内下载点（对象存储或网盘，大陆测试者）。
+- [ ] 在大陆网络下按内测说明 1B 实际装一次（CI 测不到国内网络）。
 - [ ] 决定分发方式：发 .whl 文件（不需要 GitHub 账号），或把测试者加为私有仓库的协作者（能看到源码）。
 - [ ] 决定反馈渠道（微信群 / 邮箱 / GitHub issues）并写进内测说明的“联系”一栏。
 - [ ] 数据约定：测试者提供的录像只用于内部开发与测试、不公开、可要求删除；有合作协议时以协议为准。确认后写进说明。

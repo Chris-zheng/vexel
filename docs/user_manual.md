@@ -16,12 +16,14 @@
 
 装完重新打开终端。然后二选一：
 
-**从安装文件**（内测时收到的 `.whl`）：
+**从安装文件**（内测时收到的 `.whl`，连同 `vexel-0.6.0b1-constraints.txt`）：
 
 ```bash
-uv tool install ./vexel-0.6.0b1-py3-none-any.whl
+uv tool install ./vexel-0.6.0b1-py3-none-any.whl -c ./vexel-0.6.0b1-constraints.txt
 vexel gui
 ```
+
+`-c` 让依赖装成我们测试过的确切版本。在中国大陆网络下，先按 [内测说明](closed_testing/README.md) 1B 节设置国内镜像。
 
 这样装好后命令直接写 `vexel ...`；卸载用 `uv tool uninstall vexel`。
 
@@ -43,7 +45,7 @@ uv run vexel --help
 
 下文所有命令都写成 `uv run vexel ...`（源码方式）。如果已激活虚拟环境（`source .venv/bin/activate`），或用安装文件装的，直接写 `vexel ...`。
 
-测试平台：macOS（Apple Silicon）上完整测试；Windows、Linux 预期可用，尚未测试。
+测试平台：macOS（Apple Silicon）上完整测试并日常使用；Windows、Linux 已配置持续集成（CI，`.github/workflows/ci.yml`），每次提交运行全部测试并按测试者的方式安装试运行；尚未在真实的 Windows、Linux 桌面上人工使用过。
 
 ---
 

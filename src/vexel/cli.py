@@ -760,9 +760,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _safe_console() -> None:
+    """Never crash on output a console cannot encode (e.g. "µm" on a GBK Windows console)."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
     from vexel.engine.recipe import RecipeError
 
+    _safe_console()
     args = build_parser().parse_args(argv)
     try:
         return int(args.func(args))
