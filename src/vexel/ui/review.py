@@ -583,7 +583,7 @@ class ReviewWindow(QMainWindow):
 
     def _on_applied(self, out_dir: str) -> None:
         self._release()
-        prov = json.loads((Path(out_dir) / "provenance.json").read_text())
+        prov = json.loads((Path(out_dir) / "provenance.json").read_text(encoding="utf-8"))
         c = prov.get("corrections", {})
         missed = c.get("n_edits", 0) - c.get("n_applied", 0)
         self.status.setText(f"已按 {c.get('n_applied', 0)} 处修改重算，结果在 {out_dir}" + (f"（{missed} 处没有找到目标）" if missed else "") + "。")

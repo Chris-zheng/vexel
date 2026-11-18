@@ -45,7 +45,7 @@ def test_stream_matches_batch_droplet_by_droplet(droplet_dataset, basic_pair):
 def test_stream_run_directory(basic_pair):
     _, stream = basic_pair
     out = stream.out_dir
-    p = json.loads((out / "provenance.json").read_text())
+    p = json.loads((out / "provenance.json").read_text(encoding="utf-8"))
     assert p["mode"] == "stream" and p["status"] == "completed"
     st = p["stream"]
     assert st["frames_received"] == st["frames_processed"] == 200 and st["frames_dropped"] == 0
@@ -168,7 +168,7 @@ def test_report_of_a_stream_run_shows_throughput_and_alarms(tmp_path):
     recipe = Recipe.load("droplet_basic")
     settings = StreamSettings(update_every=40, window=120, drift_min_droplets=8)
     run_stream(recipe, ReplaySource(volume, recipe.resolve().input.sources(), speed=None), tmp_path / "s", settings=settings, report=False)
-    html = write_report(tmp_path / "s").read_text()
+    html = write_report(tmp_path / "s").read_text(encoding="utf-8")
     assert "在线回放" in html and "处理速度" in html and "滚动平均粒径" in html
     assert "漂移" in html and 'class="event"' in html
 
@@ -227,7 +227,7 @@ def test_watch_ends_on_a_stop_file_and_can_ignore_existing_images(tmp_path):
     _write_frames(folder, [np.zeros((8, 8), np.uint8)] * 3)
     source = WatchSource(folder, {"source": 0}, idle_timeout_s=30, poll_s=0.02, include_existing=False)
     _write_frames(folder, [np.ones((8, 8), np.uint8)] * 2, start=3)
-    (folder / "STOP").write_text("")
+    (folder / "STOP").write_text("", encoding="utf-8")
     assert [int(fr.images["source"][0, 0]) for fr in source] == []  # STOP is seen before the new files settle
     assert source.ended_by == "STOP file"
     (folder / "STOP").unlink()
@@ -255,7 +255,7 @@ def test_watch_command_streams_then_runs_a_final_batch_pass(tmp_path, capsys):
 
     folder = tmp_path / "acq"
     folder.mkdir()
-    (folder / "vexel.json").write_text(_json.dumps({"pixel_size": 2.0, "frame_interval": 0.001}))
+    (folder / "vexel.json").write_text(_json.dumps({"pixel_size": 2.0, "frame_interval": 0.001}), encoding="utf-8")
     video, _, _ = generate(DropletSynthConfig(n_frames=160, seed=9, cell_lambda=1.0))
     writer = threading.Thread(target=_write_frames, args=(folder, video, 0.01))
     writer.start()
@@ -265,11 +265,11 @@ def test_watch_command_streams_then_runs_a_final_batch_pass(tmp_path, capsys):
     assert code == 0
     text = capsys.readouterr().out
     assert "ended by       idle timeout  (160 image(s))" in text and "final pass" in text
-    online = _json.loads((out / "summary.json").read_text())
-    final = _json.loads((out / "final" / "summary.json").read_text())
+    online = _json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    final = _json.loads((out / "final" / "summary.json").read_text(encoding="utf-8"))
     assert online["droplets.summary"]["n_droplets"] == final["droplets.summary"]["n_droplets"] > 5
     assert online["encapsulation.summary"]["lambda"] == final["encapsulation.summary"]["lambda"]
-    p = _json.loads((out / "provenance.json").read_text())
+    p = _json.loads((out / "provenance.json").read_text(encoding="utf-8"))
     assert p["stream"]["source"]["kind"] == "watch" and p["input"]["shape"][-2:] == [256, 768]
 
 

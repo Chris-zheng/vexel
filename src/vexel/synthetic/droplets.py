@@ -214,5 +214,5 @@ def write_dataset(out_dir: str | Path, cfg: DropletSynthConfig = DropletSynthCon
     )
     droplets.to_csv(truth / "droplets.csv", index=False)
     positions.to_csv(truth / "positions.csv", index=False)
-    (truth / "config.json").write_text(json.dumps(asdict(cfg), indent=2) + "\n")
+    (truth / "config.json").write_text(json.dumps(asdict(cfg), indent=2) + "\n", encoding="utf-8")
     return path

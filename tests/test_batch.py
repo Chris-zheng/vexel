@@ -151,14 +151,14 @@ def test_batch_run_resume_and_reproduce(batch_data, tmp_path):
         "001_chip1_droplets", "002_chip2_droplets", "004_chip1_droplets", "005_chip2_droplets"]  # fmt: skip
     for name in ("results.csv", "replicates.csv", "groups.csv", "comparisons.csv", "report.html", "methods_zh.txt", "methods_en.txt", "reproduce.py", "recipe.json", "design.csv"):
         assert (out / name).exists(), name
-    record = json.loads((out / "batch.json").read_text())
+    record = json.loads((out / "batch.json").read_text(encoding="utf-8"))
     assert record["status"] == "completed" and record["n_completed"] == 4 and record["n_failed"] == 2
     comp = pd.read_csv(out / "comparisons.csv")
     size = comp[comp.metric == "droplets.diameter_mean"].iloc[0]
     assert size["diff"] == pytest.approx(16, abs=2)  # large - small
-    html = (out / "report.html").read_text()
+    html = (out / "report.html").read_text(encoding="utf-8")
     assert "平均直径" in html and "Methods (English)" in html and "找不到文件" in html
-    assert "Welch" in (out / "methods_en.txt").read_text()
+    assert "Welch" in (out / "methods_en.txt").read_text(encoding="utf-8")
 
     # resume: nothing is run again
     again = run_batch(Design.load(batch_data / "design.csv"), Recipe.load("droplet_basic"), out, hash_input=False)
@@ -176,7 +176,7 @@ def test_batch_run_resume_and_reproduce(batch_data, tmp_path):
 
 
 def test_batch_refuses_a_folder_that_is_not_a_batch(tmp_path, batch_data):
-    (tmp_path / "x.txt").write_text("keep me")
+    (tmp_path / "x.txt").write_text("keep me", encoding="utf-8")
     with pytest.raises(FileExistsError):
         run_batch(Design.load(batch_data / "design.csv"), Recipe.load("droplet_basic"), tmp_path)
 
@@ -190,3 +190,15 @@ def test_cli_batch(batch_data, tmp_path):
     assert len(table) == 3 and all(Path(f).is_absolute() for f in table["file"])
     assert main(["batch", "run", str(design), "-r", "droplet_basic", "-o", str(tmp_path / "b"), "--no-input-hash"]) == 4  # broken.avi
     assert (tmp_path / "b" / "report.html").exists()
+
+
+def test_design_table_written_on_windows_loads_everywhere(tmp_path):
+    import os
+
+    (tmp_path / "A" / "chip1").mkdir(parents=True)
+    (tmp_path / "A" / "chip1" / "run.avi").write_bytes(b"x")
+    (tmp_path / "design.csv").write_text("file,group\nA\\chip1\\run.avi,A\n", encoding="utf-8")
+    d = Design.load(tmp_path / "design.csv")
+    assert d.rows[0].file.exists() and not d.missing()
+    if os.sep == "/":
+        assert scan_folder(tmp_path)["file"].tolist() == ["A/chip1/run.avi"]

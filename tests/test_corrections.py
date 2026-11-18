@@ -108,7 +108,7 @@ def test_label_corrections_change_measurements(cells_run, tmp_path):
 def test_cell_count_and_exclusion_reach_the_statistics(cells_run, tmp_path):
     f0, at0, d0 = _droplet_point(cells_run, 0)
     f1, at1, _ = _droplet_point(cells_run, 1)
-    base = json.loads((cells_run / "summary.json").read_text())
+    base = json.loads((cells_run / "summary.json").read_text(encoding="utf-8"))
     c = Corrections(edits=[
         Edit(kind="table.set", target="droplets.droplets", frame=f0, at=at0, values={"n_inclusions": int(d0["n_inclusions"]) + 3}),
         Edit(kind="table.exclude", target="track.table", frame=f1, at=at1),
@@ -124,7 +124,7 @@ def test_cell_count_and_exclusion_reach_the_statistics(cells_run, tmp_path):
     assert row["track_id"].iloc[0] not in set(flags.get("track_id", []))  # confirmed by a person: not flagged
     again = rerun_with_corrections(cells_run, c, tmp_path / "again")
     assert again.result_digest == r.result_digest  # recipe + input + corrections reproduce the result
-    assert json.loads((cells_run / "corrections.json").read_text())["edits"]  # kept with the run
+    assert json.loads((cells_run / "corrections.json").read_text(encoding="utf-8"))["edits"]  # kept with the run
 
 
 def test_manual_positive_call_changes_the_positive_fraction(fluo_dataset, tmp_path):
@@ -199,7 +199,7 @@ def test_watched_runs_are_corrected_from_their_stored_frames(tmp_path):
         p.unlink()
     frame, at, _ = _droplet_point(out, 0)
     r = rerun_with_corrections(out, Corrections(edits=[Edit(kind="table.exclude", target="track.table", frame=frame, at=at)]))
-    assert r.summary["droplets.summary"]["n_droplets"] == json.loads((out / "summary.json").read_text())["droplets.summary"]["n_droplets"] - 1
+    assert r.summary["droplets.summary"]["n_droplets"] == json.loads((out / "summary.json").read_text(encoding="utf-8"))["droplets.summary"]["n_droplets"] - 1
 
 
 def test_correct_command(cells_run, tmp_path, capsys):

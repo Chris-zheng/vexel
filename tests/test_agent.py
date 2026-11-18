@@ -126,7 +126,7 @@ def test_cli_probe_and_plan(droplet_dataset, tmp_path, capsys):
     assert main(["plan", video, "-g", "粒径", "-o", str(out), "--run", "--no-input-hash"]) == 0
     text = capsys.readouterr().out
     assert "ready" in text and (out / "recipe.json").exists() and (out / "run" / "summary.json").exists()
-    saved = json.loads((out / "plan.json").read_text())
+    saved = json.loads((out / "plan.json").read_text(encoding="utf-8"))
     assert saved["status"] == "ready" and saved["recipe"]["name"] == "droplet_basic"
     assert len(RecipeMemory().entries()) == 1  # the accepted run is remembered
 
@@ -174,7 +174,7 @@ def test_fallback_order_and_offline_switch(monkeypatch, tmp_path):
     proposal, skipped = models.propose({"goal": "数细胞"}, None, [StubTier("claude", ok=False)])
     assert proposal.tier == "rules" and proposal.cells is True and skipped == ["claude: not configured"]
     (tmp_path / "home").mkdir(exist_ok=True)
-    (tmp_path / "home" / "config.json").write_text(json.dumps({"models": {"order": ["local", "rules"], "local": {"model": "x"}}}))
+    (tmp_path / "home" / "config.json").write_text(json.dumps({"models": {"order": ["local", "rules"], "local": {"model": "x"}}}), encoding="utf-8")
     cfg = models.load_config()
     assert cfg["order"] == ["local", "rules"] and cfg["local"]["model"] == "x" and cfg["claude"]["model"] == "claude-opus-5-5"
     monkeypatch.setenv("VEXEL_OFFLINE", "1")
@@ -338,7 +338,7 @@ def test_model_config_round_trip(tmp_path, monkeypatch):
     assert again["order"] == ["qwen", "rules"] and again["qwen"]["model"] == "qwen-max"
     assert again["qwen"]["base_url"] == models.COMPATIBLE["qwen"]["base_url"]  # untouched presets survive
     assert [t.name for t in models.tiers(again)] == ["qwen", "rules"]
-    saved = json.loads((tmp_path / "config.json").read_text())
+    saved = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
     assert "sk-" not in json.dumps(saved)  # keys are never written
 
 

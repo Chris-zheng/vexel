@@ -40,7 +40,7 @@ def _crossings(run_dir: Path) -> pd.DataFrame:
 def mov_run(tmp_path_factory):
     import imageio.v3 as iio
 
-    truth = json.loads((TRUTH / "droplet_microfluidics_mov.json").read_text())
+    truth = json.loads((TRUTH / "droplet_microfluidics_mov.json").read_text(encoding="utf-8"))
     frames = iio.imread(_need(DATA / "DropletMicrofluidics.mov"), plugin="pyav").mean(-1).astype(np.float32)
     px = truth["pixel_size_um"]
     volume = SpatialVolume.from_array(frames, "TYX", spacing={"y": px, "x": px}, space_unit="um")
@@ -58,7 +58,7 @@ def test_mov_counts_every_droplet_once_at_the_right_time(mov_run):
 
 def test_mov_droplet_size_matches_the_scale_bar(mov_run):
     out, truth = mov_run
-    summary = json.loads((out / "summary.json").read_text())["droplets.summary"]
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))["droplets.summary"]
     assert summary["diameter_mean"] == pytest.approx(truth["diameter_um"], rel=truth["diameter_tolerance"])
     assert summary["diameter_cv_percent"] < 3.0  # one generator, steady flow: monodisperse
 
@@ -77,7 +77,7 @@ def wscnet_run(tmp_path_factory):
     frames = np.stack([images[k] for k in sorted(images)]).astype(np.float32)
     out = tmp_path_factory.mktemp("wscnet") / "run"
     run_recipe(Recipe.load("droplet_encapsulation"), SpatialVolume.from_array(frames, "TYX"), out, hash_input=False, report=False)
-    return out, json.loads((TRUTH / "wscnet_example_folder.json").read_text())
+    return out, json.loads((TRUTH / "wscnet_example_folder.json").read_text(encoding="utf-8"))
 
 
 def test_wscnet_counts_every_droplet_once(wscnet_run):
@@ -99,7 +99,7 @@ def test_wscnet_cells_per_droplet(wscnet_run):
     assert wrong.mean() <= 0.06, f"{wrong.sum()} of {len(sure)} droplets miscounted"  # 5 of 132 (3.8%) since touching cells are split
     assert not ((expected == 0) & (measured > 0)).any(), "an empty droplet was given cells"
     assert ((measured <= expected) | ~wrong).all(), "errors so far are cells hidden behind each other (undercounts)"
-    summary = json.loads((out / "summary.json").read_text())["encapsulation.summary"]
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))["encapsulation.summary"]
     all_truth = np.array([d["n_cells"] for d in truth["droplets"]])
     assert summary["frac_empty"] == pytest.approx(np.mean(all_truth == 0), abs=0.03)
     # Measured 1.52 against 1.57: the remaining undercounts (cells hidden behind each other) bias lambda low.

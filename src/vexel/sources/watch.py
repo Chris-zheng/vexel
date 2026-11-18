@@ -72,7 +72,7 @@ class WatchSource:
         if not self.folder.is_dir():
             raise FileNotFoundError(f"not a folder: {self.folder}")
         sidecar = self.folder / "vexel.json"
-        meta = json.loads(sidecar.read_text()) if sidecar.exists() else {}
+        meta = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.exists() else {}
         self.pixel_size = pixel_size if pixel_size is not None else meta.get("pixel_size")
         self.space_unit = space_unit or meta.get("space_unit") or ("um" if self.pixel_size else "px")
         self.frame_interval_s = frame_interval_s if frame_interval_s is not None else meta.get("frame_interval")

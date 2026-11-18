@@ -50,7 +50,7 @@ def _sidecar(path: Path) -> dict[str, Any]:
     candidates = [path / "vexel.json"] if path.is_dir() else [path.with_name(path.name + ".vexel.json")]
     for c in candidates:
         if c.is_file():
-            return json.loads(c.read_text())
+            return json.loads(c.read_text(encoding="utf-8"))
     return {}
 
 

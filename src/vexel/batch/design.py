@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -116,7 +117,8 @@ class Design:
                 continue
             if rec.get("include", "").lower() in ("no", "n", "0", "false", "否", "不"):
                 continue
-            f = Path(rec["file"]).expanduser()
+            name = rec["file"] if os.sep == "\\" else rec["file"].replace("\\", "/")  # tables written on Windows work everywhere
+            f = Path(name).expanduser()
             if not f.is_absolute() and base is not None:
                 f = base / f
             try:
@@ -246,7 +248,7 @@ def scan_folder(root: str | Path) -> pd.DataFrame:
     recs = []
     for p in find_recordings(root):
         parts = p.relative_to(root).parts[:-1]
-        recs.append({"file": str(p.relative_to(root)), "group": parts[0] if parts else "",
+        recs.append({"file": p.relative_to(root).as_posix(), "group": parts[0] if parts else "",
                      "replicate": parts[1] if len(parts) >= 2 else "", "pixel_size_um": "", "frame_interval_s": "",
                      "settings": "", "note": ""})  # fmt: skip
     return pd.DataFrame(recs, columns=["file", "group", "replicate", "pixel_size_um", "frame_interval_s", "settings", "note"])

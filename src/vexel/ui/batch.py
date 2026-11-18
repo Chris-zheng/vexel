@@ -173,7 +173,7 @@ class BatchWindow(QWidget):
         rows = []
         for r in d.rows:
             try:
-                name = str(r.file.relative_to(self.base))
+                name = r.file.relative_to(self.base).as_posix()
             except ValueError:
                 name = str(r.file)
             rows.append((name, r.group, r.replicate, f"{r.pixel_size_um:g}" if r.pixel_size_um else "",
@@ -226,7 +226,7 @@ class BatchWindow(QWidget):
         d = self.design()
         frame = d.to_frame()
         if self.base is not None:
-            frame["file"] = [os.path.relpath(f, Path(path).parent) for f in frame["file"]]
+            frame["file"] = [Path(os.path.relpath(f, Path(path).parent)).as_posix() for f in frame["file"]]
         frame.to_csv(path, index=False, encoding="utf-8-sig")
         self.status.setText(f"设计表已保存：{path}（可以用 Excel 编辑，或用命令 vexel batch run 运行）")
         return Path(path)

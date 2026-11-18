@@ -57,7 +57,7 @@ def test_image_sequence_natural_order_and_sidecar(tmp_path):
     folder.mkdir()
     for i in (10, 2, 1):
         iio.imwrite(folder / f"img_{i}.png", np.full((6, 7), i, np.uint8))
-    (folder / "vexel.json").write_text(json.dumps({"pixel_size": 1.5, "frame_interval": 0.002}))
+    (folder / "vexel.json").write_text(json.dumps({"pixel_size": 1.5, "frame_interval": 0.002}), encoding="utf-8")
     vol = open_volume(folder)
     assert vol.sizes["T"] == 3
     assert [int(vol.frames()[t, 0, 0].compute()) for t in range(3)] == [1, 2, 10]
@@ -85,7 +85,7 @@ def test_video_reader(tmp_path):
 
 
 def test_unknown_format_and_missing_file(tmp_path):
-    (tmp_path / "x.xyz").write_text("no")
+    (tmp_path / "x.xyz").write_text("no", encoding="utf-8")
     with pytest.raises(ValueError):
         open_volume(tmp_path / "x.xyz")
     with pytest.raises(FileNotFoundError):

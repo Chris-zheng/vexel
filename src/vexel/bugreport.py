@@ -119,8 +119,8 @@ def write_bundle(out: str | Path, runs: list[str | Path] = (), *, note: str = ""
             prefix = f"run{i + 1}_{run.name}/"
             names = [*RUN_FILES, FLAGS]
             if tables:
-                names += [str(p.relative_to(run)) for p in sorted(run.glob("tables/*.csv")) if str(p.relative_to(run)) != FLAGS]
-                names += [str(p.relative_to(run)) for p in sorted(run.glob("corrected/tables/*.csv"))]
+                names += [p.relative_to(run).as_posix() for p in sorted(run.glob("tables/*.csv")) if p.relative_to(run).as_posix() != FLAGS]
+                names += [p.relative_to(run).as_posix() for p in sorted(run.glob("corrected/tables/*.csv"))]
             names += ["corrected/summary.json", "corrected/provenance.json", "stream/alarms.csv"]
             if tables:
                 names.append("stream/rolling.csv")

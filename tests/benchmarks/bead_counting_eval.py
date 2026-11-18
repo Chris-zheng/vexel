@@ -49,7 +49,7 @@ for t, im in enumerate(paths):
     g = iio.imread(im).astype(np.float32).mean(-1)[TOP:BOTTOM]
     frames.append(resize(g, (H_OUT, g.shape[1]), order=1, anti_aliasing=True, preserve_range=True))
     lab = im.parent.parent / "labels" / (im.stem + ".txt")
-    for line in lab.read_text().splitlines():
+    for line in lab.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         c, x, y, w, h = line.split()

@@ -89,7 +89,7 @@ def test_model_step_is_recorded_in_provenance_and_methods(toy_plugin, droplet_da
     seg.update(op="test.model_segment", inputs={"image": "bg.image"}, params={"model": "toy-droplets@1.0"}, qc=[])
     recipe = Recipe.model_validate(recipe)
     result = run_recipe(recipe, open_volume(droplet_dataset / "droplets.ome.tif"), tmp_path / "run", max_frames=40, hash_input=False, report=False)
-    prov = json.loads((tmp_path / "run" / "provenance.json").read_text())
+    prov = json.loads((tmp_path / "run" / "provenance.json").read_text(encoding="utf-8"))
     step = next(s for s in prov["steps"] if s["id"] == "seg")
     assert step["model"]["ref"] == "toy-droplets@1.0" and step["model"]["commercial_use"] is False
     assert step["model"]["sha256"] == toy_plugin[0].sha256

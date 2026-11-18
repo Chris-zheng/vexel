@@ -76,7 +76,7 @@ def main() -> None:
     t1 = time.perf_counter()
     first = run_batch(Design.load(design_path), recipe, out, on_file=lambda i, n, o: done.append(o.status), should_stop=lambda: len(done) >= 30)
     t_first = time.perf_counter() - t1
-    interrupted = json.loads((out / "batch.json").read_text())["status"]
+    interrupted = json.loads((out / "batch.json").read_text(encoding="utf-8"))["status"]
     # second pass: resume and finish
     t2 = time.perf_counter()
     result = run_batch(Design.load(design_path), recipe, out)

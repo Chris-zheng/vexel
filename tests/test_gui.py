@@ -88,7 +88,7 @@ def test_open_reads_metadata_and_calibration(window, droplet_dataset):
 
 
 def test_unreadable_input_is_reported(window, tmp_path):
-    (tmp_path / "x.xyz").write_text("no")
+    (tmp_path / "x.xyz").write_text("no", encoding="utf-8")
     assert not window.open_path(tmp_path / "x.xyz")
     assert window.warnings and window.path is None
 
@@ -108,10 +108,10 @@ def test_full_run_matches_cli_and_is_saved_next_to_data(window, droplet_dataset)
     assert window.warnings == []
     run_dir = window.run_dir
     assert run_dir.parent.parent == droplet_dataset and run_dir.parent.name == "droplets_vexel"
-    provenance = json.loads((run_dir / "provenance.json").read_text())
+    provenance = json.loads((run_dir / "provenance.json").read_text(encoding="utf-8"))
     assert provenance["recipe"]["sha256"] == Recipe.load("droplet_basic").resolve().digest()
     assert provenance["input"]["space_unit"] == "um" and len(provenance["input"]["sha256"]) == 64
-    summary = json.loads((run_dir / "summary.json").read_text())["droplets.summary"]
+    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))["droplets.summary"]
     assert window.card_n.value.text() == str(summary["n_droplets"])
     assert window.card_d.value.text().endswith("µm")
     assert window.hist.values.size == summary["n_droplets"]
@@ -130,7 +130,7 @@ def test_preview_is_partial_temporary_and_cleaned_up(app, droplet_dataset):
     wait_until_idle(w)
     run_dir = w.run_dir
     assert droplet_dataset not in run_dir.parents
-    provenance = json.loads((run_dir / "provenance.json").read_text())
+    provenance = json.loads((run_dir / "provenance.json").read_text(encoding="utf-8"))
     assert provenance["input"]["frames_used"] == min(200, PREVIEW_FRAMES)
     assert "sha256" not in provenance["input"]
     assert "预览" in w.notes.text() and w.result_title.text() == "预览结果"
@@ -172,9 +172,9 @@ def test_cell_counting_switches_recipe_and_shows_encapsulation(window, cells_dat
     assert window.start()
     wait_until_idle(window)
     assert window.warnings == []
-    provenance = json.loads((window.run_dir / "provenance.json").read_text())
+    provenance = json.loads((window.run_dir / "provenance.json").read_text(encoding="utf-8"))
     assert provenance["recipe"]["sha256"] == Recipe.load("droplet_encapsulation").resolve().digest()
-    summary = json.loads((window.run_dir / "summary.json").read_text())["encapsulation.summary"]
+    summary = json.loads((window.run_dir / "summary.json").read_text(encoding="utf-8"))["encapsulation.summary"]
     assert window.enc_cards.isVisibleTo(window) and window.count_box.isVisibleTo(window)
     assert window.card_empty.value.text() == f"{100 * summary['frac_empty']:.1f} %"
     assert window.count_chart.k.size >= 3
@@ -202,7 +202,7 @@ def test_fluorescence_option_channels_and_results(window, fluo_dataset):
     assert window.start()
     wait_until_idle(window)
     assert window.warnings == []
-    summary = json.loads((window.run_dir / "summary.json").read_text())["positivity.summary"]
+    summary = json.loads((window.run_dir / "summary.json").read_text(encoding="utf-8"))["positivity.summary"]
     assert window.fluo_cards.isVisibleTo(window) and window.scatter_box.isVisibleTo(window)
     assert not window.enc_cards.isVisibleTo(window)
     assert window.card_pos.detail.text().startswith(f"{summary['n_positive']} / {summary['n_droplets']}")
@@ -277,7 +277,7 @@ def test_live_replay_fills_the_dashboard(live, droplet_dataset):
     assert live.card_d.value.text().endswith("µm") and "帧/秒" in live.card_fps.value.text()
     assert live.chart_d.x.size == len(live.snapshots) and live.chart_f.x.size > 0
     assert live.frame_view.pixmap() is not None and not live.frame_view.pixmap().isNull()
-    p = json.loads((live.run_dir / "provenance.json").read_text())
+    p = json.loads((live.run_dir / "provenance.json").read_text(encoding="utf-8"))
     assert p["mode"] == "stream" and live.run_dir.parent.name == "droplets_vexel"
     assert live.report_btn.isVisibleTo(live)
 
@@ -292,15 +292,15 @@ def test_live_watch_runs_a_final_pass(live, tmp_path):
     video, _, _ = generate(DropletSynthConfig(n_frames=150, seed=3))
     for i, f in enumerate(video):
         tifffile.imwrite(folder / f"img_{i}.tif", f)
-    (folder / "vexel.json").write_text(json.dumps({"pixel_size": 2.0, "frame_interval": 0.001}))
+    (folder / "vexel.json").write_text(json.dumps({"pixel_size": 2.0, "frame_interval": 0.001}), encoding="utf-8")
     assert live.set_watch(folder) and not live.speed_combo.isEnabled()
     live.idle_edit.setText("0.5")
     assert live.start()
     wait_until_idle(live)
     assert live.warnings == []
     assert "全量分析" in live.status.text()
-    online = json.loads((live.run_dir / "summary.json").read_text())["droplets.summary"]["n_droplets"]
-    final = json.loads((live.run_dir / "final" / "summary.json").read_text())["droplets.summary"]["n_droplets"]
+    online = json.loads((live.run_dir / "summary.json").read_text(encoding="utf-8"))["droplets.summary"]["n_droplets"]
+    final = json.loads((live.run_dir / "final" / "summary.json").read_text(encoding="utf-8"))["droplets.summary"]["n_droplets"]
     assert online == final > 5
     assert (live.run_dir / "frames.zarr").is_dir()
 
@@ -314,7 +314,7 @@ def test_live_stop_keeps_partial_results(live, droplet_dataset):
     loop.exec()
     live.stop()
     wait_until_idle(live)
-    p = json.loads((live.run_dir / "provenance.json").read_text())
+    p = json.loads((live.run_dir / "provenance.json").read_text(encoding="utf-8"))
     assert p["status"] == "stopped" and p["stream"]["frames_processed"] < 200
     assert live.status.text().startswith("已停止")
 
@@ -354,12 +354,12 @@ def test_review_window_records_edits_and_reruns(app, hard_run):
     assert labels[int(round(y)), int(round(x))] == 0
     w.undo()
     assert w.corrections.edits[-1].kind != "labels.delete" or len(w.corrections.edits) < len(kinds)
-    saved = json.loads((hard_run / "corrections.json").read_text())
+    saved = json.loads((hard_run / "corrections.json").read_text(encoding="utf-8"))
     assert len(saved["edits"]) == len(w.corrections.edits)
     assert w.apply()
     wait_until_idle(w)
     assert w.status.text().startswith("已按") and w.report_btn.isVisibleTo(w)
-    corrected = json.loads((hard_run / "corrected" / "provenance.json").read_text())
+    corrected = json.loads((hard_run / "corrected" / "provenance.json").read_text(encoding="utf-8"))
     assert corrected["corrections"]["n_edits"] == len(w.corrections.edits)
     _dispose(w)
 
@@ -425,7 +425,7 @@ def test_main_window_uses_brush_training(window, droplet_dataset, tmp_path):
     assert window.start(preview=True)
     wait_until_idle(window)
     assert window.warnings[1:] == []
-    p = json.loads((window.run_dir / "provenance.json").read_text())
+    p = json.loads((window.run_dir / "provenance.json").read_text(encoding="utf-8"))
     assert next(s for s in p["steps"] if s["id"] == "seg")["op"] == "segment.pixel_classifier"
     window.seg_combo.setCurrentIndex(0)
 

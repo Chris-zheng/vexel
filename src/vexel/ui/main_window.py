@@ -996,7 +996,7 @@ class MainWindow(QMainWindow):
 
     def _n_flagged(self) -> int:
         try:
-            summary = json.loads((self.run_dir / "summary.json").read_text())
+            summary = json.loads((self.run_dir / "summary.json").read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError):
             return 0
         return int(summary.get("flags.summary", {}).get("n_flagged") or 0)

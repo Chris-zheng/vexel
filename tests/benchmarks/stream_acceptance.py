@@ -126,7 +126,7 @@ def main() -> None:
     table = "\n".join(lines)
     print(table)
     if args.out:
-        args.out.write_text(table + "\n")
+        args.out.write_text(table + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

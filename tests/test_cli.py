@@ -28,7 +28,7 @@ def test_run_with_override_and_errors(tmp_path, capsys):
     main(["synth", str(data), "--frames", "40"])
     video = str(data / "droplets.ome.tif")
     assert main(["run", video, "-r", "droplet_basic", "-o", str(tmp_path / "a"), "--set", "seg.min_score=0.4", "--no-input-hash"]) == 0
-    recipe = json.loads((tmp_path / "a" / "recipe.json").read_text())
+    recipe = json.loads((tmp_path / "a" / "recipe.json").read_text(encoding="utf-8"))
     assert recipe["steps"][1]["params"]["min_score"] == 0.4
     capsys.readouterr()
     assert main(["run", video, "-r", "droplet_basic", "-o", str(tmp_path / "a")]) == 2  # exists
@@ -73,15 +73,15 @@ def test_bugreport_has_no_images_paths_or_keys(tmp_path, monkeypatch):
     (run / "tables").mkdir(parents=True)
     (run / "review").mkdir()
     secret_path = str(tmp_path / "private" / "patient_42.avi")
-    (run / "provenance.json").write_text(json.dumps({"input": {"source": secret_path}, "api_key": "sk-x", "status": "completed"}))
-    (run / "summary.json").write_text(json.dumps({"droplets": {"n_droplets": 3}}))
-    (run / "recipe.json").write_text(json.dumps({"name": "droplet_basic"}))
-    (run / "tables" / "flags.table.csv").write_text("label,reason\n1,edge\n")
-    (run / "tables" / "measure.table.csv").write_text("label,diameter\n1,50\n")
+    (run / "provenance.json").write_text(json.dumps({"input": {"source": secret_path}, "api_key": "sk-x", "status": "completed"}), encoding="utf-8")
+    (run / "summary.json").write_text(json.dumps({"droplets": {"n_droplets": 3}}), encoding="utf-8")
+    (run / "recipe.json").write_text(json.dumps({"name": "droplet_basic"}), encoding="utf-8")
+    (run / "tables" / "flags.table.csv").write_text("label,reason\n1,edge\n", encoding="utf-8")
+    (run / "tables" / "measure.table.csv").write_text("label,diameter\n1,50\n", encoding="utf-8")
     (run / "review" / "frame_000000.png").write_bytes(b"\x89PNG")
-    (run / "report.html").write_text("<img>")
+    (run / "report.html").write_text("<img>", encoding="utf-8")
     (tmp_path / "home").mkdir()
-    (tmp_path / "home" / "config.json").write_text(json.dumps({"models": {"order": ["deepseek", "rules"]}}))
+    (tmp_path / "home" / "config.json").write_text(json.dumps({"models": {"order": ["deepseek", "rules"]}}), encoding="utf-8")
 
     out = tmp_path / "bug.zip"
     assert main(["bugreport", str(run), "-o", str(out), "--note", "count looks low"]) == 0

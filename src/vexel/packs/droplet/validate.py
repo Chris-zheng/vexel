@@ -63,7 +63,7 @@ def truth_summary(
 ) -> dict[str, float | int | None]:
     """Truth for the droplets that cross ``count_line_px`` within the first ``n_frames``."""
     droplets = pd.read_csv(truth_dir / "droplets.csv").set_index("droplet_id")
-    config = json.loads((truth_dir / "config.json").read_text())
+    config = json.loads((truth_dir / "config.json").read_text(encoding="utf-8"))
     crossings = truth_crossings(truth_dir, count_line_px, n_frames)
     ids = sorted(crossings, key=crossings.get)
     stats = describe_values(droplets.loc[ids, "diameter_um"].to_numpy(float))
@@ -90,8 +90,8 @@ def _check(name: str, measured, truth, tolerance: float, kind: str) -> Check:
 
 def validate_run(run_dir: str | Path, truth_dir: str | Path, tol: Tolerances = Tolerances()) -> list[Check]:
     run_dir, truth_dir = Path(run_dir), Path(truth_dir)
-    summaries = json.loads((run_dir / "summary.json").read_text())
-    provenance = json.loads((run_dir / "provenance.json").read_text())
+    summaries = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+    provenance = json.loads((run_dir / "provenance.json").read_text(encoding="utf-8"))
     measured = next((s for s in summaries.values() if "n_droplets" in s and "count_line_px" in s), None)
     if measured is None:
         raise ValueError(f"{run_dir} contains no droplet.summary output")

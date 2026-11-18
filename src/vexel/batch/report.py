@@ -97,8 +97,8 @@ def batch_methods(out: Path, design: Design, a: Analysis, record: dict[str, Any]
         en.append(f"{len(per_row)} files used file-specific settings (design table, settings column).")
     first = next((out / f["run_dir"] for f in ok if (out / f["run_dir"] / "provenance.json").exists()), None)
     if first is not None:
-        recipe = json.loads((first / "recipe.json").read_text()) if (first / "recipe.json").exists() else json.loads((out / "recipe.json").read_text())
-        prov = json.loads((first / "provenance.json").read_text())
+        recipe = json.loads((first / "recipe.json").read_text(encoding="utf-8")) if (first / "recipe.json").exists() else json.loads((out / "recipe.json").read_text(encoding="utf-8"))
+        prov = json.loads((first / "provenance.json").read_text(encoding="utf-8"))
         zh += methods_text(recipe, prov)
         en += methods_text_en(recipe, prov)
     return zh, en
@@ -159,7 +159,7 @@ def main() -> int:
         result = run_recipe(r, volume, run_dir, max_frames=MAX_FRAMES, hash_input=False, report=False, overwrite=True)
         o = FileOutcome(row.index, row.id, str(row.file), row.group, row.replicate, "completed", str(run_dir),
                         result_digest=result.result_digest,
-                        metrics=flatten_summary(json.loads((run_dir / "summary.json").read_text())))
+                        metrics=flatten_summary(json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))))
         outcomes.append(o)
     analysis = stats.analyse(results_frame(Design(rows=rows), outcomes))
     stats.write_tables(analysis, args.out)

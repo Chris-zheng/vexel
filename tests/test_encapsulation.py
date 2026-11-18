@@ -156,7 +156,7 @@ def test_cli_synth_cells_and_validate(tmp_path, capsys):
     assert main(["validate", run, "--truth", str(data / "truth")]) == 0
     out = capsys.readouterr().out
     assert "inclusion_mismatch" in out and "validation PASSED" in out
-    summary = json.loads((tmp_path / "run" / "summary.json").read_text())
+    summary = json.loads((tmp_path / "run" / "summary.json").read_text(encoding="utf-8"))
     assert summary["encapsulation.summary"]["n_inclusions_total"] > 0
 
 

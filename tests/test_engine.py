@@ -153,9 +153,9 @@ def test_run_directory_and_provenance(droplet_dataset, droplet_run):
     out = droplet_run.out_dir
     assert not (out / "scratch").exists()
     assert len(list((out / "review").glob("*.png"))) == 4
-    p = json.loads((out / "provenance.json").read_text())
+    p = json.loads((out / "provenance.json").read_text(encoding="utf-8"))
     assert p["status"] == "completed"
-    assert p["recipe"]["sha256"] == Recipe.model_validate_json((out / "recipe.json").read_text()).digest()
+    assert p["recipe"]["sha256"] == Recipe.model_validate_json((out / "recipe.json").read_text(encoding="utf-8")).digest()
     assert len(p["input"]["sha256"]) == 64 and p["input"]["frames_used"] == 200
     assert p["input"]["space_unit"] == "um"
     assert {"numpy", "scikit-image", "laptrack"} <= set(p["environment"]["packages"])
@@ -200,7 +200,7 @@ def test_qc_gate_stops_run_but_keeps_provenance(tmp_path):
     recipe = _recipe([{**SEG, "qc": [{"metric": "n_objects.max", "min": 1, "on_fail": "stop"}]}, MEAS])
     with pytest.raises(QCGateError, match="n_objects.max"):
         run_recipe(recipe, blank, tmp_path / "r")
-    p = json.loads((tmp_path / "r" / "provenance.json").read_text())
+    p = json.loads((tmp_path / "r" / "provenance.json").read_text(encoding="utf-8"))
     assert p["status"] == "stopped_by_qc" and [s["id"] for s in p["steps"]] == ["seg"]
     assert p["steps"][0]["qc_violations"][0]["metric"] == "n_objects.max"
 
@@ -218,7 +218,7 @@ def test_output_directory_is_protected(tmp_path):
     recipe = _recipe([SEG])
     foreign = tmp_path / "mine"
     foreign.mkdir()
-    (foreign / "thesis.txt").write_text("precious")
+    (foreign / "thesis.txt").write_text("precious", encoding="utf-8")
     with pytest.raises(FileExistsError):
         run_recipe(recipe, blank, foreign, overwrite=True)
     assert (foreign / "thesis.txt").exists()

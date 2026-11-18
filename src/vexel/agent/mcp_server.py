@@ -91,16 +91,16 @@ def build_server() -> Any:
             r = r.with_overrides(settings)
         result = run_recipe(r, open_volume(path, pixel_size=pixel_size_um, frame_interval=frame_interval_s), out_dir,
                             max_frames=max_frames, hash_input=False)  # fmt: skip
-        return {"run_dir": str(result.out_dir), "status": result.status, "summary": json.loads((result.out_dir / "summary.json").read_text()),
+        return {"run_dir": str(result.out_dir), "status": result.status, "summary": json.loads((result.out_dir / "summary.json").read_text(encoding="utf-8")),
                 "qc_warnings": [v.message() for v in result.violations], "report": str(result.out_dir / "report.html")}  # fmt: skip
 
     @server.tool(annotations=read_only)
     def read_results(run_dir: str) -> dict:
         """Summary, QC warnings and provenance highlights of a finished run."""
         run = Path(run_dir)
-        prov = json.loads((run / "provenance.json").read_text())
+        prov = json.loads((run / "provenance.json").read_text(encoding="utf-8"))
         warnings = [f"{s['id']}.{v['metric']}" for s in prov.get("steps", []) for v in s.get("qc_violations", [])]
-        return {"summary": json.loads((run / "summary.json").read_text()), "status": prov.get("status"),
+        return {"summary": json.loads((run / "summary.json").read_text(encoding="utf-8")), "status": prov.get("status"),
                 "recipe": prov.get("recipe"), "result_digest": prov.get("result_digest"), "qc_warnings": warnings,
                 "corrections": (prov.get("corrections") or {}).get("n_applied"), "report": str(run / "report.html")}  # fmt: skip
 

@@ -123,7 +123,7 @@ def test_flags_empty_inputs():
 
 def test_flagged_run_writes_crops_and_qc_warning(hard_run):
     flags = pd.read_csv(hard_run / "tables" / "flags.table.csv")
-    prov = json.loads((hard_run / "provenance.json").read_text())
+    prov = json.loads((hard_run / "provenance.json").read_text(encoding="utf-8"))
     assert len(flags) > 0 and "count_unstable" in ";".join(flags["reasons"])
     crops = sorted((hard_run / "review" / "flags").glob("*.png"))
     assert len(crops) == min(len(flags), 48) and prov["review_flags"] == [p.name for p in crops]
@@ -146,7 +146,7 @@ def test_report_is_written_with_every_section(hard_run):
     assert page.count("<svg") == 2  # diameter + cell-count distribution
     assert "data:image/png;base64," in page and 'src="http' not in page  # self-contained
     assert "以线性指派（laptrack）跨帧关联液滴" in page
-    for note in run_notes(json.loads((hard_run / "summary.json").read_text()), json.loads((hard_run / "provenance.json").read_text())):
+    for note in run_notes(json.loads((hard_run / "summary.json").read_text(encoding="utf-8")), json.loads((hard_run / "provenance.json").read_text(encoding="utf-8"))):
         assert note.replace("“", "").split("（")[0][:12] in page.replace("“", "")
 
 

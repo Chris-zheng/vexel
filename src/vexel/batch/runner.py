@@ -103,9 +103,9 @@ def _write_atomic(path: Path, text: str) -> None:
 
 def _resumable(run_dir: Path, key: str) -> dict[str, Any] | None:
     try:
-        if (run_dir / KEY_FILE).read_text().strip() != key:
+        if (run_dir / KEY_FILE).read_text(encoding="utf-8").strip() != key:
             return None
-        prov = json.loads((run_dir / "provenance.json").read_text())
+        prov = json.loads((run_dir / "provenance.json").read_text(encoding="utf-8"))
         if prov.get("status") != "completed":
             return None
         return prov
@@ -191,7 +191,7 @@ def run_batch(
                 save("interrupted")
                 return BatchResult(out, outcomes)
             run_dir = out / "runs" / row.id
-            o = FileOutcome(row.index, row.id, str(row.file), row.group, row.replicate, "failed", str(run_dir.relative_to(out)))
+            o = FileOutcome(row.index, row.id, str(row.file), row.group, row.replicate, "failed", run_dir.relative_to(out).as_posix())
             t0 = time.perf_counter()
             say(f"[{i}/{total}] {row.file.name}")
             if not row.file.exists():
@@ -215,11 +215,11 @@ def run_batch(
                             o.status = "completed"
                             o.result_digest = result.result_digest
                             o.qc_warnings = [v.message() for v in result.violations]
-                            (run_dir / KEY_FILE).write_text(key)
+                            (run_dir / KEY_FILE).write_text(key, encoding="utf-8")
                         except QCGateError as e:
                             o.status, o.error = "stopped_by_qc", str(e)
                     if o.ok:
-                        o.metrics = flatten_summary(json.loads((run_dir / "summary.json").read_text()))
+                        o.metrics = flatten_summary(json.loads((run_dir / "summary.json").read_text(encoding="utf-8")))
                 except Exception as e:  # noqa: BLE001  one bad file must not stop the batch
                     o.status = "failed"
                     o.error = f"{type(e).__name__}: {e}"
