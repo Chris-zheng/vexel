@@ -8,7 +8,8 @@ glibc 2.34 (e.g. Ubuntu 22.04, RHEL 9).
 The bundle (a folder, then a .zip) holds everything an installation needs:
 
 - ``vexel-<version>-py3-none-any.whl`` and ``vexel-<version>-constraints.txt`` (from uv.lock);
-- ``wheels/``: every dependency as a wheel for the target platform, at the locked versions;
+- ``wheels/``: every dependency as a wheel for the target platform, at the locked versions
+  (including the planning-model client and the SEM text recognition, ``[agent,sem]``);
 - ``uv/``: the uv binary for the target platform (the same uv version as this machine's);
 - ``python/<release>/``: the Python 3.12 build uv installs (python-build-standalone);
 - ``install.ps1`` / ``install.sh``: install with no network access at all;
@@ -52,7 +53,7 @@ $env:UV_OFFLINE = "1"
 $env:UV_PYTHON_INSTALL_MIRROR = ([System.Uri]"$here\python").AbsoluteUri
 $uv = Join-Path $here "uv\uv.exe"
 & $uv python install 3.12 --no-bin
-& $uv tool install (Join-Path $here "{wheel}") --python 3.12 --offline --no-index --find-links (Join-Path $here "wheels") -c (Join-Path $here "{constraints}")
+& $uv tool install ((Join-Path $here "{wheel}") + "[agent,sem]") --python 3.12 --offline --no-index --find-links (Join-Path $here "wheels") -c (Join-Path $here "{constraints}")
 & $uv tool update-shell
 Write-Host "Vexel installed. Open a new PowerShell window and run: vexel gui"
 """
@@ -64,7 +65,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 export UV_OFFLINE=1
 export UV_PYTHON_INSTALL_MIRROR="file://$here/python"
 "$here/uv/uv" python install 3.12 --no-bin
-"$here/uv/uv" tool install "$here/{wheel}" --python 3.12 --offline --no-index --find-links "$here/wheels" -c "$here/{constraints}"
+"$here/uv/uv" tool install "$here/{wheel}[agent,sem]" --python 3.12 --offline --no-index --find-links "$here/wheels" -c "$here/{constraints}"
 "$here/uv/uv" tool update-shell || true
 echo "Vexel installed. Open a new terminal and run: vexel gui"
 """
@@ -114,12 +115,12 @@ def main() -> None:
     run("uv", "build", "--wheel", "--out-dir", str(bundle))
     wheel = next(bundle.glob("vexel-*.whl")).name
     constraints = f"vexel-{version}-constraints.txt"
-    run("uv", "export", "--format", "requirements-txt", "--no-hashes", "--no-emit-project", "--no-dev", "--extra", "agent",
+    run("uv", "export", "--format", "requirements-txt", "--no-hashes", "--no-emit-project", "--no-dev", "--extra", "agent", "--extra", "sem",
         "--output-file", str(bundle / constraints))  # fmt: skip
 
     # the exact set of packages this platform needs, at those versions, as wheels
     reqs = bundle / "requirements-platform.txt"
-    run("uv", "pip", "compile", "pyproject.toml", "--extra", "agent", "--python-platform", spec["triple"], "--python-version", "3.12",
+    run("uv", "pip", "compile", "pyproject.toml", "--extra", "agent", "--extra", "sem", "--python-platform", spec["triple"], "--python-version", "3.12",
         "-c", str(bundle / constraints), "--no-header", "--no-annotate", "-o", str(reqs), env=spec.get("env"))  # fmt: skip
     tags = [x for t in spec["tags"] for x in ("--platform", t)]
     run("uv", "run", "--no-project", "--with", "pip", "python", "-m", "pip", "download", "--no-deps", "--only-binary=:all:",

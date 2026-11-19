@@ -14,7 +14,7 @@ uv lock --check                       # uv.lock must match pyproject.toml
 rm -rf dist
 uv build --wheel --out-dir dist
 version=$(uv run --no-sync python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
-uv export --format requirements-txt --no-hashes --no-emit-project --no-dev --extra agent --output-file "dist/vexel-${version}-constraints.txt" >/dev/null
+uv export --format requirements-txt --no-hashes --no-emit-project --no-dev --extra agent --extra sem --output-file "dist/vexel-${version}-constraints.txt" >/dev/null
 files=("vexel-${version}-py3-none-any.whl" "vexel-${version}-constraints.txt")
 (cd dist && if command -v sha256sum >/dev/null; then sha256sum "${files[@]}"; else shasum -a 256 "${files[@]}"; fi) > dist/SHA256SUMS.txt
 echo "built:"; ls -1 dist

@@ -580,7 +580,10 @@ def test_launcher_routes_files_and_switches_modules(app, droplet_dataset, tmp_pa
     # with previews enabled the SEM window opens and recognises the vendor
     monkeypatch.setenv("VEXEL_PREVIEW", "1")
     sw = launcher.start(sem)
-    assert isinstance(sw, SemWindow) and "Thermo Fisher" in sw.info.text()
+    assert isinstance(sw, SemWindow)
+    sw._thread.wait(30000)  # calibration runs off the UI thread
+    QCoreApplication.processEvents()
+    assert "Thermo Fisher" in sw.meta.text() and "2 nm" in sw.pixel.text()
 
     # "skip the launcher" opens the last module
     QSettings().setValue("skip_launcher", "true")
@@ -590,3 +593,36 @@ def test_launcher_routes_files_and_switches_modules(app, droplet_dataset, tmp_pa
     for x in (win, sw, again):
         _dispose(x)
     launcher._open_windows.clear()
+
+
+def test_sem_window_calibrates_confirms_and_takes_manual_input(app, tmp_path, monkeypatch):
+    from vexel.packs.sem import calibrate as semcal
+    from vexel.synthetic.sem import write_sem
+    from vexel.ui.sem_window import SemWindow
+
+    monkeypatch.setenv("VEXEL_HOME", str(tmp_path / "home"))
+    meta = tmp_path / "hitachi.tif"
+    write_sem(meta, "hitachi", pixel_size=4.96e-9, rows=300, cols=400)
+    w = SemWindow()
+    assert w.open_path(meta, wait=True)
+    assert "4.96 nm" in w.pixel.text() and "已确认" in w.state.text() and not w.confirm_btn.isVisibleTo(w)
+    assert "Hitachi" in w.meta.text() and "信息栏" in w.detail.text()
+    assert len(w.view.overlay) >= 1  # the shaded data bar
+
+    plain = tmp_path / "plain.tif"
+    truth = write_sem(plain, "plain", pixel_size=2e-9, rows=300, cols=600)
+    w.open_path(plain, wait=True)
+    if w.cal.ok:  # OCR installed: read from the bar, to be confirmed by the person
+        assert w.cal.pixel_size == pytest.approx(truth.pixel_size, rel=0.01) and w.confirm_btn.isVisibleTo(w)
+        w._confirm()
+        assert w.cal.confirmed and semcal.load(w.cal.sha256).confirmed and not w.confirm_btn.isVisibleTo(w)
+    else:
+        assert "未标定" in w.pixel.text()
+
+    # manual: two clicks on the scale bar's ends, then its length
+    assert w.apply_manual(bar_length="200nm", bar_px=100.0)
+    assert w.cal.source == "manual" and "2 nm" in w.pixel.text()
+    assert w.apply_manual(pixel_size="3 nm") and semcal.load(w.cal.sha256).pixel_size == pytest.approx(3e-9)
+    monkeypatch.setattr("vexel.ui.sem_window.QMessageBox.warning", lambda *a: None)
+    assert not w.apply_manual(pixel_size="3")  # no unit: refused
+    _dispose(w)

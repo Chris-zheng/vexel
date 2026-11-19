@@ -31,6 +31,13 @@ agent = [
     "anthropic>=2.8",
     "mcp>=2.3,<3",
 ]
+# SEM data-bar text recognition (offline). Not on Intel Macs: onnxruntime has no wheels there.
+# opencv < 5.1: 5.1's macOS wheels need macOS 15 (Vexel supports macOS 14).
+sem = [
+    "rapidocr>=3.10,<4; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "onnxruntime>=1.26; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    "opencv-python-headless>=4.11,<5.1; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+]
 
 [dependency-groups]
 dev = ["pytest>=8"]

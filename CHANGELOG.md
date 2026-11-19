@@ -2,6 +2,9 @@
 
 ## 未发布
 
+- **SEM 读取与标定**（SEM 计划 M1）：读取 Thermo Fisher（FEI）、Zeiss、TESCAN、Hitachi、JEOL 的仪器元数据（像素尺寸、成像区高度、电压、放大倍数、视场宽度、工作距离、倾角）；自动识别并裁掉信息栏；测量比例尺（端点刻度、圆头、虚线刻度三种画法）并用文字识别读出标注；与视场宽度或元数据交叉核对；手动标定（点比例尺两端或输入像素尺寸）；经人确认的标定按文件 SHA-256 记录。`vexel sem calibrate`、`vexel sem info`；SEM 窗口显示信息栏、比例尺、来源、核对与确认。在真实的 FEI 与 Zeiss 文件上，信息栏识别与元数据相差 0.18%–0.98%。
+- 文字识别为可选组件 `vexel[sem]`（RapidOCR、ONNX Runtime，本机运行、不联网，在独立进程中运行以免与视频库冲突）；离线安装包已包含。
+- 合成 SEM 图像生成器（五种厂商布局、带精确真值）与标定验收脚本 `tests/benchmarks/sem_calibration_eval.py`（可直接对真实数据文件夹运行）。
 - **模块化平台**（SEM 计划 M0）：微流控液滴与 SEM 作为独立模块运行；`vexel gui` 先显示模块启动器，按文件类型自动进入对应模块；每个窗口有“模块”菜单；`vexel gui --module`、`vexel modules`。SEM 模块为“开发中”（`VEXEL_PREVIEW=1` 可打开预览：识别 Thermo Fisher、Zeiss、TESCAN、Hitachi/JEOL 的元数据）。液滴模块行为不变。设计见 docs/modules.md。
 - **组织策略**：管理员可用系统位置的 `policy.json` 锁定离线运行（只允许列出的内部服务）、禁止发送图像；`vexel policy`；规划模型设置窗口与诊断包显示策略。
 - **离线安装包**：`scripts/build_offline_bundle.py` 生成含 uv、Python 与全部依赖的安装包，用于无法联网的计算机；在 macOS 上实测离线安装与分析，CI 每周在 Windows、Linux 上实测。

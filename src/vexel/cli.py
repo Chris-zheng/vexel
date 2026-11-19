@@ -358,6 +358,66 @@ def cmd_modules(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sem_calibrate(args: argparse.Namespace) -> int:
+    from vexel.packs.sem import calibrate as semcal
+
+    manual = args.pixel_size or args.bar_length
+    if manual and len(args.files) != 1:
+        raise ValueError("--pixel-size / --bar-length apply to one file at a time")
+    results = []
+    for f in args.files:
+        path = Path(f)
+        if manual:
+            cal = semcal.manual(path, pixel_size=semcal.parse_quantity(args.pixel_size) if args.pixel_size else None,
+                                bar_length=semcal.parse_quantity(args.bar_length) if args.bar_length else None, bar_px=args.bar_pixels)  # fmt: skip
+        else:
+            saved = None if args.fresh else semcal.load(semcal.file_sha256(path))
+            cal = saved if saved is not None and saved.ok and saved.confirmed and not args.no_metadata else \
+                semcal.calibrate(path, use_ocr=not args.no_ocr, use_metadata=not args.no_metadata)  # fmt: skip
+            if args.confirm and cal.needs_confirmation:
+                cal.confirm("person (command line)")
+        if manual or (args.confirm and cal.ok):
+            semcal.save(cal)
+        results.append(cal)
+    if args.json:
+        print(json.dumps([c.to_dict() for c in results], ensure_ascii=False, indent=2))
+    else:
+        for c in results:
+            crop = f"; analysis area rows 0-{c.crop_rows - 1} (data bar {c.crop_source})" if c.crop_rows else ""
+            print(f"{c.file}: {c.describe()}{crop}")
+            if c.scale_bar:
+                print(f"  scale bar {c.scale_bar['length_px']:.1f} px" + (f" = {c.label}" if c.label else ""))
+            for chk in c.checks:
+                print(f"  check ({chk['check']}): {semcal.format_length(chk['pixel_size'])}/px, {chk['difference'] * 100:+.2f}%" + ("" if chk["agree"] else "  DISAGREES"))
+            for w in c.warnings:
+                print(f"  ! {w}")
+            if c.needs_confirmation:
+                print("  needs confirmation: check it, then run again with --confirm (or confirm in the SEM window)")
+    return 0 if all(c.ok for c in results) else 1
+
+
+def cmd_sem_info(args: argparse.Namespace) -> int:
+    from vexel.packs.sem.metadata import read_metadata
+
+    md = read_metadata(args.file)
+    if md is None:
+        print("no SEM instrument metadata in this file (or next to it)")
+        return 1
+    d = md.to_dict()
+    if args.json:
+        print(json.dumps(d, ensure_ascii=False, indent=2))
+        return 0
+    print(f"vendor: {md.vendor_name}")
+    for k, v in d.items():
+        if k not in ("vendor", "raw", "warnings") and v not in (None, "", [], 0):
+            print(f"{k}: {_fmt(v)}")
+    for k, v in md.raw.items():
+        print(f"  [{k}] {v}")
+    for w in md.warnings:
+        print(f"! {w}")
+    return 0
+
+
 def _speed(text: str) -> float | None:
     if text in ("max", "0"):
         return None
@@ -770,6 +830,24 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--max-frames", type=int)
     b.add_argument("--workers", type=int)
     b.set_defaults(func=cmd_batch_run)
+
+    p = sub.add_parser("sem", help="SEM module: calibration (pixel size from metadata, data bar or by hand)")
+    ssub = p.add_subparsers(dest="sem_command", required=True)
+    c = ssub.add_parser("calibrate", help="pixel size of SEM images: instrument metadata, else the data bar's scale bar (OCR)")
+    c.add_argument("files", nargs="+")
+    c.add_argument("--json", action="store_true")
+    c.add_argument("--confirm", action="store_true", help="record a data-bar calibration as confirmed (after checking it)")
+    c.add_argument("--pixel-size", help="manual: the pixel size, e.g. 2.5nm")
+    c.add_argument("--bar-length", help="manual: what the scale bar stands for, e.g. 500nm (its pixels are measured)")
+    c.add_argument("--bar-pixels", type=float, help="manual: the scale bar's length in pixels, when it cannot be found")
+    c.add_argument("--no-ocr", action="store_true", help="do not read text in the data bar")
+    c.add_argument("--no-metadata", action="store_true", help="ignore instrument metadata (to check the data-bar route against it)")
+    c.add_argument("--fresh", action="store_true", help="ignore a recorded confirmation")
+    c.set_defaults(func=cmd_sem_calibrate)
+    c = ssub.add_parser("info", help="instrument metadata of an SEM image")
+    c.add_argument("file")
+    c.add_argument("--json", action="store_true")
+    c.set_defaults(func=cmd_sem_info)
 
     p = sub.add_parser("policy", help="show the organisation policy in force (offline mode, allowed hosts)")
     p.set_defaults(func=cmd_policy)

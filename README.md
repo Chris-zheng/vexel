@@ -71,6 +71,7 @@ uv run vexel run   my_video.avi -r my_recipe.json --set seg.min_score=0.5
 | `vexel convert` | 转为 OME-Zarr 多分辨率金字塔 |
 | `vexel batch` | 批量：`init` 从文件夹起草设计表，`run` 用一个配方分析表里每个文件（无人值守、可续跑），按组统计并导出报告、方法段落与复现脚本 |
 | `vexel modules` | 列出平台模块（微流控液滴、SEM）；给出文件时判断它属于哪个模块 |
+| `vexel sem calibrate` / `vexel sem info` | SEM 图像的像素尺寸（仪器元数据、信息栏比例尺识别或手动）与仪器信息 |
 | `vexel policy` | 显示当前生效的组织策略（离线运行、允许的内部服务）与实际可用的规划模型 |
 | `vexel plugins` | 已安装的插件与模型：算子、许可证、训练数据、权重文件状态 |
 | `vexel bugreport` | 导出诊断包（版本、设置、配方、汇总；不含图像和密钥），用于报告问题 |

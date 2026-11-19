@@ -32,7 +32,7 @@ vexel gui
 ```bash
 git clone https://github.com/Chris-zheng/vexel.git
 cd vexel
-uv sync                  # 要用 Claude 规划或 MCP 服务时：uv sync --extra agent
+uv sync                  # 要用 Claude 规划或 MCP 服务时：uv sync --extra agent；SEM 文字识别：--extra sem
 ```
 
 确认安装成功：
@@ -1132,6 +1132,27 @@ uv run vexel bugreport runs/exp01 -o vexel-bugreport.zip --note "细胞数明显
 uv run vexel modules                  # 列出模块
 uv run vexel modules my_file.tif      # 这个文件属于哪个模块（各模块的打分）
 ```
+
+**SEM 标定**（SEM 模块开发中，`VEXEL_PREVIEW=1` 打开预览窗口）：
+
+```bash
+uv run vexel sem info image.tif                   # 仪器元数据（厂商、像素尺寸、电压、放大倍数、倾角…）
+uv run vexel sem calibrate *.tif                  # 每张图的像素尺寸、来源、核对结果、信息栏位置
+uv run vexel sem calibrate image.tif --confirm    # 核对无误后，记录从信息栏识别的标定为“已确认”
+uv run vexel sem calibrate image.tif --bar-length 500nm          # 手动：比例尺代表的长度（像素自动测）
+uv run vexel sem calibrate image.tif --bar-length 500nm --bar-pixels 148   # 比例尺找不到时连同像素一起给
+uv run vexel sem calibrate image.tif --pixel-size 2.5nm          # 手动：直接给像素尺寸
+```
+
+标定按顺序尝试三种来源，**结果总是写明来源与是否经人确认**：
+
+1. **仪器元数据**（可信度高，自动采用）：Thermo Fisher（FEI）与 Zeiss 写在 TIFF 里；TESCAN 写在 TIFF 里或旁边的 `.hdr`；Hitachi 与 JEOL 写在同名 `.txt` 里，**复制图片时要连同 `.txt` 一起复制**。
+2. **信息栏比例尺**：找到图片下方的信息栏，测出比例尺的像素长度，用文字识别读出它代表的长度；信息栏同时显示视场宽度时再用它核对。这种标定**要人确认后才算数**（界面上点“确认标定”，命令行加 `--confirm`）。
+3. **手动**：在图上点比例尺两端并输入长度，或直接输入像素尺寸。
+
+找不到可靠来源时显示“未标定”和原因，不会给出猜测的数值。元数据与信息栏都有时会互相核对，相差超过 2% 时给出提醒（例如图片在采集后被缩放过）。信息栏（无论来自元数据还是自动识别）不参与分析与测量。经人确认的标定按图像文件的 SHA-256 记录在 `~/.vexel/sem/calibrations/`，同一文件再次打开时直接使用。
+
+文字识别是可选组件（RapidOCR 与 ONNX Runtime，完全在本机运行，不联网；约增加 180 MB）：`uv sync --extra sem`，或安装 wheel 时写成 `vexel-<版本>-py3-none-any.whl[sem]`。离线安装包已包含。Intel 芯片的 Mac 不支持文字识别，只能用元数据或手动标定。
 
 **组织策略**（数据不能出网的单位，由 IT 管理员设置）：
 
