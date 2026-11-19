@@ -689,3 +689,113 @@ def test_sem_window_measures_edits_undoes_exports_and_restores(app, tmp_path, mo
     assert [i.id for i in w2.ms.items] == [1, 3, 4] and w2.ms.get(1).name == "gate" and w2.tilt_on.isChecked()
     assert w2.table.rowCount() == 3
     _dispose(w2)
+
+
+def test_sem_window_processes_compares_averages_and_restores(app, tmp_path, monkeypatch):
+    import tifffile
+    from qtpy.QtCore import Qt
+
+    from vexel.packs.sem.calibrate import load_image
+    from vexel.synthetic.sem import write_sem
+    from vexel.ui.sem_window import SemWindow
+
+    monkeypatch.setenv("VEXEL_HOME", str(tmp_path / "home"))
+    path = tmp_path / "t.tif"
+    write_sem(path, "thermo", pixel_size=2.5e-9, rows=300, cols=400)
+    w = SemWindow()
+    w.open_path(path, wait=True)
+    assert w.result is not None and w.add_step_btn.isEnabled() and not w.export_proc_btn.isEnabled()
+    before = w.result.analysis.copy()
+    crop = w.cal.crop_rows
+
+    # steps: corrections go before display steps whatever the order of adding
+    w.add_step("contrast", gamma=0.8)
+    w.add_step("line_level")
+    w.add_step("background", method="gaussian")
+    assert [s.op for s in w.ms.processing.steps] == ["line_level", "background", "contrast"]
+    assert w.steps.count() == 3 and w.steps.currentRow() == 1 and "高斯" in w.params_box.findChildren(type(w.edge_method))[0].currentText()
+    assert not np.allclose(w.result.analysis[:crop], before[:crop])
+    assert np.array_equal(w.result.analysis[crop:], before[crop:])  # the data bar is untouched
+    w.move_step(1, 1)  # a correction cannot move after a display step
+    assert [s.op for s in w.ms.processing.steps] == ["line_level", "background", "contrast"]
+    w.move_step(1, -1)
+    assert [s.op for s in w.ms.processing.steps] == ["background", "line_level", "contrast"]
+    w.set_step_params(1, direction="columns")
+    assert w.ms.processing.steps[1].params["direction"] == "columns"
+    w.steps.item(2).setCheckState(Qt.CheckState.Unchecked)
+    assert not w.ms.processing.steps[2].enabled
+    w.undo()
+    assert w.ms.processing.steps[2].enabled and w.steps.item(2).checkState() == Qt.CheckState.Checked
+    w.remove_step(2)
+    assert [s.op for s in w.ms.processing.steps] == ["background", "line_level"]
+    assert w.export_proc_btn.isEnabled()
+    # the parameter form edits the selected step
+    w.steps.setCurrentRow(1)
+    w._param_widgets["keep"][1].setValue(25.0)
+    w._apply_params()
+    assert w.ms.processing.steps[1].params["keep"] == 25.0
+
+    # the before/after view and the saturation mask
+    w.set_compare(True, 0.3)
+    assert w.view._before is not None and w.view._before.pixmap().width() == 120
+    w.set_compare(False)
+    assert w.view._before is None
+    w.set_saturation(enabled=False)
+    assert w.result.mask is None and "未标记" in w.sat_info.text()
+    w.set_saturation(enabled=True)
+    assert w.result.mask is not None
+
+    # measurements use the corrected image; the record keeps the chain
+    w.add_measurement("profile", [[10, 150], [390, 150]])
+    sheets = __import__("openpyxl").load_workbook(w.export(tmp_path / "m.xlsx")[0]).sheetnames
+    assert "图像处理" in sheets
+
+    # the processed image opens calibrated
+    out = w.export_processed(tmp_path / "p.tif")
+    assert out.is_file() and "vexel" in tifffile.TiffFile(out).pages[0].description
+    _dispose(w)
+    w3 = SemWindow()
+    w3.open_path(out, wait=True)
+    assert w3.cal.ok and w3.cal.pixel_size == pytest.approx(2.5e-9) and w3.cal.crop_rows == crop
+    _dispose(w3)
+
+    # reopening the original restores the chain
+    w2 = SemWindow()
+    w2.open_path(path, wait=True)
+    assert [s.op for s in w2.ms.processing.steps] == ["background", "line_level"] and w2.steps.count() == 2
+    # multi-frame averaging: a second frame shifted by 2 pixels
+    img = load_image(path)
+    frame2 = tmp_path / "t2.tif"
+    shifted = img.copy()
+    shifted[:crop] = np.roll(img[:crop], 2, axis=1)
+    tifffile.imwrite(frame2, shifted)
+    info = w2.average_with([frame2], tmp_path / "avg.tif")
+    assert info is not None and info["frames"] == 2
+    assert abs(info["shifts"][1][1] + 2) < 0.1 and abs(info["shifts"][1][0]) < 0.1
+    assert w2.path.name == "avg.tif" and w2.cal.ok and w2.cal.pixel_size == pytest.approx(2.5e-9)
+    _dispose(w2)
+
+
+def test_sem_window_runs_slow_processing_in_the_background(app, tmp_path, monkeypatch):
+    from vexel.synthetic.sem import write_sem
+    from vexel.ui.sem_window import SemWindow
+
+    monkeypatch.setenv("VEXEL_HOME", str(tmp_path / "home"))
+    path = tmp_path / "t.tif"
+    write_sem(path, "thermo", pixel_size=2.5e-9, rows=300, cols=400)
+    w = SemWindow()
+    w.open_path(path, wait=True)
+    w._sync = False  # as when a person opens the image
+    before = w.result
+    w.add_step("denoise")  # non-local means: slow, runs in the background
+    assert w._proc_thread is not None and w.result is before and "处理中" in w.sat_info.text()
+    w.add_step("contrast")  # changed meanwhile: the chain then in force runs next
+    assert w.wait_processing() and w.wait_processing()
+    assert w.result is not before and w._result_key == w.ms.processing.model_dump_json()
+    assert not __import__("numpy").array_equal(w.result.analysis, before.analysis)
+    # exports wait for the current chain
+    w.set_step_params(0, strength=2.0)
+    out = w.export(tmp_path / "m.xlsx")
+    assert out[0].is_file() and w._result_key == w.ms.processing.model_dump_json()
+    w.wait_processing()
+    _dispose(w)

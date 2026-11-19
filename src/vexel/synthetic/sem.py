@@ -62,8 +62,9 @@ def _nice_bar(pixel_size: float, width: int) -> float:
     return best
 
 
-def micrograph(rows: int, cols: int, seed: int = 0) -> np.ndarray:
-    """Grainy background with bright-edged particles: an SEM-like picture (float 0..1)."""
+def micrograph(rows: int, cols: int, seed: int = 0, noise: float = 0.03) -> np.ndarray:
+    """Grainy background with bright-edged particles: an SEM-like picture (float 0..1).
+    ``noise``: standard deviation of the added pixel noise (0: a clean picture)."""
     from scipy import ndimage as ndi
 
     rng = np.random.default_rng(seed)
@@ -74,7 +75,8 @@ def micrograph(rows: int, cols: int, seed: int = 0) -> np.ndarray:
         cy, cx, r = rng.uniform(0, rows), rng.uniform(0, cols), rng.uniform(4, 22)
         d = np.hypot(yy - cy, xx - cx) / r
         img += np.where(d < 1, 0.15 + 0.35 * d**4, 0)  # edge brightening
-    img += rng.normal(0, 0.03, img.shape)
+    if noise:
+        img += rng.normal(0, noise, img.shape)
     return np.clip(img, 0, 1)
 
 
@@ -252,3 +254,61 @@ def line_space(rows: int = 200, cols: int = 800, *, width: float = 13.3, pitch: 
         img = ndi.gaussian_filter(img, blur)
     rng = np.random.default_rng(seed)
     return np.clip(img + rng.normal(0, noise, img.shape), 0, 1)
+
+
+# -- artefacts for testing image processing (plan §2.3) -----------------------------------------
+
+
+def add_stripes(img: np.ndarray, amplitude: float = 0.06, *, direction: str = "horizontal", vary: float = 0.0,
+                seed: int = 0) -> np.ndarray:  # fmt: skip
+    """Charging bands along the scan direction: each line (horizontal) gets a random offset,
+    plus slower bands a few lines wide. ``vary`` > 0: the bands fade in and out along the
+    line (by that fraction), as charging builds up and leaks away during the scan."""
+    from scipy import ndimage as ndi
+
+    rng = np.random.default_rng(seed)
+    n = img.shape[0] if direction == "horizontal" else img.shape[1]
+    off = rng.normal(0, 1, n) + ndi.gaussian_filter1d(rng.normal(0, 3, n), 3)
+    off = amplitude * off / (off.std() + 1e-12)
+    m = img.shape[1] if direction == "horizontal" else img.shape[0]
+    along = 1 + vary * np.sin(2 * np.pi * np.arange(m) / m * 1.5 + 0.7)
+    return img + (off[:, None] * along[None, :] if direction == "horizontal" else off[None, :] * along[:, None])
+
+
+def add_gradient(img: np.ndarray, amplitude: float = 0.25) -> np.ndarray:
+    """Uneven brightness: brighter towards one corner, plus a bright centre."""
+    r, c = img.shape
+    yy, xx = np.mgrid[:r, :c]
+    ramp = (xx / max(c - 1, 1) * 0.7 + yy / max(r - 1, 1) * 0.3) - 0.5
+    centre = np.exp(-(((yy - r / 2) / (0.6 * r)) ** 2 + ((xx - c / 2) / (0.6 * c)) ** 2))
+    return img + amplitude * (ramp + 0.5 * (centre - centre.mean()))
+
+
+def add_noise(img: np.ndarray, sigma: float = 0.05, *, seed: int = 0) -> np.ndarray:
+    return img + np.random.default_rng(seed).normal(0, sigma, img.shape)
+
+
+def add_row_jitter(img: np.ndarray, *, fraction: float = 0.15, max_shift: float = 3.0, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
+    """Shift a random ``fraction`` of the scan lines sideways by up to ``max_shift`` pixels
+    (sub-pixel). Returns the image and each line's shift (positive: moved right)."""
+    from scipy import ndimage as ndi
+
+    rng = np.random.default_rng(seed)
+    r, c = img.shape
+    shifts = np.where(rng.random(r) < fraction, rng.uniform(-max_shift, max_shift, r), 0.0)
+    rr, cc = np.meshgrid(np.arange(r, dtype=float), np.arange(c, dtype=float), indexing="ij")
+    out = ndi.map_coordinates(img, [rr, cc - shifts[:, None]], order=3, mode="nearest")
+    return out, shifts
+
+
+def add_saturation(img: np.ndarray, *, spots: int = 3, radius: float = 18.0, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
+    """Charged spots clipped at white (1.0). Returns the image and the clipped pixels."""
+    rng = np.random.default_rng(seed)
+    r, c = img.shape
+    yy, xx = np.mgrid[:r, :c]
+    out = img.copy()
+    for _ in range(spots):
+        cy, cx, rad = rng.uniform(0.15, 0.85) * r, rng.uniform(0.15, 0.85) * c, rng.uniform(0.5, 1.0) * radius
+        out += 1.2 * np.exp(-(((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * rad**2)))
+    out = np.clip(out, 0, 1)
+    return out, out >= 1.0

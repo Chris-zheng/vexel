@@ -1,7 +1,12 @@
 """Measurement tables, exports and records.
 
 - ``tables(ms, image)``: the measurement table (one row per item, in a readable unit),
-  the profile edges, a summary per kind and category, and the calibration.
+  the profile edges, a summary per kind and category, the calibration and the
+  processing chain.
+
+Every function here takes the original image and applies the record's processing chain
+(``processed``): values come from the corrected image without saturated pixels, pictures
+show the display version. A ``Result`` already at hand can be passed as ``result``.
 - ``export_csv`` / ``export_xlsx``: those tables as files (Excel: one sheet each).
 - ``render`` / ``export_png`` / ``export_svg``: the micrograph with every measurement drawn,
   numbered and labelled, and a scale bar drawn by Vexel (the instrument's data bar is
@@ -22,6 +27,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from vexel.packs.sem import process
 from vexel.packs.sem.measure import KIND_NAMES, MeasurementSet, compute_all
 
 COLOURS = ["#f59e0b", "#22d3ee", "#a3e635", "#f472b6", "#a78bfa", "#fb7185", "#34d399", "#60a5fa"]
@@ -41,9 +47,22 @@ def display_unit(ms: MeasurementSet) -> tuple[str, float]:
     return "mm", 1e-3
 
 
-def tables(ms: MeasurementSet, image: np.ndarray | None = None) -> dict[str, pd.DataFrame]:
+def processed(ms: MeasurementSet, image: np.ndarray | None, result: process.Result | None = None) -> process.Result | None:
+    """The record's processing chain applied to ``image`` (None without an image)."""
+    if result is not None or image is None:
+        return result
+    return process.apply(image, ms.processing, ms.image.get("crop_rows"))
+
+
+def values_of(ms: MeasurementSet, image: np.ndarray | None, result: process.Result | None = None) -> list[dict[str, Any]]:
+    res = processed(ms, image, result)
+    return compute_all(ms, res.analysis if res else None, res.mask if res else None)
+
+
+def tables(ms: MeasurementSet, image: np.ndarray | None = None, result: process.Result | None = None) -> dict[str, pd.DataFrame]:
     unit, f = display_unit(ms)
-    values = compute_all(ms, image)
+    res = processed(ms, image, result)
+    values = values_of(ms, image, res)
     rows, edges = [], []
     for v in values:
         row: dict[str, Any] = {"id": v["id"], "tool": KIND_NAMES.get(v["kind"], v["kind"]), "kind": v["kind"], "name": v.get("name", "")}
@@ -61,6 +80,8 @@ def tables(ms: MeasurementSet, image: np.ndarray | None = None) -> dict[str, pd.
                 row[f"{key} (°)"] = v[key]
         if v["kind"] == "point":
             row["category"], row["count"] = v.get("category", ""), v["count"]
+        if v.get("note"):
+            row["note"] = v["note"]
         if v["kind"] == "profile":
             row["edge definition"] = v["method"] + (f" {v['level']:.0%}" if v.get("level") is not None and v["method"] != "gradient" else "")
             row["profile width (px)"] = v["width_px"]
@@ -87,28 +108,34 @@ def tables(ms: MeasurementSet, image: np.ndarray | None = None) -> dict[str, pd.
     calib = pd.DataFrame([{"file": ms.image.get("file", ""), "sha256": ms.image.get("sha256", ""),
                            "pixel size (m)": sc.pixel_size, "pixel size y (m)": sc.pixel_size_y, "source": sc.source,
                            "confirmed": sc.confirmed, "tilt correction (°)": sc.tilt, "record digest": ms.digest()}])  # fmt: skip
-    return {"measurements": table, "profile_edges": pd.DataFrame(edges), "summary": pd.DataFrame(summary), "calibration": calib}
+    steps = [{"step": i, "processing": line} for i, line in enumerate(process.describe(ms.processing), start=1)]
+    if res is not None and res.saturation:
+        steps.append({"step": None, "processing": f"saturated pixels: {res.saturation.get('pixels', 0)} ({res.saturation.get('fraction', 0):.3%})"})
+    return {"measurements": table, "profile_edges": pd.DataFrame(edges), "summary": pd.DataFrame(summary), "calibration": calib,
+            "processing": pd.DataFrame(steps)}  # fmt: skip
 
 
-def export_csv(ms: MeasurementSet, image: np.ndarray | None, path: str | Path) -> list[Path]:
-    """The measurement table at ``path``; profile edges and summary beside it (``*_edges.csv``, ``*_summary.csv``)."""
+def export_csv(ms: MeasurementSet, image: np.ndarray | None, path: str | Path, result: process.Result | None = None) -> list[Path]:
+    """The measurement table at ``path``; profile edges, summary and processing beside it
+    (``*_edges.csv``, ``*_summary.csv``, and ``*_processing.csv`` when the image was processed)."""
     path = Path(path)
-    t = tables(ms, image)
+    t = tables(ms, image, result)
     out = [path]
     t["measurements"].to_csv(path, index=False, encoding="utf-8-sig")  # Excel opens UTF-8 with a BOM correctly
-    for key, suffix in (("profile_edges", "_edges"), ("summary", "_summary")):
-        if len(t[key]):
+    for key, suffix in (("profile_edges", "_edges"), ("summary", "_summary"), ("processing", "_processing")):
+        if len(t[key]) and (key != "processing" or ms.processing.active()):
             p = path.with_name(path.stem + suffix + path.suffix)
             t[key].to_csv(p, index=False, encoding="utf-8-sig")
             out.append(p)
     return out
 
 
-def export_xlsx(ms: MeasurementSet, image: np.ndarray | None, path: str | Path) -> Path:
+def export_xlsx(ms: MeasurementSet, image: np.ndarray | None, path: str | Path, result: process.Result | None = None) -> Path:
     path = Path(path)
-    t = tables(ms, image)
+    t = tables(ms, image, result)
     with pd.ExcelWriter(path, engine="openpyxl") as xw:
-        for name, sheet in (("measurements", "测量"), ("summary", "汇总"), ("profile_edges", "剖面边缘"), ("calibration", "标定")):
+        for name, sheet in (("measurements", "测量"), ("summary", "汇总"), ("profile_edges", "剖面边缘"), ("calibration", "标定"),
+                            ("processing", "图像处理")):  # fmt: skip
             df = t[name]
             (df if len(df) else pd.DataFrame({"": []})).to_excel(xw, sheet_name=sheet, index=False)
     return path
@@ -212,15 +239,16 @@ def _shapes(ms: MeasurementSet, values: list[dict[str, Any]]) -> list[tuple[str,
     return out
 
 
-def render(image: np.ndarray, ms: MeasurementSet, *, crop_rows: int | None = None, scale_bar: bool = True) -> Any:
-    """A PIL image: the micrograph (without the data bar), measurements, labels and a scale bar."""
+def render(image: np.ndarray, ms: MeasurementSet, *, crop_rows: int | None = None, scale_bar: bool = True,
+           result: process.Result | None = None) -> Any:  # fmt: skip
+    """A PIL image: the micrograph (without the data bar) as processed for display,
+    measurements, labels and a scale bar."""
     from PIL import Image, ImageDraw
 
-    img = np.asarray(image, dtype=np.float64)
+    res = processed(ms, image, result)
+    gray = res.display if res is not None else np.zeros((1, 1), np.uint8)
     if crop_rows:
-        img = img[:crop_rows]
-    lo, hi = np.percentile(img, (0.5, 99.5))
-    gray = np.clip((img - lo) / max(hi - lo, 1e-12) * 255, 0, 255).astype(np.uint8)
+        gray = gray[:crop_rows]
     canvas = Image.fromarray(gray).convert("RGB")
     dr = ImageDraw.Draw(canvas)
     size = max(12, canvas.width // 70)
@@ -230,7 +258,7 @@ def render(image: np.ndarray, ms: MeasurementSet, *, crop_rows: int | None = Non
         return text if unicode_ok else text.translate(_ASCII)
 
     lw = max(1, canvas.width // 600)
-    values = compute_all(ms, image)
+    values = values_of(ms, image, res)
     for kind, geom, colour, anchor, label in _shapes(ms, values):
         if kind == "points":
             for x, y in geom:
@@ -267,18 +295,21 @@ def render(image: np.ndarray, ms: MeasurementSet, *, crop_rows: int | None = Non
     return canvas
 
 
-def export_png(image: np.ndarray, ms: MeasurementSet, path: str | Path, *, crop_rows: int | None = None) -> Path:
+def export_png(image: np.ndarray, ms: MeasurementSet, path: str | Path, *, crop_rows: int | None = None,
+               result: process.Result | None = None) -> Path:  # fmt: skip
     path = Path(path)
-    render(image, ms, crop_rows=crop_rows).save(path)
+    render(image, ms, crop_rows=crop_rows, result=result).save(path)
     return path
 
 
-def export_svg(image: np.ndarray, ms: MeasurementSet, path: str | Path, *, crop_rows: int | None = None) -> Path:
+def export_svg(image: np.ndarray, ms: MeasurementSet, path: str | Path, *, crop_rows: int | None = None,
+               result: process.Result | None = None) -> Path:  # fmt: skip
     """The micrograph as an embedded PNG under vector measurements (editable in Illustrator, Inkscape)."""
     from xml.sax.saxutils import escape
 
     path = Path(path)
-    base = render(image, MeasurementSet(image=ms.image, scale=ms.scale), crop_rows=crop_rows)  # picture + scale bar only
+    res = processed(ms, image, result)
+    base = render(image, MeasurementSet(image=ms.image, scale=ms.scale), crop_rows=crop_rows, result=res)  # picture + scale bar only
     buf = io.BytesIO()
     base.save(buf, format="PNG")
     w, h = base.size
@@ -286,7 +317,7 @@ def export_svg(image: np.ndarray, ms: MeasurementSet, path: str | Path, *, crop_
     fs = max(12, w // 70)
     parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">',
              f'<image width="{w}" height="{h}" href="data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"/>']  # fmt: skip
-    for kind, geom, colour, anchor, label in _shapes(ms, compute_all(ms, image)):
+    for kind, geom, colour, anchor, label in _shapes(ms, values_of(ms, image, res)):
         style = f'fill="none" stroke="{colour}" stroke-width="{lw}"'
         if kind == "points":
             parts += [f'<circle cx="{x:.2f}" cy="{y:.2f}" r="{3 * lw + 2}" {style}/>' for x, y in geom]

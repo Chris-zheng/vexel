@@ -20,6 +20,10 @@ point       each click marks one object; Enter (or another tool) ends the count
 
 Esc cancels the shape being drawn; Backspace removes its last point. A selected
 measurement shows handles: drag one to move that point.
+
+The picture can be replaced without touching the drawings (``set_picture``: after image
+processing), shown split into before (left) and after (right) at ``set_split``, with the
+saturated pixels tinted red (``set_mask``).
 """
 
 from __future__ import annotations
@@ -50,9 +54,14 @@ TOOL_HINTS = {
 }
 
 
-def to_qimage(img: np.ndarray) -> QImage:
-    lo, hi = float(np.percentile(img, 0.5)), float(np.percentile(img, 99.5))
-    gray = np.clip((img.astype(np.float64) - lo) / max(hi - lo, 1e-9) * 255, 0, 255).astype(np.uint8)
+def to_qimage(img: np.ndarray, stretch: bool = True) -> QImage:
+    """Grey image to QImage: stretched 0.5-99.5 % to black-white, or (``stretch`` False,
+    uint8 already prepared for display) as it is."""
+    if stretch or img.dtype != np.uint8:
+        lo, hi = float(np.percentile(img, 0.5)), float(np.percentile(img, 99.5))
+        gray = np.clip((img.astype(np.float64) - lo) / max(hi - lo, 1e-9) * 255, 0, 255).astype(np.uint8)
+    else:
+        gray = img
     gray = np.ascontiguousarray(gray)
     return QImage(gray.data, gray.shape[1], gray.shape[0], gray.strides[0], QImage.Format.Format_Grayscale8).copy()
 
@@ -103,6 +112,12 @@ class ImageView(QGraphicsView):
         self._drawn: dict[int, list[Any]] = {}
         self._handles: list[Handle] = []
         self.overlay: list[Any] = []  # calibration overlay (data bar, scale bar)
+        self._pix: Any = None  # the picture
+        self._before: Any = None  # the unprocessed picture, left of the split
+        self._divider: Any = None
+        self._mask_item: Any = None
+        self._original: QImage | None = None
+        self.split: float | None = None  # 0..1 of the width, or None: no comparison
         self.shapes: list[tuple[int, str, Any, str, tuple[float, float], str]] = []
         self._freehand = False
         self.selected: int | None = None
@@ -113,9 +128,54 @@ class ImageView(QGraphicsView):
     def set_image(self, img: np.ndarray) -> None:
         self.scene().clear()
         self.overlay, self._preview, self._handles, self._drawn, self.points = [], [], [], {}, []
-        self.scene().addPixmap(QPixmap.fromImage(to_qimage(img)))
+        self._before = self._divider = self._mask_item = self._original = None
+        self.split = None
+        self._pix = self.scene().addPixmap(QPixmap.fromImage(to_qimage(img)))
+        self._pix.setZValue(-10)
         self.scene().setSceneRect(QRectF(0, 0, img.shape[1], img.shape[0]))
         self.fit()
+
+    def set_picture(self, display: np.ndarray, original: np.ndarray | None = None) -> None:
+        """Show ``display`` (uint8, prepared) in place of the picture, keeping drawings and zoom;
+        ``original`` is what the before/after view shows on the left."""
+        if self._pix is None:
+            return
+        self._pix.setPixmap(QPixmap.fromImage(to_qimage(display, stretch=False)))
+        self._original = to_qimage(original, stretch=False) if original is not None else None
+        self.set_split(self.split)
+
+    def set_split(self, split: float | None) -> None:
+        """Before/after view: the unprocessed picture left of ``split`` (0..1 of the width)."""
+        self.split = split
+        for it in (self._before, self._divider):
+            if it is not None:
+                self.scene().removeItem(it)
+        self._before = self._divider = None
+        if split is None or self._original is None:
+            return
+        w, h = self._original.width(), self._original.height()
+        x = int(round(min(max(split, 0.0), 1.0) * w))
+        if x > 0:
+            self._before = self.scene().addPixmap(QPixmap.fromImage(self._original.copy(0, 0, x, h)))
+            self._before.setZValue(-9)
+        pen = _pen("#facc15", 2)
+        pen.setCosmetic(True)
+        self._divider = self.scene().addLine(x, 0, x, h, pen)
+        self._divider.setZValue(-7)
+
+    def set_mask(self, mask: np.ndarray | None, visible: bool = True) -> None:
+        """Tint ``mask`` pixels (saturated) red."""
+        if self._mask_item is not None:
+            self.scene().removeItem(self._mask_item)
+            self._mask_item = None
+        if mask is None or not visible or not mask.any():
+            return
+        rgba = np.zeros((*mask.shape, 4), np.uint8)
+        rgba[mask] = (239, 68, 68, 120)
+        rgba = np.ascontiguousarray(rgba)
+        img = QImage(rgba.data, mask.shape[1], mask.shape[0], rgba.strides[0], QImage.Format.Format_RGBA8888).copy()
+        self._mask_item = self.scene().addPixmap(QPixmap.fromImage(img))
+        self._mask_item.setZValue(-8)
 
     def fit(self) -> None:
         self.fitInView(self.scene().sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)

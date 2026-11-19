@@ -4,7 +4,10 @@ M1: open an image, calibrate it (instrument metadata, the data bar's scale bar, 
 hand), confirm. M2: measure on it - length, polyline, area (polygon, freehand, magic
 wand), angle, counting, circle and ellipse fits, line profiles with edges, widths and
 pitch - with a table of results, undo and redo, and exports (CSV, Excel, annotated PNG
-and SVG, and the measurement record itself).
+and SVG, and the measurement record itself). M3: image processing - line levelling,
+Fourier destriping, background levelling, scan-line alignment, denoising, contrast and
+sharpening - with a before/after view, the saturated-area mask, and multi-frame
+averaging.
 
 Measurements are kept per image (by its SHA-256) and saved after every change, so
 reopening the image brings them back. Values are always recomputed from the drawn
@@ -18,8 +21,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from qtpy.QtCore import QObject, Qt, QThread, Signal
-from qtpy.QtGui import QAction, QActionGroup, QKeySequence
+from qtpy.QtCore import QObject, Qt, QThread, QTimer, Signal
+from qtpy.QtGui import QAction, QActionGroup, QGuiApplication, QKeySequence
 from qtpy.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -35,8 +38,12 @@ from qtpy.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QListWidget,
+    QListWidgetItem,
     QScrollArea,
+    QSlider,
     QSpinBox,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QToolBar,
@@ -54,6 +61,7 @@ TOOLS = [("pan", "选择", "V"), ("line", "长度", "L"), ("polyline", "折线",
          ("wand", "魔棒", "W"), ("angle", "角度", "G"), ("point", "计数", "N"), ("circle", "圆", "C"), ("ellipse", "椭圆", "E"),
          ("profile", "线剖面", "P")]  # fmt: skip
 EDGE_METHODS = [("threshold", "阈值（50% 等）"), ("gradient", "最大梯度"), ("peak", "亮边峰值")]
+TAB_CALIBRATION, TAB_PROCESSING, TAB_MEASURE = range(3)
 
 
 class _CalibrateJob(QObject):
@@ -73,6 +81,36 @@ class _CalibrateJob(QObject):
             self.failed.emit(f"{type(e).__name__}: {e}")
 
 
+class _ProcessJob(QObject):
+    """Runs a processing chain away from the window (non-local means on a large image takes seconds)."""
+
+    done = Signal(object, str, object)  # result, chain key, processor
+    failed = Signal(str, str, object)
+
+    def __init__(self, processor: Any, chain: Any, key: str) -> None:
+        super().__init__()
+        self.processor, self.chain, self.key = processor, chain, key
+
+    def run(self) -> None:
+        try:
+            self.done.emit(self.processor.run(self.chain), self.key, self.processor)
+        except Exception as e:  # noqa: BLE001 - shown to the person
+            self.failed.emit(f"{type(e).__name__}: {e}", self.key, self.processor)
+
+
+SLOW = {("denoise", "nlm"), ("denoise", "bilateral"), ("background", "rolling_ball")}
+
+
+def _slow(chain: Any) -> bool:
+    from vexel.packs.sem.process import OPS
+
+    for st in chain.active():
+        op = OPS.get(st.op)
+        if op is not None and (st.op, op.resolve(st.params).get("method")) in SLOW:
+            return True
+    return False
+
+
 class SemWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -87,6 +125,17 @@ class SemWindow(QMainWindow):
         self._redo: list[str] = []
         self._thread: QThread | None = None
         self._job: _CalibrateJob | None = None
+        self.processor: Any = None  # process.Processor of this image
+        self.result: Any = None  # process.Result for the chain in force
+        self._result_key: str | None = None
+        self._proc_thread: QThread | None = None
+        self._proc_job: _ProcessJob | None = None
+        self._sync = False  # tests and scripts: process on this thread
+        self._param_widgets: dict[str, Any] = {}
+        self._param_timer = QTimer(self)
+        self._param_timer.setSingleShot(True)
+        self._param_timer.setInterval(350)
+        self._param_timer.timeout.connect(self._apply_params)
 
         self.view = ImageView()
         self.view.shape_done.connect(self._shape_done)
@@ -99,16 +148,19 @@ class SemWindow(QMainWindow):
         root = QHBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.addWidget(self.view, 1)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFixedWidth(380)
-        panel = QFrame()
-        panel.setObjectName("sidebar")
-        scroll.setWidget(panel)
-        v = QVBoxLayout(panel)
-        self._build_calibration(v)
-        self._build_measurements(v)
-        root.addWidget(scroll)
+        self.tabs = QTabWidget()
+        self.tabs.setFixedWidth(390)
+        for title, build in (("标定", self._build_calibration), ("图像处理", self._build_processing), ("测量", self._build_measurements)):
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            panel = QFrame()
+            panel.setObjectName("sidebar")
+            scroll.setWidget(panel)
+            v = QVBoxLayout(panel)
+            build(v)
+            v.addStretch(1)
+            self.tabs.addTab(scroll, title)
+        root.addWidget(self.tabs)
         self.setCentralWidget(central)
         self._set_buttons()
         self.statusBar().showMessage("打开一张 SEM 图片开始")
@@ -248,6 +300,85 @@ class SemWindow(QMainWindow):
         self.profile_info = muted("")
         v.addWidget(self.profile_info)
 
+    def _build_processing(self, v: QVBoxLayout) -> None:
+        from vexel.packs.sem.process import OPS
+
+        v.addWidget(heading("图像处理"))
+        v.addWidget(muted("校正步骤的结果用于测量；“仅显示”的步骤只改变显示和导出的图。只处理信息栏以上的部分。"))
+        row = QHBoxLayout()
+        self.op_choice = QComboBox()
+        for name, op in OPS.items():
+            self.op_choice.addItem(op.label + ("（仅显示）" if op.role == "display" else ""), name)
+            self.op_choice.setItemData(self.op_choice.count() - 1, op.help, Qt.ItemDataRole.ToolTipRole)
+        self.add_step_btn = QPushButton("添加")
+        self.add_step_btn.clicked.connect(lambda: self.add_step(self.op_choice.currentData()))
+        row.addWidget(self.op_choice, 1)
+        row.addWidget(self.add_step_btn)
+        v.addLayout(row)
+        self.steps = QListWidget()
+        self.steps.setMaximumHeight(150)
+        self.steps.currentRowChanged.connect(lambda _r: self._show_params())
+        self.steps.itemChanged.connect(self._step_toggled)
+        v.addWidget(self.steps)
+        brow = QHBoxLayout()
+        self.up_btn = QPushButton("上移")
+        self.up_btn.clicked.connect(lambda: self.move_step(self.steps.currentRow(), -1))
+        self.down_btn = QPushButton("下移")
+        self.down_btn.clicked.connect(lambda: self.move_step(self.steps.currentRow(), 1))
+        self.remove_step_btn = QPushButton("删除")
+        self.remove_step_btn.clicked.connect(lambda: self.remove_step(self.steps.currentRow()))
+        for b in (self.up_btn, self.down_btn, self.remove_step_btn):
+            brow.addWidget(b)
+        v.addLayout(brow)
+        self.params_box = QWidget()
+        self.params_form = QFormLayout(self.params_box)
+        self.params_form.setContentsMargins(0, 0, 0, 0)
+        v.addWidget(self.params_box)
+        self.step_help = muted("")
+        v.addWidget(self.step_help)
+
+        v.addWidget(heading("饱和区"))
+        self.sat_on = QCheckBox("标记饱和区（魔棒和线剖面不使用）")
+        self.sat_on.setToolTip("严重荷电或探测器饱和处的信息已经丢失，只能标记，不能“修复”")
+        self.sat_on.toggled.connect(lambda on: self.set_saturation(enabled=on))
+        v.addWidget(self.sat_on)
+        self.sat_show = QCheckBox("在图上显示（红色）")
+        self.sat_show.setChecked(True)
+        self.sat_show.toggled.connect(lambda _on: self._show_mask())
+        v.addWidget(self.sat_show)
+        self.sat_info = muted("")
+        v.addWidget(self.sat_info)
+        self.proc_notes = QLabel("")
+        self.proc_notes.setObjectName("notes")
+        self.proc_notes.setWordWrap(True)
+        self.proc_notes.hide()
+        v.addWidget(self.proc_notes)
+
+        v.addWidget(heading("前后对比"))
+        crow = QHBoxLayout()
+        self.compare_on = QCheckBox("左侧显示原图")
+        self.compare_on.toggled.connect(lambda _on: self._apply_split())
+        self.compare_pos = QSlider(Qt.Orientation.Horizontal)
+        self.compare_pos.setRange(0, 100)
+        self.compare_pos.setValue(50)
+        self.compare_pos.valueChanged.connect(lambda _v: self._apply_split())
+        crow.addWidget(self.compare_on)
+        crow.addWidget(self.compare_pos, 1)
+        v.addLayout(crow)
+
+        v.addWidget(heading("多帧与导出"))
+        orow = QHBoxLayout()
+        self.average_btn = QPushButton("多帧平均…")
+        self.average_btn.setToolTip("选择同一位置的其他帧：对齐（亚像素）后平均，结果另存为新图并沿用本图的标定")
+        self.average_btn.clicked.connect(self._choose_frames)
+        self.export_proc_btn = QPushButton("导出处理后的图…")
+        self.export_proc_btn.setToolTip("校正后的图（32 位浮点 TIFF，信息栏保留），在 Vexel 中打开时沿用本图的标定")
+        self.export_proc_btn.clicked.connect(self._export_processed)
+        orow.addWidget(self.average_btn)
+        orow.addWidget(self.export_proc_btn)
+        v.addLayout(orow)
+        v.addWidget(muted("荷电最有效的办法在采集端（降低电压、缩短驻留时间、交错扫描、镀膜）；软件处理只是补救。"))
+
     # -- opening and calibrating --------------------------------------------------------
 
     def _choose(self) -> None:
@@ -265,6 +396,7 @@ class SemWindow(QMainWindow):
             self.file_label.setText(f"无法读取：{type(e).__name__}: {e}")
             return False
         self.path, self.image, self.cal, self.ms, self.values = path, img, None, None, {}
+        self.processor, self.result, self._result_key = None, None, None
         self._undo, self._redo = [], []
         self.view.set_image(img)
         self.file_label.setText(f"{path.name}：{img.shape[1]}×{img.shape[0]} 像素")
@@ -274,6 +406,7 @@ class SemWindow(QMainWindow):
         self.notes.hide()
         self.meta.setText("")
         self._refresh()
+        self._sync = wait
         if wait:  # tests and scripts: calibrate on this thread
             from vexel.packs.sem.calibrate import for_file
 
@@ -299,6 +432,9 @@ class SemWindow(QMainWindow):
 
     def closeEvent(self, event: Any) -> None:  # noqa: N802 - Qt
         self._stop_thread()
+        if self._proc_thread is not None:
+            self._proc_thread.quit()
+            self._proc_thread.wait(60000)
         super().closeEvent(event)
 
     # -- calibration display -----------------------------------------------------------------
@@ -352,6 +488,10 @@ class SemWindow(QMainWindow):
         if md.get("tilt") and abs(md["tilt"]) >= 0.5 and not self.tilt_on.isChecked():
             self.tilt.setValue(abs(float(md["tilt"])))
         # measurements: the record of this image, or a new one, under the calibration in force
+        if self.processor is None or self.processor.crop_rows != (cal.crop_rows or None):
+            from vexel.packs.sem.process import Processor
+
+            self.processor, self.result, self._result_key = Processor(self.image, cal.crop_rows), None, None
         if self.ms is None or self.ms.image.get("sha256") != cal.sha256:
             self.ms = measure_io.load_record(cal.sha256) or measure_io.new_set(self.path, cal)
             if self.ms.scale.tilt:
@@ -387,6 +527,15 @@ class SemWindow(QMainWindow):
         self.export_act.setEnabled(bool(self.ms and self.ms.items))
         self.load_act.setEnabled(self.ms is not None)
         self.delete_btn.setEnabled(self.view.selected is not None)
+        ready = self.ms is not None and self.processor is not None
+        row = self.steps.currentRow()
+        n = len(self.ms.processing.steps) if self.ms is not None else 0
+        for w in (self.add_step_btn, self.op_choice, self.sat_on, self.compare_on, self.average_btn):
+            w.setEnabled(ready)
+        self.export_proc_btn.setEnabled(ready and bool(self.ms.processing.active()))
+        self.up_btn.setEnabled(ready and row > 0)
+        self.down_btn.setEnabled(ready and 0 <= row < n - 1)
+        self.remove_step_btn.setEnabled(ready and 0 <= row < n)
 
     def _hover(self, x: float, y: float) -> None:
         if self.image is None or not (0 <= x < self.image.shape[1] and 0 <= y < self.image.shape[0]):
@@ -433,6 +582,10 @@ class SemWindow(QMainWindow):
     # -- measuring ------------------------------------------------------------------------
 
     def set_tool(self, tool: str) -> None:
+        if tool == "calibrate":
+            self.tabs.setCurrentIndex(TAB_CALIBRATION)
+        elif tool != "pan":
+            self.tabs.setCurrentIndex(TAB_MEASURE)  # the results appear there
         self.view.set_tool(tool)
         if tool in self.tool_actions:
             self.tool_actions[tool].setChecked(True)
@@ -471,11 +624,13 @@ class SemWindow(QMainWindow):
             item = self.ms.add(kind, points, params=params, **kw)
             from vexel.packs.sem.measure import compute
 
-            compute(item, self.ms.scale, self.image)
+            res = self._processed()
+            compute(item, self.ms.scale, res.analysis if res is not None else self.image, res.mask if res is not None else None)
         except ValueError as e:
             self._pop_undo()
             self.statusBar().showMessage(f"无法测量：{e}")
             return None
+        self.tabs.setCurrentIndex(TAB_MEASURE)
         self._changed(select=item.id)
         return item
 
@@ -575,7 +730,8 @@ class SemWindow(QMainWindow):
             return
         if select is not None and select not in [i.id for i in self.ms.items]:
             select = None
-        values = compute_all(self.ms, self.image)
+        res = self._processed()
+        values = compute_all(self.ms, res.analysis if res is not None else self.image, res.mask if res is not None else None)
         self.values = {v["id"]: v for v in values}
         shapes = measure_io._shapes(self.ms, values)
         self.view.draw([(item.id, *shape) for item, shape in zip(self.ms.items, shapes)], select)
@@ -603,6 +759,7 @@ class SemWindow(QMainWindow):
         tilt_note = f"；倾斜校正 {self.ms.scale.tilt:.1f}°" if self.ms.scale.tilt else ""
         self.summary.setText(f"{n} 项测量{unit_note}{tilt_note}。自动保存，重新打开这张图时恢复。" if n else f"选择上方工具在图上测量{unit_note}。")
         self._show_profile(self.values.get(select) if select is not None else None, unit, f)
+        self._fill_steps()
         self._set_buttons()
 
     def _show_profile(self, v: dict[str, Any] | None, unit: str, f: float) -> None:
@@ -625,6 +782,8 @@ class SemWindow(QMainWindow):
         self.profile_info.setText("\n".join(lines))
 
     def _select(self, item_id: int) -> None:
+        if item_id >= 0:
+            self.tabs.setCurrentIndex(TAB_MEASURE)
         self._refresh(None if item_id < 0 else item_id)
 
     def _table_selected(self) -> None:
@@ -653,14 +812,15 @@ class SemWindow(QMainWindow):
         path = Path(path)
         crop = self.cal.crop_rows if self.cal is not None else None
         suffix = path.suffix.lower()
+        res = self._processed(block=True)
         if suffix == ".xlsx":
-            out = [measure_io.export_xlsx(self.ms, self.image, path)]
+            out = [measure_io.export_xlsx(self.ms, self.image, path, result=res)]
         elif suffix == ".csv":
-            out = measure_io.export_csv(self.ms, self.image, path)
+            out = measure_io.export_csv(self.ms, self.image, path, result=res)
         elif suffix == ".png":
-            out = [measure_io.export_png(self.image, self.ms, path, crop_rows=crop)]
+            out = [measure_io.export_png(self.image, self.ms, path, crop_rows=crop, result=res)]
         elif suffix == ".svg":
-            out = [measure_io.export_svg(self.image, self.ms, path, crop_rows=crop)]
+            out = [measure_io.export_svg(self.image, self.ms, path, crop_rows=crop, result=res)]
         elif suffix == ".json":
             out = [self.ms.save(path)]
         else:
@@ -692,6 +852,340 @@ class SemWindow(QMainWindow):
         self.ms.scale = keep_scale  # values follow the calibration in force for this image
         self._changed(select=None)
         return True
+
+
+    # -- image processing ---------------------------------------------------------------------
+
+    def _processed(self, block: bool = False) -> Any:
+        """The processing result for the chain in force (recomputed only when the chain changed).
+
+        A chain with a slow step runs in the background: until it is done, the previous
+        result stands in (values and picture update when it arrives). ``block`` (exports)
+        waits for the current result instead."""
+        if self.ms is None or self.processor is None:
+            return None
+        key = self.ms.processing.model_dump_json()
+        if key != self._result_key and not (block or self._sync) and _slow(self.ms.processing):
+            self._start_processing(key)
+            return self.result
+        if key != self._result_key:
+            QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                self.result = self.processor.run(self.ms.processing)
+            except (ValueError, MemoryError) as e:
+                self.statusBar().showMessage(f"图像处理失败：{e}")
+                self.result = None
+            finally:
+                QGuiApplication.restoreOverrideCursor()
+            self._result_key = key
+            self._show_result()
+        return self.result
+
+    def _start_processing(self, key: str) -> None:
+        if self._proc_thread is not None:
+            return  # one at a time: when it is done, the chain then in force is run
+        self._proc_thread = QThread()
+        self._proc_job = _ProcessJob(self.processor, self.ms.processing.model_copy(deep=True), key)
+        self._proc_job.moveToThread(self._proc_thread)
+        self._proc_thread.started.connect(self._proc_job.run)
+        self._proc_job.done.connect(self._processing_done)
+        self._proc_job.failed.connect(self._processing_failed)
+        self._proc_thread.start()
+        self.sat_info.setText("图像处理中…")
+        self.statusBar().showMessage("图像处理中…（完成后数值和图像自动更新）")
+
+    def _end_processing(self) -> None:
+        if self._proc_thread is not None:
+            self._proc_thread.quit()
+            self._proc_thread.wait()
+            self._proc_thread, self._proc_job = None, None
+
+    def _processing_done(self, result: Any, key: str, processor: Any) -> None:
+        self._end_processing()
+        if processor is not self.processor or self.ms is None:
+            return
+        if key == self.ms.processing.model_dump_json():
+            self.result, self._result_key = result, key
+            self._show_result()
+            self.statusBar().showMessage("图像处理完成")
+        self._refresh()  # also starts the chain in force if it changed meanwhile
+
+    def _processing_failed(self, msg: str, key: str, processor: Any) -> None:
+        self._end_processing()
+        if processor is self.processor:
+            self._result_key = key  # do not retry the same chain
+            self.statusBar().showMessage(f"图像处理失败：{msg}")
+
+    def wait_processing(self, timeout_ms: int = 60000) -> bool:
+        """Wait for background processing to finish (tests and scripts)."""
+        from qtpy.QtCore import QCoreApplication, QElapsedTimer
+
+        t = QElapsedTimer()
+        t.start()
+        while self._proc_thread is not None and t.elapsed() < timeout_ms:
+            QCoreApplication.processEvents()
+            QThread.msleep(10)
+        return self._proc_thread is None
+
+    def _show_result(self) -> None:
+        res = self.result
+        if res is None:
+            return
+        self.view.set_picture(res.display, res.original)
+        self._show_mask()
+        sat = res.saturation
+        if not self.ms.processing.saturation.enabled:
+            self.sat_info.setText("未标记饱和区")
+        elif sat.get("pixels"):
+            self.sat_info.setText(f"饱和像素 {sat['pixels']:,}（{sat['fraction']:.2%}），{sat['regions']} 处；阈值 {sat['high']:g}"
+                                  + (f"；暗端 {sat['low']:g}" if sat.get("low") is not None else ""))  # fmt: skip
+        else:
+            self.sat_info.setText("没有发现饱和区")
+        notes = [n for n in res.notes if not n.startswith("饱和区")]
+        self.proc_notes.setText("\n".join(f"• {n}" for n in notes))
+        self.proc_notes.setVisible(bool(notes))
+
+    def _show_mask(self) -> None:
+        res = self.result
+        self.view.set_mask(res.mask if res is not None else None, self.sat_show.isChecked())
+
+    def _apply_split(self) -> None:
+        self.view.set_split(self.compare_pos.value() / 100 if self.compare_on.isChecked() else None)
+
+    def set_compare(self, on: bool, position: float = 0.5) -> None:
+        self.compare_pos.setValue(int(round(position * 100)))
+        self.compare_on.setChecked(on)
+
+    _filling_steps = False
+
+    _steps_sig: str | None = None
+    _params_key: Any = None
+
+    def _fill_steps(self) -> None:
+        from vexel.packs.sem.process import OPS
+
+        if self.ms is None:
+            return
+        sig = json.dumps([[st.op, st.enabled] for st in self.ms.processing.steps] + [self.ms.processing.saturation.enabled])
+        if sig == self._steps_sig and self.steps.count() == len(self.ms.processing.steps):
+            self._show_params()
+            return
+        self._steps_sig = sig
+        self._filling_steps = True
+        row = self.steps.currentRow()
+        self.steps.clear()
+        for i, st in enumerate(self.ms.processing.steps, start=1):
+            op = OPS.get(st.op)
+            label = f"{i}. {op.label if op else st.op}" + ("（仅显示）" if op and op.role == "display" else "")
+            it = QListWidgetItem(label)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(Qt.CheckState.Checked if st.enabled else Qt.CheckState.Unchecked)
+            if op:
+                it.setToolTip(op.help)
+            self.steps.addItem(it)
+        self.steps.setCurrentRow(min(row, self.steps.count() - 1) if row >= 0 else -1)
+        self.sat_on.blockSignals(True)
+        self.sat_on.setChecked(self.ms.processing.saturation.enabled)
+        self.sat_on.blockSignals(False)
+        self._filling_steps = False
+        self._show_params()
+
+    def _edit_processing(self, change: Any, select: int | None = None) -> None:
+        if self.ms is None:
+            return
+        self._push_undo()
+        try:
+            change(self.ms.processing)
+        except ValueError as e:
+            self._pop_undo()
+            QMessageBox.warning(self, "无法处理", str(e))
+            return
+        if select is not None:
+            self._filling_steps = True
+            self._fill_steps()
+            self.steps.setCurrentRow(select)
+            self._filling_steps = False
+        self._changed()
+
+    def add_step(self, op: str, **params: Any) -> None:
+        """Add a processing step (corrections go before the display steps)."""
+        from vexel.packs.sem.process import OPS, step
+
+        self.tabs.setCurrentIndex(TAB_PROCESSING)
+        new = step(op, **params)
+        steps = self.ms.processing.steps if self.ms is not None else []
+        index = len(steps)
+        if OPS[op].role == "correct":
+            index = next((i for i, s in enumerate(steps) if OPS.get(s.op) and OPS[s.op].role == "display"), len(steps))
+        self._edit_processing(lambda p: p.steps.insert(index, new), select=index)
+        if OPS[op].caution:
+            self.statusBar().showMessage(f"{OPS[op].label}：{OPS[op].caution}")
+
+    def remove_step(self, index: int) -> None:
+        if self.ms is None or not 0 <= index < len(self.ms.processing.steps):
+            return
+        self._edit_processing(lambda p: p.steps.pop(index), select=min(index, len(self.ms.processing.steps) - 2))
+
+    def move_step(self, index: int, delta: int) -> None:
+        from vexel.packs.sem.process import OPS
+
+        if self.ms is None:
+            return
+        steps = self.ms.processing.steps
+        j = index + delta
+        if not (0 <= index < len(steps) and 0 <= j < len(steps)):
+            return
+        if OPS[steps[index].op].role != OPS[steps[j].op].role:
+            self.statusBar().showMessage("“仅显示”的步骤总在校正步骤之后运行")
+            return
+
+        def swap(p: Any) -> None:
+            p.steps[index], p.steps[j] = p.steps[j], p.steps[index]
+
+        self._edit_processing(swap, select=j)
+
+    def set_step_params(self, index: int, **params: Any) -> None:
+        from vexel.packs.sem.process import OPS
+
+        if self.ms is None or not 0 <= index < len(self.ms.processing.steps):
+            return
+        st = self.ms.processing.steps[index]
+        merged = {**st.params, **params}
+        OPS[st.op].resolve(merged)
+        if merged != st.params:
+            self._edit_processing(lambda p: setattr(p.steps[index], "params", merged))
+
+    def set_saturation(self, **kw: Any) -> None:
+        if self.ms is None or self._filling_steps:
+            return
+        sat = self.ms.processing.saturation
+        if any(getattr(sat, k) != v for k, v in kw.items()):
+            self._edit_processing(lambda p: [setattr(p.saturation, k, v) for k, v in kw.items()])
+
+    def _step_toggled(self, it: QListWidgetItem) -> None:
+        if self._filling_steps or self.ms is None:
+            return
+        i = self.steps.row(it)
+        on = it.checkState() == Qt.CheckState.Checked
+        if 0 <= i < len(self.ms.processing.steps) and self.ms.processing.steps[i].enabled != on:
+            self._edit_processing(lambda p: setattr(p.steps[i], "enabled", on))
+
+    def _show_params(self) -> None:
+        from vexel.packs.sem.process import OPS
+
+        if self._filling_steps:
+            return
+        row = self.steps.currentRow()
+        steps = self.ms.processing.steps if self.ms is not None else []
+        key = (row, steps[row].op, json.dumps(steps[row].params, sort_keys=True)) if 0 <= row < len(steps) else (row,)
+        if key == self._params_key and (self._param_widgets or len(key) == 1):
+            return  # the form already shows this step (and is perhaps being edited)
+        self._params_key = key
+        while self.params_form.rowCount():
+            self.params_form.removeRow(0)
+        self._param_widgets = {}
+        if self.ms is None or not 0 <= row < len(self.ms.processing.steps):
+            self.step_help.setText("")
+            self._set_buttons()
+            return
+        st = self.ms.processing.steps[row]
+        op = OPS.get(st.op)
+        if op is None:
+            self.step_help.setText(f"未知的处理步骤：{st.op}")
+            return
+        vals = op.resolve(st.params)
+        for prm in op.params:
+            if prm.kind == "choice":
+                w: Any = QComboBox()
+                for value, label in prm.choices:
+                    w.addItem(label, value)
+                w.setCurrentIndex(max(0, [c[0] for c in prm.choices].index(vals[prm.name])))
+                w.currentIndexChanged.connect(lambda _i: self._param_timer.start())
+            elif prm.kind == "bool":
+                w = QCheckBox()
+                w.setChecked(bool(vals[prm.name]))
+                w.toggled.connect(lambda _b: self._param_timer.start())
+            elif prm.kind == "int":
+                w = QSpinBox()
+                w.setRange(int(prm.lo), int(min(prm.hi, 2**31 - 1)))
+                w.setValue(int(vals[prm.name]))
+                w.valueChanged.connect(lambda _x: self._param_timer.start())
+            else:
+                w = QDoubleSpinBox()
+                w.setDecimals(3 if prm.step < 0.1 else 2 if prm.step < 1 else 1)
+                w.setRange(prm.lo, prm.hi)
+                w.setSingleStep(prm.step)
+                w.setValue(float(vals[prm.name]))
+                w.valueChanged.connect(lambda _x: self._param_timer.start())
+            if prm.help:
+                w.setToolTip(prm.help)
+            self._param_widgets[prm.name] = (prm, w)
+            self.params_form.addRow(prm.label, w)
+        self.step_help.setText(op.help + (f"。注意：{op.caution}" if op.caution else ""))
+        self._set_buttons()
+
+    def _apply_params(self) -> None:
+        row = self.steps.currentRow()
+        if self.ms is None or not 0 <= row < len(self.ms.processing.steps) or not self._param_widgets:
+            return
+        params: dict[str, Any] = {}
+        for name, (prm, w) in self._param_widgets.items():
+            if prm.kind == "choice":
+                params[name] = w.currentData()
+            elif prm.kind == "bool":
+                params[name] = w.isChecked()
+            else:
+                params[name] = w.value()
+        st = self.ms.processing.steps[row]
+        self._params_key = (row, st.op, json.dumps({**st.params, **params}, sort_keys=True))  # keep the form being edited
+        self.set_step_params(row, **params)
+
+    def _choose_frames(self) -> None:
+        if self.path is None:
+            return
+        paths, _ = QFileDialog.getOpenFileNames(self, "选择同一位置的其他帧（本图为第 1 帧）", str(self.path.parent), "图像 (*.tif *.tiff *.png *.jpg *.jpeg *.bmp)")
+        paths = [p for p in paths if Path(p) != self.path]
+        if not paths:
+            return
+        out, _ = QFileDialog.getSaveFileName(self, "保存平均后的图", str(self.path.with_name(f"{self.path.stem}_avg{len(paths) + 1}.tif")), "TIFF (*.tif)")
+        if out:
+            self.average_with(paths, out)
+
+    def average_with(self, others: list[str | Path], out: str | Path) -> dict[str, Any] | None:
+        """Average this image with ``others`` (same place) into ``out`` and open the result."""
+        from vexel.packs.sem.process import average_files
+
+        if self.path is None:
+            return None
+        QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            info = average_files([self.path, *others], out, use_ocr=False)
+        except (ValueError, OSError) as e:
+            QGuiApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "无法平均", str(e))
+            return None
+        QGuiApplication.restoreOverrideCursor()
+        drift = max(float(np.hypot(*s)) for s in info["shifts"])
+        self.open_path(out, wait=True)
+        self.statusBar().showMessage(f"{info['frames']} 帧平均：噪声 {info['noise_single']:.3g} → {info['noise_mean']:.3g}；最大漂移 {drift:.2f} 像素")
+        return info
+
+    def _export_processed(self) -> None:
+        if self.path is None:
+            return
+        out, _ = QFileDialog.getSaveFileName(self, "导出处理后的图", str(self.path.with_name(self.path.stem + "_processed.tif")), "TIFF (*.tif)")
+        if out:
+            self.export_processed(out)
+
+    def export_processed(self, path: str | Path) -> Path | None:
+        from vexel.packs.sem.process import describe, write_derived
+
+        res = self._processed(block=True)
+        if res is None or self.path is None:
+            return None
+        out = write_derived(path, res.analysis, self.cal, {"operation": "图像处理", "source": self.path.name, "steps": describe(self.ms.processing)})
+        self.statusBar().showMessage(f"已导出：{Path(out).name}")
+        return Path(out)
 
 
 __all__ = ["SemWindow", "json"]

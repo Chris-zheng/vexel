@@ -24,6 +24,10 @@ profile       2 (+ ``params.width``)        grey levels along the line; edges, w
                                             pitch (see ``profile_edges``)
 ============  ============================  =================================================
 
+The record also keeps the image's processing chain (``processing``, see ``process.py``):
+grey-level tools (magic wand, profiles) measure on the corrected image, and leave out
+pixels marked as saturated.
+
 Physical sizes use the calibration's pixel size; with ``tilt`` set (the stage tilt in
 degrees, tilt axis horizontal in the image), vertical distances are divided by
 cos(tilt): the foreshortening of a tilted, flat sample.
@@ -40,6 +44,8 @@ from typing import Any, Literal
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
+
+from vexel.packs.sem.process import Processing
 
 SCHEMA_VERSION = 1
 Kind = Literal["line", "polyline", "polygon", "wand", "angle", "point", "circle", "ellipse", "profile"]
@@ -99,6 +105,7 @@ class MeasurementSet(BaseModel):
     image: dict[str, Any] = Field(default_factory=dict)  # file, sha256, shape [rows, cols], crop_rows
     scale: Scale = Field(default_factory=Scale)
     items: list[Item] = Field(default_factory=list)
+    processing: Processing = Field(default_factory=Processing)
     author: str = ""
     modified: str = ""
 
@@ -384,8 +391,11 @@ def _stats(a: list[float]) -> dict[str, float]:
 # -- values -----------------------------------------------------------------------------------
 
 
-def compute(item: Item, scale: Scale, image: np.ndarray | None = None) -> dict[str, Any]:
-    """All values of one item: physical sizes in metres (or pixels when uncalibrated), angles in degrees."""
+def compute(item: Item, scale: Scale, image: np.ndarray | None = None, mask: np.ndarray | None = None) -> dict[str, Any]:
+    """All values of one item: physical sizes in metres (or pixels when uncalibrated), angles in degrees.
+
+    ``mask``: pixels not to use (saturated); the magic wand leaves them out of its region
+    and a profile drops edges inside them and widths or spaces across them."""
     p = _phys(item.points, scale)
     px = np.asarray(item.points, float)
     out: dict[str, Any] = {"id": item.id, "kind": item.kind, "name": item.name, "unit": scale.unit}
@@ -401,7 +411,18 @@ def compute(item: Item, scale: Scale, image: np.ndarray | None = None) -> dict[s
         if k == "wand":
             if image is None:
                 raise ValueError("the magic wand needs the image")
-            mask = wand_region(image, item.points[0], float(item.params.get("tolerance", 0.5)), float(item.params.get("smooth", 1.0)))
+            x0, y0 = (int(round(v)) for v in item.points[0])
+            if mask is not None and 0 <= y0 < mask.shape[0] and 0 <= x0 < mask.shape[1] and mask[y0, x0]:
+                raise ValueError("the seed is in a saturated area")
+            region = wand_region(image, item.points[0], float(item.params.get("tolerance", 0.5)), float(item.params.get("smooth", 1.0)))
+            if mask is not None and mask.shape == region.shape and (region & mask).any():
+                from scipy import ndimage as ndi
+
+                region &= ~mask
+                lab, _ = ndi.label(region)
+                region = lab == lab[y0, x0]
+                out["note"] = "区域与饱和区相接，饱和像素未计入"
+            mask = region  # noqa: PLW2901 - from here on: the region
             poly_px = mask_outline(mask)
             out["pixels"] = int(mask.sum())
             out["outline"] = poly_px.tolist()
@@ -436,19 +457,32 @@ def compute(item: Item, scale: Scale, image: np.ndarray | None = None) -> dict[s
         dist_px, values = sample_profile(image, item.points[0], item.points[1], width)
         step = float(np.hypot(*(p[1] - p[0]))) / max(dist_px[-1], 1e-12)  # metres (or px) per sample
         edges = profile_edges(values, method, level, smooth)
-        pos = [e[0] * (dist_px[1] - dist_px[0]) for e in edges]  # samples -> px along the line
+        ds = dist_px[1] - dist_px[0]
+        bad = None
+        if mask is not None and mask.shape == np.shape(image) and mask.any():
+            bad = sample_profile(mask.astype(float), item.points[0], item.points[1], width)[1] > 0
+            if bad.any():
+                edges = [e for e in edges if not bad[min(int(round(e[0])), len(bad) - 1)]]
+                out["note"] = f"剖面经过饱和区（{bad.mean():.0%}）：其中的边缘和跨越它的线宽、间隔不计"
+            else:
+                bad = None
+        pos = [e[0] * ds for e in edges]  # samples -> px along the line
         polar = [e[1] for e in edges]
         to_phys = step
+
+        def clear(a: float, b: float) -> bool:  # no saturated sample between two edges
+            return bad is None or not bad[int(math.floor(a / ds)) : int(math.ceil(b / ds)) + 1].any()
+
         widths, spaces = [], []
         for (a, pa), (b, pb) in zip(zip(pos, polar), zip(pos[1:], polar[1:])):
-            if method == "peak":
+            if method == "peak" or not clear(a, b):
                 continue
             if pa > 0 and pb < 0:
                 widths.append((b - a) * to_phys)  # bright feature: rising then falling
             elif pa < 0 and pb > 0:
                 spaces.append((b - a) * to_phys)
-        same = [b - a for (a, pa), (b, pb) in _pairs_same_polarity(pos, polar)]
-        per = period(values)
+        same = [b - a for (a, pa), (b, pb) in _pairs_same_polarity(pos, polar) if clear(a, b)]
+        per = period(values) if bad is None else None  # the autocorrelation would include the saturated stretch
         out.update(method=method, level=level if method != "gradient" else None, width_px=width,
                    length=float(np.hypot(*(p[1] - p[0]))), edges=[x * to_phys for x in pos], polarity=polar,
                    widths=widths, spaces=spaces, width_mean=_stats(widths).get("mean"), width_sd=_stats(widths).get("sd"),
@@ -467,11 +501,11 @@ def _pairs_same_polarity(pos: list[float], polar: list[int]) -> list[tuple[tuple
     return out
 
 
-def compute_all(ms: MeasurementSet, image: np.ndarray | None = None) -> list[dict[str, Any]]:
+def compute_all(ms: MeasurementSet, image: np.ndarray | None = None, mask: np.ndarray | None = None) -> list[dict[str, Any]]:
     out = []
     for item in ms.items:
         try:
-            out.append(compute(item, ms.scale, image))
+            out.append(compute(item, ms.scale, image, mask))
         except ValueError as e:
             out.append({"id": item.id, "kind": item.kind, "name": item.name, "error": str(e)})
     return out

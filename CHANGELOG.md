@@ -1,5 +1,12 @@
 # 更新记录
 
+## Unreleased — SEM M3: image processing
+
+- Line levelling, Fourier destriping, background levelling, scan-line alignment, denoising, contrast/CLAHE and sharpening; the chain is kept in the measurement record.
+- Saturated areas are marked (never repaired) and left out of the magic wand and line profiles.
+- Before/after view, multi-frame alignment and averaging, processed-image export with the source calibration.
+- `vexel sem process` and `vexel sem average`; acceptance script `tests/benchmarks/sem_processing_eval.py`.
+
 ## 未发布
 
 - **SEM 手动测量**（SEM 计划 M2）：长度、折线、面积（多边形、自由画、魔棒）、角度、分类计数、圆与椭圆拟合、线剖面（阈值、最大梯度、亮边峰值三种边缘定义；线宽、间隔、按自相关与按边缘的周期）；倾斜校正（1/cos θ）；拖动修改、撤销与重做；测量按图像 SHA-256 自动保存并在重新打开时恢复；导出 Excel、CSV、带标注与比例尺的 PNG/SVG、可复现的测量记录。`vexel sem measure`、`vexel sem profile`。合成几何验收：误差均不超过 1 像素对应量，线宽 ≤ 0.5 像素、周期 ≤ 0.2 像素。新增依赖 openpyxl（Excel 导出）。

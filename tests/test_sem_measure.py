@@ -187,7 +187,7 @@ def test_exports(measured, tmp_path):
     assert [p.name for p in csvs] == ["m.csv", "m_edges.csv", "m_summary.csv"]
     assert "gate" in csvs[0].read_text(encoding="utf-8-sig")
     wb = openpyxl.load_workbook(measure_io.export_xlsx(ms, img, tmp_path / "m.xlsx"))
-    assert wb.sheetnames == ["测量", "汇总", "剖面边缘", "标定"]
+    assert wb.sheetnames == ["测量", "汇总", "剖面边缘", "标定", "图像处理"]
     png = measure_io.export_png(img, ms, tmp_path / "m.png", crop_rows=cal.crop_rows)
     assert Image.open(png).size == (600, 400)  # the data bar is cropped off
     svg = measure_io.export_svg(img, ms, tmp_path / "m.svg", crop_rows=cal.crop_rows).read_text(encoding="utf-8")

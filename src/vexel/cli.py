@@ -434,9 +434,8 @@ def cmd_sem_measure(args: argparse.Namespace) -> int:
         return 1
     t = measure_io.tables(ms, img)
     if args.json:
-        from vexel.packs.sem.measure import compute_all
-
-        print(json.dumps([{k: v for k, v in r.items() if k not in ("profile", "distance", "outline")} for r in compute_all(ms, img)], ensure_ascii=False, indent=2))
+        print(json.dumps([{k: v for k, v in r.items() if k not in ("profile", "distance", "outline")} for r in measure_io.values_of(ms, img)],
+                         ensure_ascii=False, indent=2))  # fmt: skip
     else:
         import pandas as pd
 
@@ -469,9 +468,10 @@ def cmd_sem_profile(args: argparse.Namespace) -> int:
     from vexel.packs.sem.measure import MeasurementSet, compute
 
     cal, base, img = _sem_measurements(args)
-    ms = MeasurementSet(image=base.image, scale=base.scale)
+    ms = MeasurementSet(image=base.image, scale=base.scale, processing=base.processing)  # on the image as the record processes it
     item = ms.add("profile", [args.start, args.end], params={"width": args.width, "method": args.method, "level": args.level, "smooth": args.smooth})
-    v = compute(item, ms.scale, img)
+    res = measure_io.processed(ms, img)
+    v = compute(item, ms.scale, res.analysis, res.mask)
     unit, f = measure_io.display_unit(ms)
     out = {k: v[k] for k in ("method", "level", "width_px", "length", "width_mean", "width_sd", "space_mean", "pitch", "pitch_edges", "peak_spacing")}
     out |= {"unit_of_lengths": "m" if ms.scale.pixel_size else "px", "edges": v["edges"], "polarity": v["polarity"], "widths": v["widths"], "spaces": v["spaces"]}
@@ -488,6 +488,80 @@ def cmd_sem_profile(args: argparse.Namespace) -> int:
     if v["pitch"]:
         print(f"pitch (autocorrelation): {num(v['pitch'] / f)} {unit}" + (f"; from edges {num(v['pitch_edges'] / f)} {unit}" if v.get("pitch_edges") else ""))
     print(f"calibration: {cal.describe()}")
+    return 0
+
+
+def cmd_sem_process(args: argparse.Namespace) -> int:
+    """Apply processing steps to an SEM image: report what changed, write the corrected image."""
+    from vexel.packs.sem import calibrate as semcal
+    from vexel.packs.sem import measure_io
+    from vexel.packs.sem import process as proc
+
+    if args.list:
+        for name, op in proc.OPS.items():
+            print(f"{name:11s} {op.label}（{'display only' if op.role == 'display' else 'correction'}）: {op.help}")
+            for prm in op.params:
+                extra = " | ".join(c[0] for c in prm.choices) if prm.choices else f"{prm.lo:g}..{prm.hi:g}" if prm.kind in ("int", "float") else "true|false"
+                print(f"    {prm.name}={prm.default}  ({extra}) {prm.label}")
+        return 0
+    if not args.image:
+        print("give an image (or --list)")
+        return 2
+    import numpy as np
+
+    cal, ms, img = _sem_measurements(args)
+    if args.step:
+        ms.processing.steps = [proc.parse_step(t) for t in args.step]
+    if args.no_saturation:
+        ms.processing.saturation.enabled = False
+    res = measure_io.processed(ms, img)
+    crop = ms.image.get("crop_rows") or None
+    micro_before = np.asarray(img[:crop] if crop else img, np.float64)
+    micro_after = res.analysis[:crop] if crop else res.analysis
+    report = {"image": str(args.image), "steps": proc.describe(ms.processing), "saturation": res.saturation,
+              "noise_before": proc.noise_sigma(micro_before), "noise_after": proc.noise_sigma(micro_after), "notes": res.notes}  # fmt: skip
+    if args.save and ms.image.get("sha256") == cal.sha256:
+        measure_io.autosave(ms)
+        report["record"] = str(measure_io.record_path(cal.sha256))
+    if args.output:
+        report["output"] = str(proc.write_derived(args.output, res.analysis, cal, {"operation": "图像处理", "source": Path(args.image).name,
+                                                                                   "steps": report["steps"]}))  # fmt: skip
+    if args.picture:
+        from PIL import Image
+
+        Image.fromarray(res.display).save(args.picture)
+        report["picture"] = str(args.picture)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, default=float))
+        return 0
+    print(f"{Path(args.image).name}: calibration {cal.describe()}")
+    for line in report["steps"] or ["no processing steps"]:
+        print(f"  {line}")
+    sat = res.saturation
+    if sat:
+        print(f"saturated pixels: {sat.get('pixels', 0)} ({sat.get('fraction', 0):.3%}) in {sat.get('regions', 0)} areas" if sat.get("pixels") else "no saturated areas")
+    print(f"pixel noise (sd): {report['noise_before']:.4g} -> {report['noise_after']:.4g}")
+    for n in res.notes:
+        print(f"note: {n}")
+    for key in ("record", "output", "picture"):
+        if key in report:
+            print(f"wrote {report[key]}")
+    return 0
+
+
+def cmd_sem_average(args: argparse.Namespace) -> int:
+    """Align and average frames of the same place into one image (calibration of the first)."""
+    from vexel.packs.sem import process as proc
+
+    info = proc.average_files(args.frames, args.output, align=not args.no_align, use_ocr=not args.no_ocr)
+    if args.json:
+        print(json.dumps(info, ensure_ascii=False, indent=2, default=float))
+        return 0
+    print(f"averaged {info['frames']} frames into {info['output']}")
+    for f, (dy, dx) in zip(args.frames, info["shifts"]):
+        print(f"  {Path(f).name}: moved by dx {dx:+.2f}, dy {dy:+.2f} px")
+    print(f"pixel noise (sd): {info['noise_single']:.4g} (first frame) -> {info['noise_mean']:.4g}")
+    print(f"calibration: {info['calibration'] or 'none (the first frame is not calibrated)'}")
     return 0
 
 
@@ -926,7 +1000,7 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--workers", type=int)
     b.set_defaults(func=cmd_batch_run)
 
-    p = sub.add_parser("sem", help="SEM module: calibration (pixel size from metadata, data bar or by hand)")
+    p = sub.add_parser("sem", help="SEM module: calibration, measurement, image processing")
     ssub = p.add_subparsers(dest="sem_command", required=True)
     c = ssub.add_parser("calibrate", help="pixel size of SEM images: instrument metadata, else the data bar's scale bar (OCR)")
     c.add_argument("files", nargs="+")
@@ -959,6 +1033,28 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--json", action="store_true")
     c.add_argument("--no-ocr", action="store_true")
     c.set_defaults(func=cmd_sem_profile)
+    c = ssub.add_parser("process", help="image processing: line levelling, destriping, background, scan-line alignment, denoising, contrast")
+    c.add_argument("image", nargs="?")
+    c.add_argument("-s", "--step", action="append", metavar="OP[:KEY=VALUE,...]",
+                   help="a processing step, in order (repeatable), e.g. -s line_level -s denoise:method=nlm,strength=1.2; "
+                        "without -s: the steps saved in the image's record")  # fmt: skip
+    c.add_argument("--list", action="store_true", help="list the steps and their settings")
+    c.add_argument("-o", "--output", help="write the corrected image (32-bit float TIFF; Vexel opens it with the same calibration)")
+    c.add_argument("--picture", help="write the display picture (PNG), contrast and sharpening applied")
+    c.add_argument("--save", action="store_true", help="save the steps in the image's record (the SEM window then uses them)")
+    c.add_argument("--no-saturation", action="store_true", help="do not mark saturated pixels")
+    c.add_argument("--record", help="measurement record (JSON) whose steps to use")
+    c.add_argument("--tilt", type=float)
+    c.add_argument("--json", action="store_true")
+    c.add_argument("--no-ocr", action="store_true")
+    c.set_defaults(func=cmd_sem_process)
+    c = ssub.add_parser("average", help="align (sub-pixel) and average frames of the same place into one image")
+    c.add_argument("frames", nargs="+")
+    c.add_argument("-o", "--output", required=True, help="the averaged image (32-bit float TIFF)")
+    c.add_argument("--no-align", action="store_true", help="average without aligning")
+    c.add_argument("--json", action="store_true")
+    c.add_argument("--no-ocr", action="store_true")
+    c.set_defaults(func=cmd_sem_average)
     c = ssub.add_parser("info", help="instrument metadata of an SEM image")
     c.add_argument("file")
     c.add_argument("--json", action="store_true")
