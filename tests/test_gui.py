@@ -626,3 +626,66 @@ def test_sem_window_calibrates_confirms_and_takes_manual_input(app, tmp_path, mo
     monkeypatch.setattr("vexel.ui.sem_window.QMessageBox.warning", lambda *a: None)
     assert not w.apply_manual(pixel_size="3")  # no unit: refused
     _dispose(w)
+
+
+def test_sem_window_measures_edits_undoes_exports_and_restores(app, tmp_path, monkeypatch):
+    from qtpy.QtCore import QPointF
+
+    from vexel.synthetic.sem import write_sem
+    from vexel.ui.sem_window import SemWindow
+
+    monkeypatch.setenv("VEXEL_HOME", str(tmp_path / "home"))
+    path = tmp_path / "t.tif"
+    write_sem(path, "thermo", pixel_size=2.5e-9, rows=300, cols=400)
+    w = SemWindow()
+    w.open_path(path, wait=True)
+    assert w.ms is not None and not w.ms.items and all(a.isEnabled() for a in w.tool_actions.values())
+
+    # draw with the canvas the way a person does: a two-click line
+    w.set_tool("line")
+    w.view._add_point(QPointF(10, 10))
+    w.view._add_point(QPointF(110, 10))
+    assert [i.kind for i in w.ms.items] == ["line"] and "250 nm" in w.table.item(0, 2).text()
+    # a polygon closed with Enter, a count, a profile with the panel's settings
+    w.set_tool("polygon")
+    for x, y in [(200, 50), (260, 50), (260, 90)]:
+        w.view._add_point(QPointF(x, y))
+    w.view.finish()
+    w.category.setCurrentText("缺陷")
+    w.set_tool("point")
+    for x, y in [(30, 200), (40, 210)]:
+        w.view._add_point(QPointF(x, y))
+    w.set_tool("pan")  # leaving the count tool ends the count
+    w.edge_method.setCurrentIndex(1)
+    w.add_measurement("profile", [[10, 250], [390, 250]])
+    assert [i.kind for i in w.ms.items] == ["line", "polygon", "point", "profile"]
+    assert w.ms.items[2].category == "缺陷" and w.ms.items[3].params["method"] == "gradient"
+    assert w.profile_plot.isVisibleTo(w)  # the new profile is selected and plotted
+
+    # edit: drag the line's end, rename it, delete the polygon; undo and redo
+    w._point_moved(1, 1, 210.0, 10.0)
+    assert "500 nm" in w.table.item(0, 2).text()
+    w.table.item(0, 3).setText("gate")
+    assert w.ms.get(1).name == "gate"
+    w._select(2)
+    w.delete_selected()
+    assert [i.id for i in w.ms.items] == [1, 3, 4]
+    w.undo()
+    assert [i.id for i in w.ms.items] == [1, 2, 3, 4]
+    w.redo()
+    assert [i.id for i in w.ms.items] == [1, 3, 4]
+    w.tilt_on.setChecked(True)
+    w.tilt.setValue(60)
+    assert w.ms.scale.tilt == 60
+
+    # exports
+    for name in ("m.xlsx", "m.csv", "m.png", "m.svg", "m.json"):
+        assert w.export(tmp_path / name)[0].is_file()
+    _dispose(w)
+
+    # reopening the image restores its measurements (kept by the file's SHA-256)
+    w2 = SemWindow()
+    w2.open_path(path, wait=True)
+    assert [i.id for i in w2.ms.items] == [1, 3, 4] and w2.ms.get(1).name == "gate" and w2.tilt_on.isChecked()
+    assert w2.table.rowCount() == 3
+    _dispose(w2)

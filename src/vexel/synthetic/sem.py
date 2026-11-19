@@ -223,3 +223,32 @@ def write_set(folder: str | Path, *, seed: int = 0) -> list[tuple[Path, SemTruth
         p = folder / f"{style}.tif"
         out.append((p, write_sem(p, style, pixel_size=px, rows=rows, cols=cols, bar_height=bh or 60, seed=seed + i)))
     return out
+
+
+def line_space(rows: int = 200, cols: int = 800, *, width: float = 13.3, pitch: float = 31.7, offset: float = 5.2,
+               edge_peaks: bool = False, blur: float = 1.5, noise: float = 0.03, seed: int = 0) -> np.ndarray:  # fmt: skip
+    """Vertical bright lines of exact (sub-pixel) ``width`` and ``pitch``, pixels: a top-down
+    line/space pattern. ``edge_peaks`` adds the bright edges SEM shows at steps (the line
+    body is then only slightly brighter than the space). Float image, 0..1."""
+    from scipy import ndimage as ndi
+
+    x = np.arange(cols, dtype=float)
+
+    def cover(a: float, b: float) -> np.ndarray:  # fraction of each pixel [i, i+1) inside [a, b)
+        return np.clip(np.minimum(x + 1, b) - np.maximum(x, a), 0, 1)
+
+    row = np.zeros(cols)
+    edges = np.zeros(cols)
+    k = 0
+    while offset + k * pitch < cols:
+        s = offset + k * pitch
+        row += cover(s, s + width)
+        if edge_peaks:
+            edges += cover(s - 1, s + 1) + cover(s + width - 1, s + width + 1)
+        k += 1
+    img = 0.2 + (0.15 if edge_peaks else 0.6) * row + 0.6 * edges
+    img = np.tile(img, (rows, 1))
+    if blur:
+        img = ndi.gaussian_filter(img, blur)
+    rng = np.random.default_rng(seed)
+    return np.clip(img + rng.normal(0, noise, img.shape), 0, 1)

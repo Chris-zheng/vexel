@@ -396,6 +396,101 @@ def cmd_sem_calibrate(args: argparse.Namespace) -> int:
     return 0 if all(c.ok for c in results) else 1
 
 
+def _xy(text: str) -> tuple[float, float]:
+    try:
+        x, y = (float(v) for v in text.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected X,Y in pixels, got {text!r}") from None
+    return x, y
+
+
+def _sem_measurements(args: argparse.Namespace) -> tuple[Any, Any, Any]:
+    from vexel.packs.sem import calibrate as semcal
+    from vexel.packs.sem import measure_io
+
+    cal = semcal.for_file(args.image, use_ocr=not getattr(args, "no_ocr", False))
+    if getattr(args, "record", None):
+        from vexel.packs.sem.measure import MeasurementSet
+
+        ms = MeasurementSet.load(args.record)
+        if ms.image.get("sha256") and ms.image["sha256"] != cal.sha256:
+            print(f"warning: the record was made on {ms.image.get('file')}, not on this image", file=sys.stderr)
+    else:
+        ms = measure_io.load_record(cal.sha256) or measure_io.new_set(args.image, cal)
+    tilt = args.tilt if getattr(args, "tilt", None) is not None else ms.scale.tilt
+    from vexel.packs.sem.measure import scale_from
+
+    ms.scale = scale_from(cal, tilt)  # values follow the calibration in force
+    return cal, ms, semcal.load_image(args.image)
+
+
+def cmd_sem_measure(args: argparse.Namespace) -> int:
+    """Recompute and export the measurements of an image (its saved record, or --record)."""
+    from vexel.packs.sem import measure_io
+
+    cal, ms, img = _sem_measurements(args)
+    if not ms.items:
+        print("no measurements for this image (draw them in the SEM window, or pass --record)")
+        return 1
+    t = measure_io.tables(ms, img)
+    if args.json:
+        from vexel.packs.sem.measure import compute_all
+
+        print(json.dumps([{k: v for k, v in r.items() if k not in ("profile", "distance", "outline")} for r in compute_all(ms, img)], ensure_ascii=False, indent=2))
+    else:
+        import pandas as pd
+
+        with pd.option_context("display.max_columns", 50, "display.width", 200):
+            print(t["measurements"].dropna(axis=1, how="all").to_string(index=False))
+        print(f"calibration: {cal.describe()}" + (f"; tilt correction {ms.scale.tilt:.1f}°" if ms.scale.tilt else ""))
+    for out in args.output or []:
+        p = Path(out)
+        suffix = p.suffix.lower()
+        if suffix == ".xlsx":
+            written = [measure_io.export_xlsx(ms, img, p)]
+        elif suffix == ".csv":
+            written = measure_io.export_csv(ms, img, p)
+        elif suffix == ".png":
+            written = [measure_io.export_png(img, ms, p, crop_rows=cal.crop_rows)]
+        elif suffix == ".svg":
+            written = [measure_io.export_svg(img, ms, p, crop_rows=cal.crop_rows)]
+        elif suffix == ".json":
+            written = [ms.save(p)]
+        else:
+            raise ValueError(f"unknown output type {suffix!r}: use .xlsx, .csv, .png, .svg or .json")
+        for w in written:
+            print(f"wrote {w}")
+    return 0
+
+
+def cmd_sem_profile(args: argparse.Namespace) -> int:
+    """One line profile from the command line: edges, widths, spaces and pitch (e.g. CD on a line/space pattern)."""
+    from vexel.packs.sem import measure_io
+    from vexel.packs.sem.measure import MeasurementSet, compute
+
+    cal, base, img = _sem_measurements(args)
+    ms = MeasurementSet(image=base.image, scale=base.scale)
+    item = ms.add("profile", [args.start, args.end], params={"width": args.width, "method": args.method, "level": args.level, "smooth": args.smooth})
+    v = compute(item, ms.scale, img)
+    unit, f = measure_io.display_unit(ms)
+    out = {k: v[k] for k in ("method", "level", "width_px", "length", "width_mean", "width_sd", "space_mean", "pitch", "pitch_edges", "peak_spacing")}
+    out |= {"unit_of_lengths": "m" if ms.scale.pixel_size else "px", "edges": v["edges"], "polarity": v["polarity"], "widths": v["widths"], "spaces": v["spaces"]}
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return 0
+    num = measure_io.num
+    print(f"profile {args.start} -> {args.end}, {args.width} px wide; edge definition: {args.method}" + (f" {args.level:.0%}" if args.method != "gradient" else ""))
+    print(f"edges: {len(v['edges'])}  (" + ", ".join(f"{num(e / f)}{'↑' if p > 0 else '↓'}" for e, p in zip(v["edges"], v["polarity"])) + f") {unit}")
+    if v["widths"]:
+        print(f"width (bright features): {num(v['width_mean'] / f)} ± {num(v['width_sd'] / f)} {unit}  (n={len(v['widths'])})")
+    if v["spaces"]:
+        print(f"space: {num(v['space_mean'] / f)} {unit}")
+    if v["pitch"]:
+        print(f"pitch (autocorrelation): {num(v['pitch'] / f)} {unit}" + (f"; from edges {num(v['pitch_edges'] / f)} {unit}" if v.get("pitch_edges") else ""))
+    print(f"calibration: {cal.describe()}")
+    return 0
+
+
 def cmd_sem_info(args: argparse.Namespace) -> int:
     from vexel.packs.sem.metadata import read_metadata
 
@@ -844,6 +939,26 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--no-metadata", action="store_true", help="ignore instrument metadata (to check the data-bar route against it)")
     c.add_argument("--fresh", action="store_true", help="ignore a recorded confirmation")
     c.set_defaults(func=cmd_sem_calibrate)
+    c = ssub.add_parser("measure", help="recompute and export an image's measurements (table, Excel, annotated PNG/SVG, record)")
+    c.add_argument("image")
+    c.add_argument("--record", help="measurement record (JSON) to use instead of the one saved for this image")
+    c.add_argument("-o", "--output", action="append", help="write .xlsx, .csv, .png, .svg or .json (repeatable)")
+    c.add_argument("--tilt", type=float, help="tilt correction, degrees (vertical distances / cos(tilt)); 0 turns it off")
+    c.add_argument("--json", action="store_true")
+    c.add_argument("--no-ocr", action="store_true")
+    c.set_defaults(func=cmd_sem_measure)
+    c = ssub.add_parser("profile", help="a line profile: edges, line widths, spaces and pitch (e.g. CD on lines and spaces)")
+    c.add_argument("image")
+    c.add_argument("--from", dest="start", type=_xy, required=True, metavar="X,Y", help="start, pixels")
+    c.add_argument("--to", dest="end", type=_xy, required=True, metavar="X,Y", help="end, pixels")
+    c.add_argument("--width", type=int, default=5, help="pixels averaged across the line (default 5)")
+    c.add_argument("--method", choices=["threshold", "gradient", "peak"], default="threshold", help="edge definition (default threshold)")
+    c.add_argument("--level", type=float, default=0.5, help="threshold level between low and high grey (default 0.5)")
+    c.add_argument("--smooth", type=float, default=1.0, help="Gaussian smoothing along the profile, samples (default 1)")
+    c.add_argument("--tilt", type=float)
+    c.add_argument("--json", action="store_true")
+    c.add_argument("--no-ocr", action="store_true")
+    c.set_defaults(func=cmd_sem_profile)
     c = ssub.add_parser("info", help="instrument metadata of an SEM image")
     c.add_argument("file")
     c.add_argument("--json", action="store_true")
