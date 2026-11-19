@@ -2,6 +2,9 @@
 
 ## 未发布
 
+- **模块化平台**（SEM 计划 M0）：微流控液滴与 SEM 作为独立模块运行；`vexel gui` 先显示模块启动器，按文件类型自动进入对应模块；每个窗口有“模块”菜单；`vexel gui --module`、`vexel modules`。SEM 模块为“开发中”（`VEXEL_PREVIEW=1` 可打开预览：识别 Thermo Fisher、Zeiss、TESCAN、Hitachi/JEOL 的元数据）。液滴模块行为不变。设计见 docs/modules.md。
+- **组织策略**：管理员可用系统位置的 `policy.json` 锁定离线运行（只允许列出的内部服务）、禁止发送图像；`vexel policy`；规划模型设置窗口与诊断包显示策略。
+- **离线安装包**：`scripts/build_offline_bundle.py` 生成含 uv、Python 与全部依赖的安装包，用于无法联网的计算机；在 macOS 上实测离线安装与分析，CI 每周在 Windows、Linux 上实测。
 - 跨平台持续集成：Linux、Windows 每次提交运行全部测试，macOS 与回归基准每周；每次都构建 wheel 并按测试者的方式安装试运行（`.github/workflows/ci.yml`）。
 - `scripts/build_dist.sh`：生成 wheel、由 `uv.lock` 导出的依赖版本约束文件和 SHA-256 校验值；测试者用 `uv tool install <wheel> -c <constraints>` 安装到与测试相同的版本。
 - 内测说明分海外与中国大陆两套安装方式（大陆使用 USTC 与清华镜像）。

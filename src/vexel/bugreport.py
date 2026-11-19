@@ -60,6 +60,11 @@ def environment() -> dict[str, Any]:
                 planning[name]["base_url"] = "custom"
     out["planning_models"] = planning
     out["vexel_home_set"] = "VEXEL_HOME" in os.environ
+    from vexel.policy import load_policy
+
+    policy = load_policy()
+    out["policy"] = {"source": policy.source, "offline": policy.offline, "allowed_hosts": list(policy.allowed_hosts),
+                     "allow_images": policy.allow_images, "error": policy.error}  # fmt: skip
     try:
         from vexel.ops import list_ops
         from vexel.plugins import file_status, load_plugins, model_cards

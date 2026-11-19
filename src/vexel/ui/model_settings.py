@@ -26,7 +26,7 @@ class ModelSettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("规划模型设置")
         self.resize(620, 400)
-        self.cfg = models.load_config()
+        self.cfg = models.load_config(policy=False)  # the person's own settings; the policy is applied when used
         v = QVBoxLayout(self)
         v.addWidget(heading("自动规划时请哪个大模型帮忙"))
         v.addWidget(muted("模型只帮助理解你的目标、在固定范围内建议设置；结果仍由 Vexel 的算子计算，方案由你确认。"
@@ -35,8 +35,20 @@ class ModelSettingsDialog(QDialog):
         self.provider = QComboBox()
         for name in models.PROVIDERS:
             self.provider.addItem(models.LABELS[name], name)
+        from vexel.policy import load_policy
+
+        self.policy = load_policy()
+        for i, name in enumerate(models.PROVIDERS):
+            host = models.tier_host(name, self.cfg)
+            if host is not None and not self.policy.host_allowed(host):
+                self.provider.model().item(i).setEnabled(False)
         current = next((n for n in self.cfg["order"] if n != "rules"), "rules")
         self.provider.setCurrentIndex(max(0, self.provider.findData(current)))
+        if self.policy.source is not None:
+            banner = QLabel(self.policy.describe())
+            banner.setObjectName("notes")
+            banner.setWordWrap(True)
+            v.addWidget(banner)
         self.model_edit = QLineEdit()
         self.url_edit = QLineEdit()
         self.key_label = QLabel()
@@ -77,7 +89,7 @@ class ModelSettingsDialog(QDialog):
         url_key = "url" if name == "local" else "base_url"
         self.url_edit.setEnabled(name in ("local", *models.COMPATIBLE))
         self.url_edit.setText(tier.get(url_key, ""))
-        self.images_check.setEnabled(has_model)
+        self.images_check.setEnabled(has_model and self.policy.allow_images)
         self.images_check.setChecked(bool(tier.get("send_images")))
         env = tier.get("api_key_env") or ("ANTHROPIC_API_KEY" if name == "claude" else "")
         if env:
@@ -106,6 +118,10 @@ class ModelSettingsDialog(QDialog):
     def test(self) -> bool:
         cfg = self._collect()
         tier = models.tiers(cfg)[0]
+        host = models.tier_host(tier.name, cfg)
+        if host is not None and not self.policy.host_allowed(host):
+            self.result.setText(f"不可用：管理员策略禁止访问 {host}")
+            return False
         ok, why = tier.available()
         if not ok:
             self.result.setText(f"不可用：{why}")

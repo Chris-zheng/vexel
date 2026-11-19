@@ -327,7 +327,35 @@ def cmd_report(args: argparse.Namespace) -> int:
 def cmd_gui(args: argparse.Namespace) -> int:
     from vexel.ui.app import main as gui_main
 
-    return gui_main([args.input] if args.input else [])
+    return gui_main(([args.input] if args.input else []) + (["--module", args.module] if args.module else []))
+
+
+def cmd_policy(args: argparse.Namespace) -> int:
+    from vexel.agent import models
+    from vexel.policy import default_path, load_policy
+
+    policy = load_policy()
+    print(policy.describe())
+    if policy.source is None:
+        print(f"(an administrator can place one at {default_path()} or point VEXEL_POLICY at a file)")
+    cfg = models.load_config()
+    print("planning models in effect: " + " -> ".join(cfg["order"]))
+    return 0
+
+
+def cmd_modules(args: argparse.Namespace) -> int:
+    from vexel.modules import for_path, modules
+
+    if args.file:
+        best, scores = for_path(args.file)
+        for mid, score in sorted(scores.items(), key=lambda kv: -kv[1]):
+            print(f"{mid:<10} {score:.2f}")
+        print(f"-> {best.id if best else 'unclear: choose in the launcher or pass --module'}")
+        return 0
+    for m in modules():
+        print(f"{m.id:<10} {m.name}（{m.name_en}）{'' if m.ready else '  [in development]'}")
+        print(f"{'':<10} {m.description}")
+    return 0
 
 
 def _speed(text: str) -> float | None:
@@ -580,6 +608,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("gui", help="open the desktop interface")
     p.add_argument("input", nargs="?", help="data to open on start")
+    p.add_argument("--module", help="open this module directly (see `vexel modules`)")
     p.set_defaults(func=cmd_gui)
 
     p = sub.add_parser("probe", help="fingerprint a dataset: statistics, motion, objects, channel roles")
@@ -741,6 +770,13 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--max-frames", type=int)
     b.add_argument("--workers", type=int)
     b.set_defaults(func=cmd_batch_run)
+
+    p = sub.add_parser("policy", help="show the organisation policy in force (offline mode, allowed hosts)")
+    p.set_defaults(func=cmd_policy)
+
+    p = sub.add_parser("modules", help="list application modules; with a file, which module it belongs to")
+    p.add_argument("file", nargs="?")
+    p.set_defaults(func=cmd_modules)
 
     p = sub.add_parser("plugins", help="installed plugins and models: operators, licences, training data, weight files")
     p.add_argument("--json", action="store_true")

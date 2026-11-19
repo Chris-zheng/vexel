@@ -1,7 +1,7 @@
 # Vexel
 
 智能体原生的科学图像分析平台：LLM 负责规划，确定性算子负责计算，每个结果可复核、可复现。
-使用说明见 [用户手册](docs/user_manual.md)，规划见 [vexel_roadmap_0.0.4.md](vexel_roadmap_0.0.4.md)（下一步见 [下阶段开发任务评估](docs/next_phase_evaluation.md)）。当前版本：**0.6.0b1 内测版**（[更新记录](CHANGELOG.md)，[内测说明](docs/closed_testing/README.md)，[微流控开发进度评估](docs/progress_microfluidics.md)）。Phase 1–6 完成：引擎与 CLI、液滴包与质控、流式执行（验收见 [docs/phase3_acceptance.md](docs/phase3_acceptance.md)）、界面与人工纠错（见 [docs/corrections.md](docs/corrections.md)；“15 分钟上手”待真人测试，方案见 [docs/usability_test.md](docs/usability_test.md)）、智能体（探针、规划器、配方记忆、可选 Claude / DeepSeek / 通义千问 / Gemini / 本地模型 / 离线规则、MCP 服务；验收见 [docs/phase5_acceptance.md](docs/phase5_acceptance.md)）。批处理与分组统计（`vexel batch`，界面里的“批量分析…”；以重复为统计单位；导出可独立复现的脚本；中英文方法段落；验收见 [docs/phase6_acceptance.md](docs/phase6_acceptance.md)）；模型插件接口已确定（[docs/plugin_interface.md](docs/plugin_interface.md)）。Phase 7 进行中：跨平台 CI（`.github/workflows/ci.yml`）与可复现安装（`scripts/build_dist.sh` 生成 wheel、依赖约束与校验值）已做，安装包与签名待做。界面截图见 [docs/screenshots](docs/screenshots/README.md)。
+使用说明见 [用户手册](docs/user_manual.md)，规划见 [vexel_roadmap_0.0.5.md](vexel_roadmap_0.0.5.md)（SEM 模块见 [开发计划书](docs/sem_module_plan.md)）（下一步见 [下阶段开发任务评估](docs/next_phase_evaluation.md)）。当前版本：**0.6.0b1 内测版**（[更新记录](CHANGELOG.md)，[内测说明](docs/closed_testing/README.md)，[微流控开发进度评估](docs/progress_microfluidics.md)）。Phase 1–6 完成：引擎与 CLI、液滴包与质控、流式执行（验收见 [docs/phase3_acceptance.md](docs/phase3_acceptance.md)）、界面与人工纠错（见 [docs/corrections.md](docs/corrections.md)；“15 分钟上手”待真人测试，方案见 [docs/usability_test.md](docs/usability_test.md)）、智能体（探针、规划器、配方记忆、可选 Claude / DeepSeek / 通义千问 / Gemini / 本地模型 / 离线规则、MCP 服务；验收见 [docs/phase5_acceptance.md](docs/phase5_acceptance.md)）。批处理与分组统计（`vexel batch`，界面里的“批量分析…”；以重复为统计单位；导出可独立复现的脚本；中英文方法段落；验收见 [docs/phase6_acceptance.md](docs/phase6_acceptance.md)）；模型插件接口已确定（[docs/plugin_interface.md](docs/plugin_interface.md)）。Phase 7 进行中：跨平台 CI（`.github/workflows/ci.yml`）与可复现安装（`scripts/build_dist.sh` 生成 wheel、依赖约束与校验值）已做，安装包与签名待做。界面截图见 [docs/screenshots](docs/screenshots/README.md)。
 
 ## 快速开始
 
@@ -51,7 +51,7 @@ uv run vexel run   my_video.avi -r my_recipe.json --set seg.min_score=0.5
 
 | 命令 | 作用 |
 | :--- | :--- |
-| `vexel gui` | 打开桌面界面 |
+| `vexel gui` | 打开桌面界面（模块启动器；`--module` 直接进入某个模块） |
 | `vexel report` | 重新生成一次运行的 HTML 报告 |
 | `vexel run` | 在录好的数据上执行配方 |
 | `vexel probe` | 数据指纹：亮度、噪声、运动、液滴尺寸、细胞、通道角色；可存四宫格诊断图 |
@@ -70,6 +70,8 @@ uv run vexel run   my_video.avi -r my_recipe.json --set seg.min_score=0.5
 | `vexel synth` | 生成带真值的合成液滴视频 |
 | `vexel convert` | 转为 OME-Zarr 多分辨率金字塔 |
 | `vexel batch` | 批量：`init` 从文件夹起草设计表，`run` 用一个配方分析表里每个文件（无人值守、可续跑），按组统计并导出报告、方法段落与复现脚本 |
+| `vexel modules` | 列出平台模块（微流控液滴、SEM）；给出文件时判断它属于哪个模块 |
+| `vexel policy` | 显示当前生效的组织策略（离线运行、允许的内部服务）与实际可用的规划模型 |
 | `vexel plugins` | 已安装的插件与模型：算子、许可证、训练数据、权重文件状态 |
 | `vexel bugreport` | 导出诊断包（版本、设置、配方、汇总；不含图像和密钥），用于报告问题 |
 | `vexel licenses` | 已安装依赖的许可证清单，标出 GPL / 非商用项 |

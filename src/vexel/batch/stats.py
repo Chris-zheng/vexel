@@ -45,7 +45,7 @@ class Metric:
     digits: int = 3
 
 
-METRICS = [
+DROPLET_METRICS = [
     Metric("droplets.diameter_mean", "平均直径", "Mean diameter", unit_key="droplets.length_unit"),
     Metric("droplets.diameter_cv_percent", "粒径 CV", "Diameter CV", unit="%"),
     Metric("droplets.volume_mean_pl", "平均体积", "Mean volume", unit="pL"),
@@ -62,6 +62,7 @@ METRICS = [
     Metric("droplets.n_droplets", "液滴数", "Droplets counted", test=False, digits=0),
     Metric("flags.flagged_fraction", "可疑液滴比例", "Fraction flagged for review", test=False),
 ]
+METRICS = DROPLET_METRICS  # earlier name
 
 
 @dataclass
@@ -186,7 +187,8 @@ def _compare(metric: Metric, data: dict[str, np.ndarray]) -> list[dict[str, Any]
     return rows + pairs
 
 
-def analyse(results: pd.DataFrame) -> Analysis:
+def analyse(results: pd.DataFrame, metric_defs: list[Metric] | None = None) -> Analysis:
+    """Group statistics over ``metric_defs`` (default: the droplet module's metrics)."""
     notes: list[tuple[str, str]] = []
     empty = Analysis([], pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), notes)
     if results.empty or "status" not in results:
@@ -196,7 +198,7 @@ def analyse(results: pd.DataFrame) -> Analysis:
         notes.append(("没有成功完成的文件，无法统计。", "No file completed; nothing to summarise."))
         return empty
     metrics = []
-    for m in METRICS:
+    for m in metric_defs if metric_defs is not None else DROPLET_METRICS:
         if m.key in ok.columns and _num(ok[m.key]).notna().any():
             unit = m.unit
             if m.unit_key and m.unit_key in ok.columns:

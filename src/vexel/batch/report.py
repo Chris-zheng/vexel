@@ -131,6 +131,7 @@ from vexel.batch.runner import FileOutcome, flatten_summary, results_frame
 from vexel.batch.design import Design, Row
 from vexel.batch import stats
 from vexel.engine import Recipe, run_recipe
+from vexel.modules import batch_metrics
 from vexel.readers import open_volume
 
 HERE = Path(__file__).resolve().parent
@@ -161,7 +162,7 @@ def main() -> int:
                         result_digest=result.result_digest,
                         metrics=flatten_summary(json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))))
         outcomes.append(o)
-    analysis = stats.analyse(results_frame(Design(rows=rows), outcomes))
+    analysis = stats.analyse(results_frame(Design(rows=rows), outcomes), batch_metrics(recipe))
     stats.write_tables(analysis, args.out)
     differ = [o.id for o in outcomes if o.result_digest != recorded[o.id]["result_digest"]]
     print()

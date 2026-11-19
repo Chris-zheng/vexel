@@ -236,7 +236,9 @@ def run_batch(
         save("interrupted")
         raise
 
-    analysis = stats.analyse(results_frame(design, outcomes))
+    from vexel.modules import batch_metrics
+
+    analysis = stats.analyse(results_frame(design, outcomes), batch_metrics(base))
     stats.write_tables(analysis, out)
     record["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     record["duration_s"] = round((datetime.now(timezone.utc) - started).total_seconds(), 1)

@@ -133,8 +133,17 @@ def register_op(
 
 def load_builtin_ops() -> None:
     """Import every module that registers operators (idempotent)."""
+    import importlib
+
+    from vexel.modules import packs
     from vexel.ops import classify, measure, preprocess, segment, stats, track  # noqa: F401
-    from vexel.packs.droplet import ops as _droplet  # noqa: F401
+
+    for pack in packs():  # each module's operators
+        try:
+            importlib.import_module(f"vexel.packs.{pack}.ops")
+        except ModuleNotFoundError as e:
+            if e.name != f"vexel.packs.{pack}.ops":
+                raise  # a real import error inside the pack
     from vexel.plugins import load_plugins
 
     load_plugins()  # operators from installed plugins (entry point group "vexel.plugins")

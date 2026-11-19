@@ -45,6 +45,10 @@ uv run vexel --help
 
 下文所有命令都写成 `uv run vexel ...`（源码方式）。如果已激活虚拟环境（`source .venv/bin/activate`），或用安装文件装的，直接写 `vexel ...`。
 
+最低系统：Windows 10/11 x64、macOS 14、glibc 2.34 及以上的 Linux（如 Ubuntu 22.04、RHEL 9），由 Qt 界面库 PySide6 6.12 决定。
+
+**无法联网的计算机**（如工厂内网）：使用离线安装包 `vexel-<版本>-offline-<平台>.zip`。它包含 uv、Python 和全部依赖。解压后在其中运行 `install.ps1`（Windows：`powershell -ExecutionPolicy Bypass -File .\install.ps1`）或 `sh install.sh`（macOS、Linux），全程不访问网络。离线包由 `uv run python scripts/build_offline_bundle.py --platform <windows-x64|macos-arm64|macos-x64|linux-x64>` 在可联网的机器上生成。
+
 测试平台：macOS（Apple Silicon）上完整测试并日常使用；Windows、Linux 已配置持续集成（CI，`.github/workflows/ci.yml`），每次提交运行全部测试并按测试者的方式安装试运行；尚未在真实的 Windows、Linux 桌面上人工使用过。
 
 ---
@@ -56,6 +60,14 @@ uv run vexel --help
 ```bash
 uv run vexel gui
 ```
+
+Vexel 由几个**独立的模块**组成：目前可用的是“微流控液滴”，“SEM 扫描电镜”正在开发（显示为“开发中”）。启动后先出现模块选择窗口，点“打开”进入。也可以这样直接进入：
+
+- 勾选“下次启动时直接打开上次使用的模块”，以后跳过选择窗口；
+- `uv run vexel gui --module droplet`；
+- `uv run vexel gui <文件>`：Vexel 按文件类型判断属于哪个模块，录像直接进入液滴模块，判断不了时让你选。
+
+每个模块窗口都有“模块”菜单，可以同时打开其他模块；各模块互不影响。本节以下内容都指液滴模块。
 
 也可以启动时直接打开数据：`uv run vexel gui data/demo/droplets.ome.tif`。没有数据时，先用 `uv run vexel synth data/demo` 生成一段合成视频来熟悉界面。
 
@@ -1113,6 +1125,37 @@ uv run vexel bugreport runs/exp01 -o vexel-bugreport.zip --note "细胞数明显
 ```
 
 包里有软件与依赖版本、操作系统、规划模型设置（只记是否设置了密钥，不记密钥本身）、每个结果文件夹的 `provenance.json`、`recipe.json`、`summary.json`、方案与修改记录、可疑液滴表、在线报警。**不含图像、视频、报告和密钥**；绝对路径只保留文件名（`--keep-paths` 保留全路径）。加 `--tables` 才附上逐个液滴的表格。
+
+**模块**：
+
+```bash
+uv run vexel modules                  # 列出模块
+uv run vexel modules my_file.tif      # 这个文件属于哪个模块（各模块的打分）
+```
+
+**组织策略**（数据不能出网的单位，由 IT 管理员设置）：
+
+```bash
+uv run vexel policy                   # 当前生效的策略，以及实际可用的规划模型
+```
+
+管理员把一个 JSON 文件放在普通用户不能修改的系统位置：
+
+- Windows：`%PROGRAMDATA%\Vexel\policy.json`
+- macOS：`/Library/Application Support/Vexel/policy.json`
+- Linux：`/etc/vexel/policy.json`
+
+也可以用环境变量 `VEXEL_POLICY` 指向文件。内容例如：
+
+```json
+{"offline": true, "allowed_hosts": ["llm.intranet.example"], "allow_images": false, "note": "工厂规定 FP-12：禁止外网访问"}
+```
+
+- `offline` 为 true 时，Vexel 不向外发送任何请求，自动规划只用离线规则引擎。例外是 `allowed_hosts` 中列出的内部服务，例如本机的 Ollama（`localhost`）或公司内部的模型网关。
+- `allow_images` 为 false 时，任何情况下都不发送诊断图。
+- 用户自己的设置只能更严格，不能放宽策略。策略文件存在但无法读取，或 `VEXEL_POLICY` 指向的文件不存在时，按最严格的设置执行：禁止一切网络请求。
+- 规划模型设置窗口顶部会显示策略内容，被禁止的选项不可选。诊断包里记录当前策略。
+- Vexel 除规划模型外不发出任何网络请求，没有使用统计或自动更新。因此这项策略覆盖了它会发出的全部数据。
 
 **依赖许可证清单**（`CHECK` 标记 GPL 或非商用条款，`UNKNOWN` 表示包未声明）：
 

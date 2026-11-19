@@ -544,3 +544,49 @@ def test_batch_window_runs_a_folder(window, tmp_path):
     assert len(units) == 3  # A: two chips; B: one chip
     window.batch_window = None
     _dispose(bw)
+
+
+# -- module launcher ------------------------------------------------------------------------------
+
+
+def test_launcher_routes_files_and_switches_modules(app, droplet_dataset, tmp_path, monkeypatch):
+    import tifffile
+    from qtpy.QtCore import QSettings
+
+    from vexel.ui import launcher
+    from vexel.ui.main_window import MainWindow
+    from vexel.ui.sem_window import SemWindow
+
+    monkeypatch.delenv("VEXEL_PREVIEW", raising=False)
+    QSettings().setValue("skip_launcher", "false")
+    w = launcher.Launcher()
+    assert w.buttons["droplet"].isEnabled() and not w.buttons["sem"].isEnabled()
+    _dispose(w)
+
+    # a recording opens the droplet module directly, with the module menu added
+    win = launcher.start(droplet_dataset / "droplets.ome.tif")
+    assert isinstance(win, MainWindow) and win.path is not None and win._module_menu is not None
+    titles = [a.text() for a in win._module_menu.actions()]
+    assert "微流控液滴" in titles and "SEM 扫描电镜（开发中）" in titles
+    assert QSettings().value("last_module") == "droplet"
+
+    # an SEM image while the module is in development: the launcher explains
+    sem = tmp_path / "s.tif"
+    tifffile.imwrite(sem, np.zeros((64, 80), np.uint8), extratags=[(34682, "s", 0, "[Scan]\r\nPixelWidth=2e-09\r\n", True)])
+    shown = launcher.start(sem)
+    assert isinstance(shown, launcher.Launcher) and shown.path == sem
+    _dispose(shown)
+
+    # with previews enabled the SEM window opens and recognises the vendor
+    monkeypatch.setenv("VEXEL_PREVIEW", "1")
+    sw = launcher.start(sem)
+    assert isinstance(sw, SemWindow) and "Thermo Fisher" in sw.info.text()
+
+    # "skip the launcher" opens the last module
+    QSettings().setValue("skip_launcher", "true")
+    again = launcher.start()
+    assert isinstance(again, SemWindow)
+    QSettings().setValue("skip_launcher", "false")
+    for x in (win, sw, again):
+        _dispose(x)
+    launcher._open_windows.clear()

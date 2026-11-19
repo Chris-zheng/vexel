@@ -102,7 +102,8 @@ def save_config(cfg: dict[str, Any]) -> Path:
     return path
 
 
-def load_config() -> dict[str, Any]:
+def load_config(policy: bool = True) -> dict[str, Any]:
+    """The model settings; with ``policy`` (default) restricted by the organisation policy."""
     path = home() / "config.json"
     user = json.loads(path.read_text(encoding="utf-8")).get("models", {}) if path.exists() else {}
     cfg = {**DEFAULT_CONFIG, **{k: v for k, v in user.items() if k == "order"}}
@@ -110,6 +111,29 @@ def load_config() -> dict[str, Any]:
         cfg[tier] = {**DEFAULT_CONFIG[tier], **user.get(tier, {})}
     if os.environ.get("VEXEL_OFFLINE", "").strip() not in ("", "0", "false"):
         cfg["order"] = ["rules"]
+    return apply_policy(cfg) if policy else cfg
+
+
+def tier_host(name: str, cfg: dict[str, Any]) -> str | None:
+    """The server a tier sends requests to (None: the offline rules engine)."""
+    if name == "rules":
+        return None
+    if name == "claude":
+        return os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    tier = cfg.get(name, {})
+    return tier.get("url") if name == "local" else tier.get("base_url", "")
+
+
+def apply_policy(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Restrict a model configuration to what the organisation policy allows."""
+    from vexel.policy import load_policy
+
+    policy = load_policy()
+    if policy.offline:
+        cfg["order"] = [n for n in cfg["order"] if n == "rules" or policy.host_allowed(tier_host(n, cfg) or "")] or ["rules"]
+    if not policy.allow_images:
+        for name in ("claude", "local", *COMPATIBLE):
+            cfg[name] = {**cfg[name], "send_images": False}
     return cfg
 
 
@@ -347,6 +371,15 @@ class CompatibleTier:
         return _parse(answer, self.name, reply.get("model") or self.cfg["model"])
 
 
+def _host_of(tier: Any) -> str | None:
+    if tier.name == "rules":
+        return None
+    if tier.name == "claude":
+        return os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    cfg = getattr(tier, "cfg", {})
+    return cfg.get("url") or cfg.get("base_url") or ""
+
+
 def tiers(cfg: dict[str, Any] | None = None) -> list[Any]:
     cfg = cfg or load_config()
     make: dict[str, Any] = {"claude": lambda: ClaudeTier(cfg["claude"]), "local": lambda: LocalTier(cfg["local"]), "rules": RulesTier}
@@ -360,8 +393,17 @@ def tiers(cfg: dict[str, Any] | None = None) -> list[Any]:
 
 def propose(context: dict[str, Any], image: bytes | None = None, chain: list[Any] | None = None) -> tuple[Proposal, list[str]]:
     """First tier that answers; also, for each tier passed over, why."""
+    from vexel.policy import load_policy
+
+    policy = load_policy()
+    if not policy.allow_images:
+        image = None
     skipped = []
     for tier in chain or tiers():
+        host = _host_of(tier)
+        if host is not None and not policy.host_allowed(host):
+            skipped.append(f"{tier.name}: blocked by the organisation policy ({policy.source})")
+            continue
         ok, why = tier.available()
         if not ok:
             skipped.append(f"{tier.name}: {why}")
