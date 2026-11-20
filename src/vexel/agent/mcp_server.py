@@ -14,10 +14,15 @@ import json
 from pathlib import Path
 from typing import Any
 
-INSTRUCTIONS = """Vexel analyses microfluidic droplet recordings with validated, reproducible recipes.
-Typical flow: probe_data (what is in the file) -> plan_analysis (recipe draft, tried on the first
+INSTRUCTIONS = """Vexel analyses microfluidic droplet recordings and SEM images with validated, reproducible recipes.
+Droplets: probe_data (what is in the file) -> plan_analysis (recipe draft, tried on the first
 frames; show its reasons and status to the user) -> run_analysis once the user agrees ->
-read_results. Results come from deterministic operators; report them as given."""
+read_results.
+SEM images: sem_calibrate (pixel size; a calibration read from the data bar needs the user's
+confirmation) -> sem_plan (what the image shows and a tried measurement plan; show its reasons
+and status) -> sem_analyze (apply=True only once the user agrees; or name a recipe) -> report
+the values as given, with their edge definition and warnings.
+Results come from deterministic operators; never estimate or adjust a value yourself."""
 
 
 def build_server() -> Any:
@@ -103,6 +108,70 @@ def build_server() -> Any:
         return {"summary": json.loads((run / "summary.json").read_text(encoding="utf-8")), "status": prov.get("status"),
                 "recipe": prov.get("recipe"), "result_digest": prov.get("result_digest"), "qc_warnings": warnings,
                 "corrections": (prov.get("corrections") or {}).get("n_applied"), "report": str(run / "report.html")}  # fmt: skip
+
+    # -- SEM -------------------------------------------------------------------------------------
+
+    @server.tool(annotations=read_only)
+    def sem_calibrate(path: str) -> dict:
+        """Pixel size of an SEM image: from the instrument's metadata, else from the data bar's
+        scale bar (text recognition; then it needs the user's confirmation in the SEM window or
+        with `vexel sem calibrate --confirm`). Never guessed: ok is false with a reason."""
+        from vexel.packs.sem.calibrate import for_file
+
+        cal = for_file(path)
+        return {"ok": cal.ok, "pixel_size_m": cal.pixel_size, "source": cal.source, "confirmed": cal.confirmed,
+                "needs_confirmation": cal.needs_confirmation, "describe": cal.describe(), "crop_rows": cal.crop_rows,
+                "warnings": cal.warnings, "reason": cal.reason, "vendor": cal.vendor}  # fmt: skip
+
+    @server.tool(annotations=read_only)
+    def sem_plan(path: str, goal: str = "") -> dict:
+        """Recognise what an SEM image shows (lines, holes, particles, layers, profile, tip,
+        other) and draft its measurement (recipe, settings, region, processing), tried on the
+        image. Status: ready, check (warnings) or needs_user (unclear image or no usable
+        result). Changes nothing: apply it with sem_analyze(apply=True) once the user agrees."""
+        from vexel.packs.sem.plan import memory_store, plan_file
+
+        plan, cal, _ = plan_file(path, goal, memory=memory_store())
+        fp = plan.fingerprint
+        return {"kind": fp.kind if fp else None, "confidence": fp.confidence if fp else None, "recipe": plan.recipe, "status": plan.status,
+                "settings": plan.params, "region": plan.region, "processing": [s["op"] for s in plan.steps], "reasons": plan.reasons,
+                "trials": [{"change": a.change, "problems": a.problems, "warnings": a.warnings} for a in plan.attempts],
+                "planner": plan.planner, "calibration": cal.describe()}  # fmt: skip
+
+    @server.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False))
+    def sem_analyze(path: str, recipe: str | None = None, region: list[float] | None = None, settings: dict | None = None,
+                    apply: bool = False, goal: str = "") -> dict:  # fmt: skip
+        """Measure an SEM image. With `recipe` (lines, holes, particles, layers, profile, tip;
+        `region` [x0, y0, x1, y1] pixels; `settings` as in the recipe): that measurement. With
+        apply=True and no recipe: the sem_plan plan, added to the image's record (only after the
+        user agreed to it). Without either: the measurements already in the record. Values are in
+        metres when calibrated, else pixels."""
+        from vexel.packs.sem import calibrate as C
+        from vexel.packs.sem import measure_io
+        from vexel.packs.sem.measure import scale_from
+        from vexel.packs.sem.plan import memory_store, plan_file, remember
+
+        cal = C.for_file(path)
+        ms = measure_io.load_record(cal.sha256) or measure_io.new_set(path, cal)
+        ms.scale = scale_from(cal, ms.scale.tilt)
+        if recipe:
+            ms.add_analysis(recipe, region, **(settings or {}))
+            measure_io.autosave(ms)
+        elif apply:
+            plan, _, ms = plan_file(path, goal, memory=memory_store())
+            if not plan.recipe or plan.status == "needs_user":
+                return {"applied": False, "status": plan.status, "reasons": plan.reasons}
+            plan.apply(ms)
+            measure_io.autosave(ms)
+            remember(memory_store(), plan, True, path)
+        if not ms.analyses:
+            return {"analyses": [], "note": "no automatic measurements: give a recipe, or apply a plan"}
+        out = []
+        for an in measure_io.analyses_of(ms, C.load_image(path)):
+            out.append({"id": an.spec.id, "recipe": an.spec.recipe, "region": an.spec.region, "settings": an.spec.params, "error": an.error,
+                        "values": [{"key": k, "label": label, "value": v, "kind": kind} for k, label, v, kind in an.summary],
+                        "warnings": an.warnings, "objects": len(an.objects)})  # fmt: skip
+        return {"calibration": cal.describe(), "unit": "m" if cal.ok else "px", "analyses": out}
 
     return server
 

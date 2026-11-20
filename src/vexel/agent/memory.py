@@ -8,6 +8,10 @@ by distance on normalised fingerprint features, and reports each hit with its hi
 score: how often runs with that recipe on similar data passed QC.
 
 Stored as JSON lines under ``$VEXEL_HOME/memory/recipes.jsonl`` (default ``~/.vexel``).
+
+Any module can use it: a fingerprint that has ``meta()`` (the hard filters) and a
+``SCALES`` table (the feature spreads) brings its own; SEM keeps its runs apart, in
+``memory/sem.jsonl``.
 """
 
 from __future__ import annotations
@@ -86,23 +90,26 @@ class RecipeMemory:
     def query(self, fingerprint: Any, family: str | None = None, k: int = 3) -> list[Hit]:
         """Nearest past runs on data with the same layout (and analysis family, if given)."""
         meta, feats = _meta(fingerprint), fingerprint.features()
+        scales = getattr(fingerprint, "SCALES", SCALES)
         pool = [e for e in self.entries() if _compatible(e["meta"], meta) and (family is None or _family(e["base"]) == family)]
         if not pool:
             return []
         best: dict[str, tuple[float, dict[str, Any]]] = {}
         for e in pool:
-            d = _distance(feats, e.get("features", {}))
+            d = _distance(feats, e.get("features", {}), scales)
             if e["key"] not in best or d < best[e["key"]][0]:
                 best[e["key"]] = (d, e)
         hits = []
         for key, (d, e) in best.items():
-            same = [x for x in pool if x["key"] == key and _distance(feats, x.get("features", {})) <= max(2 * d, 1.0)]
+            same = [x for x in pool if x["key"] == key and _distance(feats, x.get("features", {}), scales) <= max(2 * d, 1.0)]
             hits.append(Hit(e, d, len(same), sum(1 for x in same if x["outcome"].get("qc_passed"))))
         hits.sort(key=lambda h: (h.distance, -h.score))
         return hits[:k]
 
 
 def _meta(fp: Any) -> dict[str, Any]:
+    if hasattr(fp, "meta"):
+        return fp.meta()
     return {
         "n_channels": fp.shape.get("C", 1),
         "has_fluorescence": fp.fluorescence_channel is not None,
@@ -113,6 +120,8 @@ def _meta(fp: Any) -> dict[str, Any]:
 
 
 def _compatible(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    if a.get("module") or b.get("module"):
+        return a.get("module") == b.get("module") and a.get("kind") == b.get("kind") and a.get("calibrated") == b.get("calibrated")
     return a.get("n_channels") == b.get("n_channels") and a.get("has_fluorescence") == b.get("has_fluorescence")
 
 
@@ -120,9 +129,10 @@ def _family(base: str) -> str:
     return base
 
 
-def _distance(a: dict[str, float], b: dict[str, float]) -> float:
-    keys = [k for k in SCALES if k in a and k in b]
+def _distance(a: dict[str, float], b: dict[str, float], scales: dict[str, float] | None = None) -> float:
+    scales = SCALES if scales is None else scales
+    keys = [k for k in scales if k in a and k in b]
     if not keys:
         return float("inf")
-    diff = np.array([(a[k] - b[k]) / SCALES[k] for k in keys])
+    diff = np.array([(a[k] - b[k]) / scales[k] for k in keys])
     return float(np.sqrt(np.mean(diff**2)))

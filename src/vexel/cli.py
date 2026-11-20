@@ -618,8 +618,21 @@ def cmd_sem_analyze(args: argparse.Namespace) -> int:
         if args.recipe:
             ms.analyses = [a for a in ms.analyses if not args.replace] if args.save else []
             ms.add_analysis(args.recipe, args.region, **params)
+        if not ms.analyses and args.auto:
+            from vexel.packs.sem.plan import make_plan, memory_store, remember
+
+            img0 = semcal.load_image(path)
+            plan = make_plan(img0, cal=cal, goal=args.goal or "", scale=ms.scale, crop_rows=cal.crop_rows, base_steps=ms.processing.steps,
+                             memory=memory_store(), chain=_sem_chain(args))  # fmt: skip
+            if plan.recipe and plan.status != "needs_user":
+                plan.apply(ms)
+                if args.save:
+                    remember(memory_store(), plan, True, str(path))
+                print(f"{path.name}: planned {plan.recipe} ({plan.status})", file=sys.stderr)
+            else:
+                print(f"{path.name}: could not plan a measurement - {plan.reasons[-1] if plan.reasons else ''}", file=sys.stderr)
         if not ms.analyses:
-            print(f"{path.name}: no automatic measurements (give --recipe)")
+            print(f"{path.name}: no automatic measurements (give --recipe, or --auto)")
             continue
         img = semcal.load_image(path)
         unit, fct = measure_io.display_unit(ms)
@@ -692,6 +705,64 @@ def cmd_sem_analyze(args: argparse.Namespace) -> int:
                 spread_df.to_csv(out.with_name(out.stem + "_repeatability.csv"), index=False, encoding="utf-8-sig")
         print(f"wrote {out}")
     return 0
+
+
+def _sem_chain(args: argparse.Namespace) -> list[Any] | None:
+    from vexel.agent.models import RulesTier
+
+    return [RulesTier()] if getattr(args, "offline", False) else None
+
+
+def _print_sem_plan(path: Path, plan: Any) -> None:
+    from vexel.packs.sem.recognize import KIND_NAMES
+
+    fp = plan.fingerprint
+    status = {"ready": "ready (passed every check)", "check": "check (runs, see the notes)", "needs_user": "needs you"}[plan.status]
+    who = "rules (offline)" if plan.planner == "rules" else plan.model or plan.planner
+    print(f"{path.name}: {KIND_NAMES.get(fp.kind, fp.kind)} ({fp.confidence:.2f}) -> {plan.recipe or '-'}  {status}  [{who}]")
+    if plan.params:
+        print(f"  settings: {plan.params}")
+    if plan.region:
+        print(f"  region: {[round(v) for v in plan.region]}")
+    if plan.steps:
+        print(f"  processing: {', '.join(s['op'] for s in plan.steps)}")
+    for r in plan.reasons:
+        print(f"  - {r}")
+    for a in plan.attempts:
+        print(f"  trial ({a.change}): " + ("ok" if not a.problems and not a.error else "; ".join(a.problems or [a.error or ""])))
+    for s in plan.skipped:
+        print(f"  (model tier skipped: {s})")
+
+
+def cmd_sem_plan(args: argparse.Namespace) -> int:
+    """Recognise each image and plan its measurement (recipe, settings, region, processing), tried first."""
+    from vexel.packs.sem import measure_io
+    from vexel.packs.sem.plan import memory_store, plan_file, remember
+
+    memory = memory_store()
+    out = []
+    code = 0
+    for f in args.images:
+        path = Path(f)
+        plan, cal, ms = plan_file(path, args.goal or "", use_ocr=not args.no_ocr, memory=memory, trial_run=not args.no_trial,
+                                  chain=_sem_chain(args))  # fmt: skip
+        out.append({"file": path.name, **plan.to_json()})
+        if not args.json:
+            _print_sem_plan(path, plan)
+        if args.apply:
+            if plan.recipe and plan.status != "needs_user":
+                spec = plan.apply(ms)
+                measure_io.autosave(ms)
+                remember(memory, plan, True, str(path))
+                if not args.json:
+                    print(f"  applied: A{spec.id} added to the image's record")
+            else:
+                code = 1
+                if not args.json:
+                    print("  not applied: the plan needs you (choose the measurement in the SEM window, or give --goal)")
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False, indent=2, default=float))
+    return code
 
 
 def cmd_sem_info(args: argparse.Namespace) -> int:
@@ -1195,10 +1266,22 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("-o", "--output", help=".xlsx (results, repeatability, objects) or .csv")
     c.add_argument("--save", action="store_true", help="add the measurement to each image's record (the SEM window shows it)")
     c.add_argument("--replace", action="store_true", help="with --save: replace the record's automatic measurements")
+    c.add_argument("--auto", action="store_true", help="images without automatic measurements: recognise and plan them first (vexel sem plan)")
+    c.add_argument("-g", "--goal", help="with --auto: what to measure, in words")
+    c.add_argument("--offline", action="store_true", help="with --auto: rules only, no language model")
     c.add_argument("--tilt", type=float)
     c.add_argument("--json", action="store_true")
     c.add_argument("--no-ocr", action="store_true")
     c.set_defaults(func=cmd_sem_analyze)
+    c = ssub.add_parser("plan", help="recognise images (lines, holes, particles, layers, profile, tip) and plan their measurement, tried first")
+    c.add_argument("images", nargs="+")
+    c.add_argument("-g", "--goal", help="what to measure, in words (e.g. 线宽和粗糙度, hole diameter); default: the image decides")
+    c.add_argument("--apply", action="store_true", help="add each ready plan to the image's record (then: vexel sem analyze)")
+    c.add_argument("--offline", action="store_true", help="rules only, no language model")
+    c.add_argument("--no-trial", action="store_true", help="draft only, do not try it")
+    c.add_argument("--json", action="store_true")
+    c.add_argument("--no-ocr", action="store_true")
+    c.set_defaults(func=cmd_sem_plan)
     c = ssub.add_parser("info", help="instrument metadata of an SEM image")
     c.add_argument("file")
     c.add_argument("--json", action="store_true")

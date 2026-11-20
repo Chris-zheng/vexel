@@ -855,3 +855,44 @@ def test_sem_window_automatic_measurements(app, tmp_path, monkeypatch):
     w2.open_path(path, wait=True)
     assert [a.id for a in w2.ms.analyses] == [2] and w2.auto_list.count() == 1 and w2.analyses[0].value("lines") >= 8
     _dispose(w2)
+
+
+def test_sem_window_auto_plan(app, tmp_path, monkeypatch):
+    import tifffile
+
+    from vexel.packs.sem import calibrate as C
+    from vexel.synthetic.sem import hole_array
+    from vexel.ui.sem_window import TAB_AUTO, SemWindow
+
+    monkeypatch.setenv("VEXEL_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("VEXEL_OFFLINE", "1")
+    img, _ = hole_array(seed=1)
+    path = tmp_path / "holes.tif"
+    tifffile.imwrite(path, (np.clip(img, 0, 1) * 65535).astype(np.uint16))
+    C.save(C.manual(path, pixel_size=2e-9).confirm())
+    w = SemWindow()
+    w.open_path(path, wait=True)
+    assert w.plan_btn.isEnabled()
+    # declined: nothing enters the record
+    plan = w.auto_plan(accept=False)
+    assert plan.recipe == "holes" and plan.status == "ready" and not w.ms.analyses and "接触孔" in w.plan_info.text()
+    # accepted: the measurement is added, selected and shown; one undo removes it
+    w.goal.setText("孔径")
+    plan = w.auto_plan(accept=True)
+    assert [a.recipe for a in w.ms.analyses] == ["holes"] and w.ms.analyses[0].name == "自动规划"
+    assert w.tabs.currentIndex() == TAB_AUTO and w.auto_list.currentRow() == 0 and w.analyses[0].value("holes") == 77
+    w.undo()
+    assert not w.ms.analyses
+    # in the background, as a person uses it
+    w._sync = False
+    w.auto_plan(accept=True)
+    assert w._plan_thread is not None and not w.plan_btn.isEnabled()
+    from qtpy.QtCore import QCoreApplication, QElapsedTimer, QThread
+
+    t = QElapsedTimer()
+    t.start()
+    while w._plan_thread is not None and t.elapsed() < 60000:
+        QCoreApplication.processEvents()
+        QThread.msleep(10)
+    assert w._plan_thread is None and len(w.ms.analyses) == 1 and w.plan_btn.isEnabled()
+    _dispose(w)

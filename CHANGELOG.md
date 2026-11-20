@@ -1,5 +1,13 @@
 # 更新记录
 
+## Unreleased — SEM M5 (first half): recognition and automatic planning
+
+- SEM probe: recognises line/space, contact-hole arrays, particles, layer stacks, cross-section profiles, tips or other; never guesses ("unknown" with candidates). Measures noise, stripes, uneven brightness and saturation, and suggests processing that does not harm the measurement.
+- SEM planner on the platform agent: recipe, settings, region and processing with reasons, a trial with per-recipe checks and adjustments, recipe memory of accepted plans, optional language-model tiers checked against an allowlist taken from the recipe definitions.
+- "自动规划" in the SEM window; `vexel sem plan`, `vexel sem analyze --auto`; MCP tools `sem_calibrate`, `sem_plan`, `sem_analyze`.
+- Fixes found on the way: weak layer interfaces next to strong ones, tip radius fitting range, particle minimum size in plans.
+- Acceptance script `tests/benchmarks/sem_recognition_eval.py`.
+
 ## Unreleased — SEM M4: semiconductor metrology and segmentation
 
 - Automatic measurements on a region, kept in the image's record: line/space CD, pitch, LER/LWR with noise-bias correction; contact holes with array pitch and missing holes; particles with Feret diameters and size distributions; cross-section layer thickness; line/trench profiles with sidewall angles; tip radius and cone angle.

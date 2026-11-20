@@ -4,9 +4,10 @@ and cone angle from the outline of one tip.
 The outline is traced at sub-pixel precision at the grey level halfway between tip and
 background. The apex is the outline's extreme point along the tip's axis (the narrow
 end). The radius comes from circles fitted to the outline within a growing distance of
-the apex: the fitting range matters (too small: noise; too large: the cone pulls the
-circle open), so the range where the fitted radius is most stable is chosen, and the
-spread of the radius over neighbouring ranges is reported as its uncertainty. The cone
+the apex: the fitting range matters (too small: a short arc fits poorly; too large: the
+cone pulls the circle open), so the largest range before the fit residual jumps (where
+the cone begins) is chosen, and the spread of the radius over the two smaller ranges is
+reported as its uncertainty. The cone
 angle comes from straight lines fitted to the two flanks between ``cone_from`` and
 ``cone_to`` (distance from the apex along the axis; default 2–10 radii).
 """
@@ -81,18 +82,29 @@ def tip(a: np.ndarray, *, feature: str = "bright", smooth: float = 1.0, cone_fro
         _, _, r, rms = fit_circle(sel)
         fits.append((s, r, rms, len(sel)))
     R = np.array([f[1] for f in fits])
-    best, spread = None, np.inf
-    for i in range(2, len(fits) - 2):
-        win = R[i - 2 : i + 3]
-        if np.isnan(win).any() or fits[i][3] < 10:
-            continue
-        rel = float(np.ptp(win) / np.mean(win))
-        if rel < spread:
-            best, spread = i, rel
-    if best is None:
+    rms = np.array([f[2] for f in fits])
+    # the fitting range: the largest one before the fit residual jumps (the circle starts to take in
+    # the cone); a circle fitted to a short arc is unreliable, one reaching into the cone too wide
+    ok = [i for i, f in enumerate(fits) if f[3] >= 10 and np.isfinite(f[1])]
+    if len(ok) < 3:
         out["warnings"].append("尖端太小，无法拟合曲率半径（至少需要十几个轮廓点）")
         return out
-    radius = float(np.median(R[best - 2 : best + 3]))
+    best = None
+    for prev, i in zip(ok, ok[1:]):
+        if rms[i] > 0.25 and rms[i] > 1.8 * max(rms[prev], 1e-6):
+            best = prev
+            break
+    if best is None:  # no clear jump (a small tip, noise): the range where the radius is steadiest
+        steady = np.inf
+        for j in range(1, len(ok) - 1):
+            win = R[ok[j - 1 : j + 2]]
+            rel = float(np.ptp(win) / np.mean(win))
+            if rel < steady:
+                best, steady = ok[j], rel
+    k = ok.index(best)
+    window = R[ok[max(0, k - 2) : k + 1]]
+    radius = float(R[best])
+    spread = float(np.ptp(window) / radius) if len(window) > 1 else 0.0
     # cone: flanks between cone_from and cone_to along the axis, each side fitted by a line
     t_ax = (inner - apex) @ (-axis)  # distance back from the apex
     lat = (inner - apex) @ np.array([-axis[1], axis[0]])
@@ -113,8 +125,8 @@ def tip(a: np.ndarray, *, feature: str = "bright", smooth: float = 1.0, cone_fro
             out["warnings"].append(f"两侧半角相差 {abs(sides['left'] - sides['right']):.1f}°：尖端不对称，或轴向不在图像平面内")
     else:
         out["warnings"].append("侧面太短，无法求锥角：调整“锥角起点/终点”或框选更长的一段")
-    if radius < 5:
-        out["warnings"].append(f"曲率半径只有 {radius:.1f} 像素：误差相对较大，建议提高放大倍数")
+    if radius < 10:
+        out["warnings"].append(f"曲率半径只有 {radius:.1f} 像素：误差可能超过 5%，建议提高放大倍数")
     return out
 
 

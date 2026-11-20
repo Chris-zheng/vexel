@@ -353,7 +353,8 @@ def test_mcp_tools(droplet_dataset, tmp_path):
 
     server = build_server()
     names = {t.name for t in asyncio.run(server.list_tools())}
-    assert names == {"list_recipes", "show_recipe", "list_operators", "probe_data", "plan_analysis", "run_analysis", "read_results"}
+    assert names == {"list_recipes", "show_recipe", "list_operators", "probe_data", "plan_analysis", "run_analysis", "read_results",
+                     "sem_calibrate", "sem_plan", "sem_analyze"}
 
     def call(name, **args):
         result = asyncio.run(server.call_tool(name, args))

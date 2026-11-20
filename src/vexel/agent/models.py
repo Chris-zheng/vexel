@@ -90,6 +90,7 @@ class Proposal:
     notes: list[str] = field(default_factory=list)
     tier: str = "rules"
     model: str = ""
+    recipe: str | None = None  # SEM: the measurement chosen (None: the probe's)
 
 
 def save_config(cfg: dict[str, Any]) -> Path:
@@ -137,11 +138,12 @@ def apply_policy(cfg: dict[str, Any]) -> dict[str, Any]:
     return cfg
 
 
-def check_settings(settings: dict[str, Any], valid_keys: set[str]) -> tuple[dict[str, Any], list[str]]:
+def check_settings(settings: dict[str, Any], valid_keys: set[str], allowed: dict[str, tuple] | None = None) -> tuple[dict[str, Any], list[str]]:
     """Keep only allowlisted settings, of the right type and in range, that the recipe has."""
+    allowed = ALLOWED if allowed is None else allowed
     kept, dropped = {}, []
     for key, value in settings.items():
-        rule = ALLOWED.get(key)
+        rule = allowed.get(key)
         if rule is None or key not in valid_keys:
             dropped.append(f"{key}（不在可调整的设置之列）")
             continue
@@ -199,8 +201,63 @@ SCHEMA = {
 }
 
 
+SEM_SYSTEM = """You help plan measurements of scanning electron microscope (SEM) images in Vexel,
+mostly semiconductor metrology. Vexel runs deterministic, validated measurement recipes; you only
+choose which recipe fits the user's goal and the image, and propose settings. You never see
+measured values, and the user confirms every plan before it runs.
+
+Recipes: lines (line/space: CD, pitch, LER/LWR), holes (contact holes and vias), particles
+(particles and defects), layers (cross-section layer thickness), profile (one line or trench in
+cross-section: height, widths, sidewall angles), tip (apex radius, cone angle). Choose `recipe`
+from the goal; use null when the goal does not say and the image recognition should decide.
+
+Propose a setting only when the fingerprint or the trial gives a concrete reason, and only from
+the allowed list (type and range given); `process.<step>` = "on" adds that processing step.
+Never propose denoising before roughness (LER/LWR) measurements. Leave `settings` empty when the
+draft is fine. Write each note as one short sentence in the user's language."""
+
+SEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "recipe": {"type": ["string", "null"], "enum": ["lines", "holes", "particles", "layers", "profile", "tip", None]},
+        "settings": SCHEMA["properties"]["settings"],
+        "notes": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["recipe", "settings", "notes"],
+    "additionalProperties": False,
+}
+
+
+def sem_allowed() -> dict[str, tuple]:
+    """SEM settings a model may propose: every recipe setting (``<recipe>.<name>``, from the
+    recipe definitions themselves) and the processing steps (``process.<op>``)."""
+    from vexel.packs.sem.analysis import RECIPES
+
+    out: dict[str, tuple] = {}
+    for name, rec in RECIPES.items():
+        for prm in rec.params:
+            key = f"{name}.{prm.name}"
+            if prm.kind == "choice":
+                out[key] = ("enum", [c[0] for c in prm.choices])
+            elif prm.kind == "bool":
+                out[key] = ("enum", [True, False])
+            else:
+                out[key] = ("float", prm.lo, prm.hi)
+    for op in ("line_level", "destripe", "background", "align_rows", "denoise"):
+        out[f"process.{op}"] = ("enum", ["on", "off"])
+    return out
+
+
+def task_of(context: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str, tuple]]:
+    """System prompt, answer schema and allowlist of the planning task (droplet by default)."""
+    if context.get("task") == "sem":
+        return SEM_SYSTEM, SEM_SCHEMA, sem_allowed()
+    return SYSTEM, SCHEMA, ALLOWED
+
+
 def prompt_text(context: dict[str, Any]) -> str:
-    allowed = {k: (list(v[1]) if v[0] == "enum" else f"{v[0]} {v[1]:g}..{v[2]:g}") for k, v in ALLOWED.items() if k in context.get("valid_keys", [])}
+    _, _, table = task_of(context)
+    allowed = {k: (list(v[1]) if v[0] == "enum" else f"{v[0]} {v[1]:g}..{v[2]:g}") for k, v in table.items() if k in context.get("valid_keys", [])}
     body = {k: v for k, v in context.items() if k != "valid_keys"}
     return (
         f"Stage: {context.get('stage')}\n\nAllowed settings for this recipe:\n{json.dumps(allowed, ensure_ascii=False)}\n\n"
@@ -213,7 +270,10 @@ def _parse(text: str, tier: str, model: str) -> Proposal:
         data = json.loads(text)
         settings = {item["key"]: item["value"] for item in data.get("settings", [])}
         notes = [str(n) for n in data.get("notes", [])] + [f"{item['key']}：{item['reason']}" for item in data.get("settings", [])]
-        return Proposal(data.get("cells"), data.get("fluorescence"), settings, notes, tier, model)
+        recipe = data.get("recipe")
+        if recipe is not None and recipe not in ("lines", "holes", "particles", "layers", "profile", "tip"):
+            recipe = None
+        return Proposal(data.get("cells"), data.get("fluorescence"), settings, notes, tier, model, recipe)
     except (json.JSONDecodeError, KeyError, TypeError, AttributeError) as e:
         raise ModelUnavailable(f"answer out of schema ({type(e).__name__})") from e
 
@@ -263,8 +323,8 @@ class ClaudeTier:
                 max_tokens=4000,
                 betas=["server-side-fallback-2026-07-01"],
                 fallbacks="default",
-                system=SYSTEM,
-                output_config={"effort": self.cfg.get("effort", "medium"), "format": {"type": "json_schema", "schema": SCHEMA}},
+                system=task_of(context)[0],
+                output_config={"effort": self.cfg.get("effort", "medium"), "format": {"type": "json_schema", "schema": task_of(context)[1]}},
                 messages=[{"role": "user", "content": content}],
             )
         except anthropic.AuthenticationError as e:
@@ -307,8 +367,9 @@ class LocalTier:
         message: dict[str, Any] = {"role": "user", "content": prompt_text(context)}
         if image is not None and self.cfg.get("send_images"):
             message["images"] = [base64.standard_b64encode(image).decode()]
-        body = {"model": self.cfg["model"], "stream": False, "format": SCHEMA, "options": {"temperature": 0},
-                "messages": [{"role": "system", "content": SYSTEM}, message]}  # fmt: skip
+        system, schema, _ = task_of(context)
+        body = {"model": self.cfg["model"], "stream": False, "format": schema, "options": {"temperature": 0},
+                "messages": [{"role": "system", "content": system}, message]}  # fmt: skip
         request = urllib.request.Request(self.cfg["url"].rstrip("/") + "/api/chat", data=json.dumps(body).encode(),
                                          headers={"Content-Type": "application/json"})  # fmt: skip
         try:
@@ -339,13 +400,14 @@ class CompatibleTier:
         import urllib.error
         import urllib.request
 
-        text = prompt_text(context) + "\n\nAnswer with one JSON object that matches this JSON schema:\n" + json.dumps(SCHEMA)
+        system, schema, _ = task_of(context)
+        text = prompt_text(context) + "\n\nAnswer with one JSON object that matches this JSON schema:\n" + json.dumps(schema)
         content: Any = text
         if image is not None and self.cfg.get("send_images"):
             url = "data:image/png;base64," + base64.standard_b64encode(image).decode()
             content = [{"type": "image_url", "image_url": {"url": url}}, {"type": "text", "text": text}]
         body = {"model": self.cfg["model"], "temperature": 0, "response_format": {"type": "json_object"},
-                "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": content}]}  # fmt: skip
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}]}  # fmt: skip
         headers = {"Content-Type": "application/json"}
         env = self.cfg.get("api_key_env") or ""
         if env:

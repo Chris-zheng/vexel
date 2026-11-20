@@ -77,9 +77,32 @@ def _skew(a: np.ndarray, bands: int = 8) -> float:
     return float(np.polyfit(ys, xs, 1)[0])
 
 
-def _find_on_mean(m: np.ndarray, method: str, level: float, smooth: float, min_distance: float) -> list[tuple[float, int]]:
+def _weak_edges(m: np.ndarray, smooth: float, min_distance: float, floor: float = 0.05) -> list[tuple[float, int]]:
+    """Edges on a (low-noise) mean profile down to a few times its own noise, and at least
+    ``floor`` of the strongest: a weak interface next to a strong one is still found."""
+    from scipy import ndimage as ndi
+    from scipy.signal import find_peaks
+
+    v = ndi.gaussian_filter1d(np.asarray(m, float), max(smooth, 0.7))
+    g = np.gradient(v)
+    mag = np.abs(g)
+    noise = 1.4826 * float(np.median(np.abs(np.diff(g) - np.median(np.diff(g))))) + 1e-12
+    thr = max(6 * noise, floor * float(mag.max()))
+    idx, _ = find_peaks(mag, height=thr, prominence=thr, distance=max(2, int(min_distance)))
+    out = []
+    for i in idx:
+        if 0 < i < len(mag) - 1:
+            y0, y1, y2 = mag[i - 1], mag[i], mag[i + 1]
+            den = y0 - 2 * y1 + y2
+            out.append((float(i + (0.5 * (y0 - y2) / den if den else 0.0)), 1 if g[i] > 0 else -1))
+    return out
+
+
+def _find_on_mean(m: np.ndarray, method: str, level: float, smooth: float, min_distance: float, weak: bool = False) -> list[tuple[float, int]]:
     from vexel.packs.sem.measure import profile_edges
 
+    if weak:
+        return [(p, s) for p, s in _weak_edges(m, smooth, min_distance) if 2 <= p <= len(m) - 3]
     if method == "peak":  # each bright edge peak is an edge
         edges = profile_edges(m, "peak", level, max(smooth, 0.7), max(2, int(min_distance)))
         return [(p, s) for p, s in edges if 2 <= p <= len(m) - 3]
@@ -91,7 +114,7 @@ def _find_on_mean(m: np.ndarray, method: str, level: float, smooth: float, min_d
 
 
 def track_edges(a: np.ndarray, *, method: str = "threshold", level: float = 0.5, smooth: float = 1.0, average: int = 1,
-                mask: np.ndarray | None = None) -> tuple[list[Edge], dict[str, Any]]:  # fmt: skip
+                mask: np.ndarray | None = None, weak: bool = False) -> tuple[list[Edge], dict[str, Any]]:  # fmt: skip
     """Follow every edge of a pattern of (roughly) vertical edges down the region ``a``.
 
     The mean profile (after removing any slant) gives the edges and their polarity; each
@@ -118,7 +141,7 @@ def track_edges(a: np.ndarray, *, method: str = "threshold", level: float = 0.5,
     mean = straight.mean(0)
     med = np.median(straight, axis=1)
     row_offset = med - np.median(med)  # each line's brightness against the others (charging stripes, drift along the lines)
-    found = _find_on_mean(mean, method, level, 0.0, 3)
+    found = _find_on_mean(mean, method, level, 0.0, 3, weak=weak)
     info: dict[str, Any] = {"slant_px_per_line": slope, "mean_profile": mean, "lines": rows}
     if not found:
         return [], info
@@ -134,6 +157,14 @@ def track_edges(a: np.ndarray, *, method: str = "threshold", level: float = 0.5,
         i0, i1 = int(round(a_ + 0.3 * (b_ - a_))), int(round(a_ + 0.7 * (b_ - a_)))
         gaps_mid.append(float(np.median(mean[i0 : max(i1, i0) + 1])))
     plateaus = [(min(gaps_mid[k], gaps_mid[k + 1]), max(gaps_mid[k], gaps_mid[k + 1])) for k in range(len(pos))]
+    out: list[Edge] = []
+    with np.errstate(divide="ignore", invalid="ignore"):  # all-NaN windows (masked, off the image) are expected
+        out = _follow(found, half, plateaus, sm, shift, row_offset, rows, cols, level, method, mask, yy)
+    return out, info
+
+
+def _follow(found: list[tuple[float, int]], half: np.ndarray, plateaus: list[tuple[float, float]], sm: np.ndarray, shift: np.ndarray,
+            row_offset: np.ndarray, rows: int, cols: int, level: float, method: str, mask: np.ndarray | None, yy: np.ndarray) -> list[Edge]:  # fmt: skip
     out: list[Edge] = []
     for k_edge, ((p0, pol), h) in enumerate(zip(found, half)):
         hw = int(math.ceil(h))
@@ -192,7 +223,7 @@ def track_edges(a: np.ndarray, *, method: str = "threshold", level: float = 0.5,
         resid = xabs - (p0 + shift)
         bad = np.abs(resid - np.nanmedian(resid)) > h
         out.append(Edge(position=np.where(bad, np.nan, xabs), polarity=int(pol), start=float(p0)))
-    return out, info
+    return out
 
 
 # -- roughness -----------------------------------------------------------------------------------
@@ -398,7 +429,7 @@ def layers(a: np.ndarray, *, method: str = "gradient", level: float = 0.5, smoot
     """Interfaces of a horizontal layer stack (cross-section), followed across every column;
     thickness of each layer between consecutive interfaces. Positions in pixels (y)."""
     edges, info = track_edges(np.asarray(a).T, method=method, level=level, smooth=smooth, average=average,
-                              mask=None if mask is None else mask.T)  # fmt: skip
+                              mask=None if mask is None else mask.T, weak=True)  # fmt: skip
     interfaces = []
     for i, e in enumerate(edges):
         r = roughness(e.position)

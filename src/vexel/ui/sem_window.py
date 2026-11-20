@@ -36,6 +36,7 @@ from qtpy.QtWidgets import (
     QHeaderView,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -113,6 +114,25 @@ def _param_value(prm: Any, w: Any) -> Any:
     if prm.kind == "bool":
         return w.isChecked()
     return w.value()
+
+
+class _PlanJob(QObject):
+    """Plans an SEM measurement away from the window (a language-model tier may take a while)."""
+
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, kwargs: dict[str, Any]) -> None:
+        super().__init__()
+        self.kwargs = kwargs
+
+    def run(self) -> None:
+        from vexel.packs.sem.plan import make_plan
+
+        try:
+            self.done.emit(make_plan(**self.kwargs))
+        except Exception as e:  # noqa: BLE001 - shown to the person
+            self.failed.emit(f"{type(e).__name__}: {e}")
 
 
 class _ProcessJob(QObject):
@@ -422,6 +442,19 @@ class SemWindow(QMainWindow):
         from vexel.packs.sem.analysis import RECIPES
 
         v.addWidget(heading("自动测量"))
+        prow = QHBoxLayout()
+        self.goal = QLineEdit()
+        self.goal.setPlaceholderText("目标（可不填）：例如 线宽和粗糙度、孔径、膜厚")
+        self.plan_btn = QPushButton("自动规划")
+        self.plan_btn.setObjectName("primary")
+        self.plan_btn.setToolTip("识别图像类型，选择测量方法、设置、区域和图像处理，先试运行；你确认后才加入记录")
+        self.plan_btn.clicked.connect(lambda: self.auto_plan())
+        prow.addWidget(self.goal, 1)
+        prow.addWidget(self.plan_btn)
+        v.addLayout(prow)
+        self.plan_info = muted("")
+        v.addWidget(self.plan_info)
+        v.addWidget(muted("或手动选择："))
         self.recipe = QComboBox()
         for name, rec in RECIPES.items():
             self.recipe.addItem(rec.label, name)
@@ -531,6 +564,7 @@ class SemWindow(QMainWindow):
 
     def closeEvent(self, event: Any) -> None:  # noqa: N802 - Qt
         self._stop_thread()
+        self._end_plan()
         if self._proc_thread is not None:
             self._proc_thread.quit()
             self._proc_thread.wait(60000)
@@ -638,6 +672,7 @@ class SemWindow(QMainWindow):
         arow = self.auto_list.currentRow()
         for w in (self.run_btn, self.region_btn, self.whole_btn, self.recipe):
             w.setEnabled(ready)
+        self.plan_btn.setEnabled(ready and getattr(self, "_plan_thread", None) is None)
         self.rerun_btn.setEnabled(ready and arow >= 0)
         self.auto_delete.setEnabled(ready and arow >= 0)
 
@@ -1019,6 +1054,85 @@ class SemWindow(QMainWindow):
         return next((a for a in self.analyses if a.spec.id == spec.id), None)
 
     _auto_select: int | None = None
+    _plan_thread: QThread | None = None
+    _plan_job: _PlanJob | None = None
+    last_plan: Any = None
+
+    def auto_plan(self, goal: str | None = None, *, accept: bool | None = None, wait: bool | None = None) -> Any:
+        """Recognise the image and plan its measurement (tried first). The plan is shown with its
+        reasons; it enters the record only when accepted (``accept``: decide without asking)."""
+        from vexel.packs.sem.plan import memory_store
+
+        if self.ms is None or self.image is None:
+            return None
+        kwargs = {"image": self.image, "cal": self.cal, "goal": self.goal.text().strip() if goal is None else goal, "scale": self.ms.scale,
+                  "crop_rows": self.ms.image.get("crop_rows"), "base_steps": list(self.ms.processing.steps), "memory": memory_store()}  # fmt: skip
+        self._plan_accept = accept
+        if wait if wait is not None else self._sync:
+            from vexel.packs.sem.plan import make_plan
+
+            QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                plan = make_plan(**kwargs)
+            finally:
+                QGuiApplication.restoreOverrideCursor()
+            return self._plan_ready(plan)
+        if self._plan_thread is not None:
+            return None
+        self.plan_info.setText("正在识别图像并试运行…")
+        self._plan_thread = QThread()
+        self._plan_job = _PlanJob(kwargs)
+        self._plan_job.moveToThread(self._plan_thread)
+        self._plan_thread.started.connect(self._plan_job.run)
+        self._plan_job.done.connect(self._plan_ready)
+        self._plan_job.failed.connect(lambda msg: (self._end_plan(), self.plan_info.setText(f"规划失败：{msg}")))
+        self._plan_thread.start()
+        self._set_buttons()
+        return None
+
+    def _end_plan(self) -> None:
+        if self._plan_thread is not None:
+            self._plan_thread.quit()
+            self._plan_thread.wait()
+            self._plan_thread, self._plan_job = None, None
+        self._set_buttons()
+
+    def _plan_ready(self, plan: Any) -> Any:
+        from vexel.packs.sem.analysis import RECIPES
+        from vexel.packs.sem.plan import memory_store, remember
+        from vexel.packs.sem.recognize import KIND_NAMES
+
+        self._end_plan()
+        self.last_plan = plan
+        fp = plan.fingerprint
+        status = {"ready": "试运行通过", "check": "试运行通过，有提示", "needs_user": "需要你来决定"}[plan.status]
+        who = "离线规则" if plan.planner == "rules" else (plan.model or plan.planner)
+        head = f"图像：{KIND_NAMES.get(fp.kind, fp.kind)}（{fp.confidence:.2f}）；测量：{RECIPES[plan.recipe].label if plan.recipe else '无'}；{status}；规划：{who}"
+        self.plan_info.setText(head)
+        detail = "\n".join(f"• {r}" for r in plan.reasons)
+        if plan.params:
+            detail += f"\n\n设置：{plan.params}"
+        if plan.steps:
+            detail += "\n图像处理：" + "、".join(s["op"] for s in plan.steps)
+        usable = plan.recipe is not None and plan.status != "needs_user"
+        accept = self._plan_accept
+        if accept is None:
+            if usable:
+                answer = QMessageBox.question(self, "自动规划", f"{head}\n\n{detail}\n\n采用这个规划？（加入记录，可撤销）")
+                accept = answer == QMessageBox.StandardButton.Yes
+            else:
+                QMessageBox.information(self, "自动规划", f"{head}\n\n{detail}")
+                accept = False
+        if not (accept and usable):
+            remember(memory_store(), plan, False) if usable else None
+            return plan
+        self._push_undo()
+        spec = plan.apply(self.ms)
+        remember(memory_store(), plan, True, str(self.path) if self.path else None)
+        self.tabs.setCurrentIndex(TAB_AUTO)
+        self._auto_select = spec.id
+        self._changed()
+        return plan
 
     def _rerun_selected(self) -> None:
         row = self.auto_list.currentRow()
