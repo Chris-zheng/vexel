@@ -34,30 +34,37 @@ from typing import Any
 import numpy as np
 from qtpy.QtCore import QPointF, QRectF, Qt, Signal
 from qtpy.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap
+from vexel.i18n import tr
 from qtpy.QtWidgets import QGraphicsEllipseItem, QGraphicsItem, QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView
 
-AUTO_FINISH = {"line": 2, "profile": 2, "angle": 3, "calibrate": 2, "region": 2}
+AUTO_FINISH = {"line": 2, "profile": 2, "angle": 3, "calibrate": 2, "region": 2, "hprofile": 2, "box_lower": 2, "box_upper": 2}
 FINISH_ON_ENTER = {"polyline": 2, "polygon": 3, "circle": 3, "ellipse": 5, "point": 1}
 TOOL_HINTS = {
-    "pan": "拖动平移，滚轮缩放；点击测量可选中，拖动小圆点修改",
-    "line": "点击起点和终点",
-    "profile": "点击剖面线的起点和终点（横穿线条或台阶）",
-    "angle": "依次点击：一条边上的点、顶点、另一条边上的点",
-    "polyline": "逐点点击；双击或按回车结束",
-    "polygon": "逐点点击轮廓；双击或按回车闭合",
-    "freehand": "按住鼠标沿轮廓画，松开结束",
-    "wand": "点击区域内部，自动找出连通的相似区域",
-    "circle": "在圆周上点击三个或更多点；双击或回车拟合",
-    "ellipse": "在椭圆周上点击五个或更多点；双击或回车拟合",
-    "point": "点击每个要计数的目标；回车结束这一组",
-    "calibrate": "依次点击比例尺的两端",
-    "region": "点击自动测量区域的两个对角",
+    "pan": tr("拖动平移，滚轮缩放；点击测量可选中，拖动小圆点修改"),
+    "line": tr("点击起点和终点"),
+    "profile": tr("点击剖面线的起点和终点（横穿线条或台阶）"),
+    "angle": tr("依次点击：一条边上的点、顶点、另一条边上的点"),
+    "polyline": tr("逐点点击；双击或按回车结束"),
+    "polygon": tr("逐点点击轮廓；双击或按回车闭合"),
+    "freehand": tr("按住鼠标沿轮廓画，松开结束"),
+    "wand": tr("点击区域内部，自动找出连通的相似区域"),
+    "circle": tr("在圆周上点击三个或更多点；双击或回车拟合"),
+    "ellipse": tr("在椭圆周上点击五个或更多点；双击或回车拟合"),
+    "point": tr("点击每个要计数的目标；回车结束这一组"),
+    "calibrate": tr("依次点击比例尺的两端"),
+    "region": tr("点击自动测量区域的两个对角"),
+    "hprofile": tr("点击高度剖面线的起点和终点"),
+    "box_lower": tr("框选台阶的下平面：点击两个对角"),
+    "box_upper": tr("框选台阶的上平面：点击两个对角"),
 }
 
 
 def to_qimage(img: np.ndarray, stretch: bool = True) -> QImage:
     """Grey image to QImage: stretched 0.5-99.5 % to black-white, or (``stretch`` False,
     uint8 already prepared for display) as it is."""
+    if img.ndim == 3:  # RGB, prepared (a height map in colour)
+        rgb = np.ascontiguousarray(img[..., :3].astype(np.uint8))
+        return QImage(rgb.data, rgb.shape[1], rgb.shape[0], rgb.strides[0], QImage.Format.Format_RGB888).copy()
     if stretch or img.dtype != np.uint8:
         lo, hi = float(np.percentile(img, 0.5)), float(np.percentile(img, 99.5))
         gray = np.clip((img.astype(np.float64) - lo) / max(hi - lo, 1e-9) * 255, 0, 255).astype(np.uint8)
@@ -120,6 +127,8 @@ class ImageView(QGraphicsView):
         self._original: QImage | None = None
         self.split: float | None = None  # 0..1 of the width, or None: no comparison
         self._auto: list[Any] = []  # automatic-measurement drawings (not selectable)
+        self._auto_shapes: list[Any] = []
+        self.show_auto = True
         self._region_item: Any = None
         self.shapes: list[tuple[int, str, Any, str, tuple[float, float], str]] = []
         self._freehand = False
@@ -247,7 +256,7 @@ class ImageView(QGraphicsView):
             for p in self.points:
                 self._preview.append(self.scene().addEllipse(QRectF(p.x() - 4, p.y() - 4, 8, 8), _pen("#f59e0b", 2)))
             return
-        if self.tool == "region":
+        if self.tool == "region" or self.tool.startswith("box"):
             a, b = pts[0], pts[-1]
             self._preview.append(self.scene().addRect(QRectF(a, b).normalized(), pen))
             return
@@ -299,7 +308,7 @@ class ImageView(QGraphicsView):
             text.setFont(font)
             text.setBrush(QBrush(QColor(colour)))
             text.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
-            text.setPos(anchor[0] + 4, anchor[1] - 4)
+            text.setPos(self._label_pos(text, anchor, 4, -4))
             back = self.scene().addRect(QRectF(text.boundingRect()).adjusted(-2, -1, 2, 1), QPen(Qt.PenStyle.NoPen), QBrush(QColor(0, 0, 0, 170)))
             back.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
             back.setPos(text.pos())
@@ -316,6 +325,9 @@ class ImageView(QGraphicsView):
         self._auto = []
         font = QFont()
         font.setPointSize(10)
+        self._auto_shapes = shapes
+        if not self.show_auto:
+            return
         for kind, geom, colour, anchor, label in shapes:
             pen = _pen(colour, 1.5)
             pen.setCosmetic(True)
@@ -334,7 +346,7 @@ class ImageView(QGraphicsView):
                 text.setFont(font)
                 text.setBrush(QBrush(QColor(colour)))
                 text.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
-                text.setPos(anchor[0] + 3, anchor[1] + 2)
+                text.setPos(self._label_pos(text, anchor, 3, 2))
                 back = self.scene().addRect(QRectF(text.boundingRect()).adjusted(-2, -1, 2, 1), QPen(Qt.PenStyle.NoPen), QBrush(QColor(0, 0, 0, 160)))
                 back.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
                 back.setPos(text.pos())
@@ -342,6 +354,18 @@ class ImageView(QGraphicsView):
                 self._auto += [back, text]
         for it in self._auto:
             it.setZValue(-5)
+
+    def set_show_auto(self, on: bool) -> None:
+        self.show_auto = on
+        self.show_analysis(self._auto_shapes)
+
+    def _label_pos(self, text: Any, anchor: tuple[float, float], dx: float, dy: float) -> QPointF:
+        """Where a label goes: right of its anchor, or left of it when it would leave the image."""
+        scale = max(self.transform().m11(), 1e-6)
+        w = text.boundingRect().width() / scale  # labels keep their size on screen
+        right = self.scene().sceneRect().right()
+        x = anchor[0] + dx if anchor[0] + dx + w <= right else anchor[0] - dx - w
+        return QPointF(max(x, self.scene().sceneRect().left()), anchor[1] + dy)
 
     def show_region(self, region: list[float] | None) -> None:
         """The region chosen for the next automatic measurement (dashed)."""

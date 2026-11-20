@@ -896,3 +896,101 @@ def test_sem_window_auto_plan(app, tmp_path, monkeypatch):
         QThread.msleep(10)
     assert w._plan_thread is None and len(w.ms.analyses) == 1 and w.plan_btn.isEnabled()
     _dispose(w)
+
+
+def test_sem_window_tilt_3d(app, tmp_path, monkeypatch):
+    import tifffile
+
+    from vexel.packs.sem import calibrate as C
+    from vexel.synthetic import sem as S
+    from vexel.ui.sem_window import TAB_3D, SemWindow
+
+    monkeypatch.setenv("VEXEL_HOME", str(tmp_path / "home"))
+    z = S.height_map("steps", seed=1)
+    tex = S.surface_texture(*z.shape, seed=2)
+    paths = []
+    for i, t in enumerate((-5, 5)):
+        p = tmp_path / f"v{i}.tif"
+        tifffile.imwrite(p, (np.clip(S.tilt_view(z, tex, t, seed=i), 0, 1) * 65535).astype(np.uint16))
+        C.save(C.manual(p, pixel_size=2e-9).confirm())
+        paths.append(p)
+    w = SemWindow()
+    w.open_path(paths[0], wait=True)
+    assert not w.tilt_run_btn.isEnabled() and w.tilt_table.rowCount() == 0
+    w.add_tilt_views([paths[1]], tilts=[5.0])
+    assert w.tabs.currentIndex() == TAB_3D and w.tilt_table.rowCount() == 2 and w.tilt_run_btn.isEnabled()
+    assert w.ms.tilt3d.views[0].file == "v1.tif"  # kept relative to the reference image
+    w.tilt_table.cellWidget(0, 1).setValue(-5.0)  # the reference's tilt, typed in the table
+    assert w.ms.tilt3d.reference_tilt == -5.0
+    res = w.run_tilt3d(wait=True)
+    assert res is not None and res.hm.valid.mean() > 0.9 and res.hm.pixel_size == pytest.approx(2e-9)
+    assert w.tilt_show.currentData() == "height" and "高度范围" in w.tilt_info.text()
+    # a step (two terraces 20 px = 40 nm apart) and a height profile
+    rows, cols = z.shape
+    w.add_step_height([5, 20, 57, rows - 20], [288, 20, cols - 5, rows - 20])
+    w.add_height_profile([10, rows / 2], [cols - 10, rows / 2])
+    st = w.tilt_result.steps[0]
+    assert st["step"] == pytest.approx(40e-9, rel=0.05) and "台阶 1" in w.tilt_info.text() and w.height_plot.isVisibleTo(w)
+    # the drawing tools: a profile by two clicks, a step by two boxes
+    from qtpy.QtCore import QPointF
+
+    w.set_tool("hprofile")
+    w.view._add_point(QPointF(20, 30))
+    w.view._add_point(QPointF(300, 30))
+    assert len(w.ms.tilt3d.profiles) == 2
+    w._start_step()
+    for x, y in [(5, 20), (57, 200), (288, 20), (370, 200)]:
+        w.view._add_point(QPointF(x, y))
+    assert len(w.ms.tilt3d.steps) == 2 and w.tilt_result.steps[1]["step"] == pytest.approx(40e-9, rel=0.05)
+    # display modes and exports
+    w.tilt_show.setCurrentIndex(w.tilt_show.findData("confidence"))
+    w.tilt_show.setCurrentIndex(w.tilt_show.findData("image"))
+    for name in ("h.tif", "h.stl", "h.obj", "h.png", "h.csv"):
+        assert w.export_tilt(tmp_path / name).is_file()
+    assert "三维" in __import__("openpyxl").load_workbook(w.export(tmp_path / "m.xlsx")[0]).sheetnames
+    w._show_3d_preview()
+    w._preview_dialog.close()
+    # changed settings are flagged until rebuilt; undo restores
+    w.tilt_table.cellWidget(1, 1).setValue(6.0)
+    assert "已改变" in w.tilt_info.text()
+    w.undo()
+    assert w.ms.tilt3d.views[0].tilt == 5.0
+    _dispose(w)
+    # the record keeps the reconstruction's recipe; reopening rebuilds it on request
+    w2 = SemWindow()
+    w2.open_path(paths[0], wait=True)
+    assert w2.ms.tilt3d is not None and len(w2.ms.tilt3d.steps) == 2 and w2.tilt_result is None
+    assert w2.run_tilt3d(wait=True).steps[0]["step"] == pytest.approx(40e-9, rel=0.05)
+    _dispose(w2)
+
+
+def test_sem_window_in_english(tmp_path):
+    """Every visible text of the SEM window, used on every tab, is English (none left in Chinese)."""
+    import subprocess
+    import sys
+
+    helper = Path(__file__).parent / "helpers" / "sem_english_ui.py"
+    r = subprocess.run([sys.executable, "-W", "ignore", str(helper), str(tmp_path)], capture_output=True, text=True, timeout=900)
+    left = [ln for ln in r.stdout.splitlines() if ln.strip()]
+    assert r.returncode == 0, r.stderr[-2000:]
+    assert not left, "\n".join(left[:30])
+
+
+def test_language_setting(tmp_path, monkeypatch):
+    from vexel import i18n
+
+    monkeypatch.setenv("VEXEL_HOME", str(tmp_path))
+    monkeypatch.delenv("VEXEL_LANG", raising=False)
+    i18n.language.cache_clear()
+    assert i18n.language() == "zh" and i18n.tr("标定") == "标定"
+    i18n.set_language("en")
+    assert i18n.language() == "en"
+    assert i18n.tr("标定") == "Calibration"
+    assert i18n.tr("找到的完整线条少于 2 条") == "Fewer than 2 complete lines found"
+    assert i18n.tr("图像识别为“线条与间隔”（把握 0.97）") == 'Image recognised as "lines and spaces" (confidence 0.97)'
+    assert i18n.tr("2.5 nm/像素（仪器元数据，已确认）") == "2.5 nm/px (instrument metadata, confirmed)"
+    assert i18n.tr("Plain English") == "Plain English"
+    with pytest.raises(ValueError):
+        i18n.set_language("fr")
+    i18n.set_language("zh")
+    assert i18n.tr("标定") == "标定"

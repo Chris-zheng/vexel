@@ -520,3 +520,86 @@ def tip(rows: int = 400, cols: int = 300, *, radius: float = 20.0, half_angle: f
         img = ndi.gaussian_filter(img, blur)
     img += rng.normal(0, noise, img.shape)
     return img, {"radius": radius, "cone_angle": 2 * half_angle, "apex": apex}
+
+
+# -- tilt series with a known height map (M6) -----------------------------------------------------
+
+
+def height_map(kind: str = "pyramid", rows: int = 320, cols: int = 384, *, height: float = 30.0, seed: int = 0) -> np.ndarray:
+    """A surface height map, in pixels (the same unit as x and y):
+
+    - ``pyramid``: a truncated pyramid of ``height`` on a flat base (side walls ~35°);
+    - ``steps``: three terraces ``height`` / 3 apart (step heights);
+    - ``spheres``: spherical caps of up to ``height`` on a flat base;
+    - ``sine``: a sinusoidal corrugation of amplitude ``height`` / 2;
+    - ``rough``: a random rough surface, RMS height ``height`` / 6.
+    """
+    from scipy import ndimage as ndi
+
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[:rows, :cols].astype(float)
+    if kind == "pyramid":
+        cy, cx = rows / 2, cols / 2
+        d = np.maximum(np.abs(yy - cy), np.abs(xx - cx))
+        top, base = min(rows, cols) * 0.12, min(rows, cols) * 0.12 + height / math.tan(math.radians(35))
+        z = np.clip((base - d) / (base - top), 0, 1) * height
+    elif kind == "steps":
+        z = np.floor(np.clip((xx - cols * 0.2) / (cols * 0.25), 0, 2.999)) * height / 3
+        z = ndi.gaussian_filter(z, 1.5)  # steps with a short slope
+    elif kind == "spheres":
+        z = np.zeros((rows, cols))
+        for _ in range(6):
+            r = rng.uniform(0.08, 0.16) * min(rows, cols)
+            cy, cx = rng.uniform(r, rows - r), rng.uniform(r, cols - r)
+            h = min(height, r * 0.6)
+            R = (r * r + h * h) / (2 * h)  # cap of height h and base radius r
+            dd = (yy - cy) ** 2 + (xx - cx) ** 2
+            cap = np.where(dd < r * r, np.sqrt(np.maximum(R * R - dd, 0)) - (R - h), 0)
+            z = np.maximum(z, cap)
+    elif kind == "sine":
+        z = height / 2 * np.sin(2 * np.pi * yy / (rows / 3)) * np.sin(2 * np.pi * xx / (cols / 2.5))
+    elif kind == "rough":
+        z = ndi.gaussian_filter(rng.normal(0, 1, (rows, cols)), 6)
+        z = z / z.std() * height / 6
+    else:
+        raise ValueError(kind)
+    return z
+
+
+def surface_texture(rows: int, cols: int, *, seed: int = 0) -> np.ndarray:
+    """Albedo of a textured surface (grains and fine contrast): what makes views matchable."""
+    from scipy import ndimage as ndi
+
+    rng = np.random.default_rng(seed)
+    t = 0.6 * ndi.gaussian_filter(rng.normal(0, 1, (rows, cols)), 1.2) + 0.4 * ndi.gaussian_filter(rng.normal(0, 1, (rows, cols)), 4)
+    t = (t - t.min()) / np.ptp(t)
+    return 0.3 + 0.6 * t
+
+
+def tilt_view(z: np.ndarray, albedo: np.ndarray, tilt: float, *, noise: float = 0.02, blur: float = 0.8, flat: np.ndarray | None = None,
+              seed: int = 0) -> np.ndarray:  # fmt: skip
+    """The surface seen by the beam after a eucentric tilt of ``tilt`` degrees about the image's
+    horizontal axis through its centre row (parallel projection, as SEM at usual magnifications):
+    a point (x, y, z) appears at row (y - yc)·cos(tilt) + z·sin(tilt) + yc. Brightness: the albedo
+    times a secondary-electron-like slope term (brighter where the surface faces away from the
+    beam). ``flat``: where the albedo is replaced by a uniform grey (a textureless area)."""
+    from scipy import ndimage as ndi
+
+    rows, cols = z.shape
+    phi = math.radians(tilt)
+    yc = (rows - 1) / 2
+    gy, gx = np.gradient(z)
+    nrm = np.sqrt(gx**2 + gy**2 + 1)
+    cos_t = (-gy * math.sin(phi) + math.cos(phi)) / nrm  # angle between the surface normal and the beam
+    shade = np.clip(cos_t, 0.2, 1) ** -0.4
+    a = albedo if flat is None else np.where(flat, 0.6, albedo)
+    bright = a * shade
+    out = np.empty((rows, cols))
+    y = np.arange(rows, dtype=float)
+    for c in range(cols):
+        yp = (y - yc) * math.cos(phi) + z[:, c] * math.sin(phi) + yc  # where each surface row lands
+        order = np.argsort(yp)  # a monotonic mapping unless the surface hides itself
+        out[:, c] = np.interp(y, yp[order], bright[order, c], left=bright[0, c], right=bright[-1, c])
+    if blur:
+        out = ndi.gaussian_filter(out, blur)
+    return out + np.random.default_rng(seed).normal(0, noise, out.shape)

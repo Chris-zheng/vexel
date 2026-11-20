@@ -1,5 +1,17 @@
 # 更新记录
 
+## Unreleased — SEM window: review and English interface
+
+- English interface for the SEM window (toolbar switch, or `VEXEL_LANG=en`): `vexel.i18n` translates text where it is shown, including messages built with values; `scripts/i18n_extract.py` lists text without a translation; a test opens every tab in English and fails on any Chinese left.
+- Review fixes: labels at the image's right edge move left of their point; status messages clear after 10 s; automatic-measurement outlines can be hidden; a processing step's caution is no longer shown twice; clearer profile wording; wider name column.
+
+## Unreleased — SEM M6: tilt 2.5D height maps
+
+- Height maps from two or more SEM views at different stage tilts: rescaling, phase correlation and TV-L1 matching, with a confidence and an uncertainty for every pixel; weighted fusion of several views.
+- Levelling, ISO 25178 roughness, height profiles, ISO 5436-1 step heights (two parallel planes); height-map TIFF, STL/OBJ mesh, coloured height map, 3D preview.
+- "三维" tab in the SEM window; the reconstruction is kept in the reference image's record; `vexel sem tilt3d`.
+- Acceptance script `tests/benchmarks/sem_tilt3d_eval.py`.
+
 ## Unreleased — SEM M5 (first half): recognition and automatic planning
 
 - SEM probe: recognises line/space, contact-hole arrays, particles, layer stacks, cross-section profiles, tips or other; never guesses ("unknown" with candidates). Measures noise, stripes, uneven brightness and saturation, and suggests processing that does not harm the measurement.

@@ -47,6 +47,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from vexel.packs.sem.analysis import AnalysisSpec
 from vexel.packs.sem.process import Processing
+from vexel.packs.sem.tilt3d import Tilt3DSpec
 
 SCHEMA_VERSION = 1
 Kind = Literal["line", "polyline", "polygon", "wand", "angle", "point", "circle", "ellipse", "profile"]
@@ -108,6 +109,7 @@ class MeasurementSet(BaseModel):
     items: list[Item] = Field(default_factory=list)
     processing: Processing = Field(default_factory=Processing)
     analyses: list[AnalysisSpec] = Field(default_factory=list)  # automatic measurements (recipe, region, settings)
+    tilt3d: Tilt3DSpec | None = None  # a height map from tilted views of this image
     author: str = ""
     modified: str = ""
 

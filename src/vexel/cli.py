@@ -765,6 +765,89 @@ def cmd_sem_plan(args: argparse.Namespace) -> int:
     return code
 
 
+def _floats(text: str) -> list[float]:
+    try:
+        return [float(x) for x in text.split(",")]
+    except ValueError as e:
+        raise argparse.ArgumentTypeError("expected numbers separated by commas") from e
+
+
+def cmd_sem_tilt3d(args: argparse.Namespace) -> int:
+    """A 2.5D height map from SEM images of one place at different stage tilts."""
+    import numpy as np
+    from PIL import Image
+
+    from vexel.packs.sem import calibrate as semcal
+    from vexel.packs.sem import measure_io
+    from vexel.packs.sem import tilt3d as T
+
+    files = [Path(f) for f in args.images]
+    if len(files) < 2:
+        print("give the reference image and at least one tilted view")
+        return 2
+    if args.tilts:
+        tilts = args.tilts
+        if len(tilts) != len(files):
+            print(f"give one tilt per image ({len(files)}), got {len(tilts)}")
+            return 2
+    else:
+        tilts = [T.stage_tilt(f) for f in files]
+        if any(t is None for t in tilts):
+            print("the stage tilt is not in every file's metadata: give --tilts (degrees, one per image)")
+            return 2
+    spec = T.Tilt3DSpec(reference_tilt=tilts[0], axis=args.axis, level=args.level, smooth=args.smooth, min_confidence=args.min_confidence,
+                        views=[T.TiltView(file=str(f.resolve()), sha256=semcal.file_sha256(f), tilt=t) for f, t in zip(files[1:], tilts[1:])],
+                        profiles=[[[p[0], p[1]], [p[2], p[3]]] for p in args.profile or []],
+                        steps=[{"lower": s[:4], "upper": s[4:]} for s in args.step or []])  # fmt: skip
+    res = T.run_spec(spec, files[0], use_ocr=not args.no_ocr)
+    hm = res.hm
+    unit = "nm" if hm.pixel_size else "px"
+    f = 1e-9 if hm.pixel_size else 1.0
+    report = {"reference": files[0].name, "tilts": tilts, "axis_deg": args.axis, "unit": "m" if hm.pixel_size else "px",
+              "height_range": float(np.nanpercentile(res.z[hm.valid], 99) - np.nanpercentile(res.z[hm.valid], 1)) if hm.valid.any() else None,
+              "reliable_fraction": float(hm.valid.mean()), "median_uncertainty": float(np.median(hm.uncertainty[hm.valid])) if hm.valid.any() else None,
+              "roughness": res.roughness, "steps": res.steps, "pairs": hm.pairs, "warnings": res.warnings,
+              "profiles": [{k: v for k, v in p.items() if k in ("from", "to")} | {"height_range": float(np.ptp(p["height"]))} for p in res.profiles]}  # fmt: skip
+    if args.output:
+        report["output"] = str(T.save_tiff(hm, args.output, res.z, {"tilts": tilts, "axis": args.axis}))
+    if args.mesh:
+        report["mesh"] = str(T.save_mesh(hm, args.mesh, res.z, exaggeration=args.exaggeration))
+    if args.picture:
+        Image.fromarray(T.colour(res.z, hm.valid)).save(args.picture)
+        report["picture"] = str(args.picture)
+    if args.view3d:
+        Image.fromarray(T.render_3d(res.z, mask=hm.valid, exaggeration=args.exaggeration, sx=hm.sx, sy=hm.sy)).save(args.view3d)
+        report["view3d"] = str(args.view3d)
+    if args.save:
+        cal = semcal.for_file(files[0], use_ocr=not args.no_ocr)
+        ms = measure_io.load_record(cal.sha256) or measure_io.new_set(files[0], cal)
+        ms.tilt3d = spec
+        measure_io.autosave(ms)
+        report["record"] = str(measure_io.record_path(cal.sha256))
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2, default=float))
+        return 0
+    print(f"{files[0].name}: height map from {len(files)} views (tilts {', '.join(f'{t:g}°' for t in tilts)}; axis {args.axis:g}°)")
+    if report["height_range"] is not None:
+        print(f"  height range (1-99 %): {report['height_range'] / f:.4g} {unit}; reliable pixels {report['reliable_fraction']:.0%}; "
+              f"median uncertainty {report['median_uncertainty'] / f:.3g} {unit}")  # fmt: skip
+    r = res.roughness
+    if r:
+        print("  roughness (levelled): " + ", ".join(f"{k} {r[k] / f:.4g} {unit}" for k in ("Sa", "Sq", "Sz")) + f", Ssk {r['Ssk']:.3f}, Sku {r['Sku']:.3f}")
+    for st in res.steps:
+        box = lambda b: ",".join(f"{v:.0f}" for v in b)  # noqa: E731
+        print(f"  step [{box(st['lower'])}] -> [{box(st['upper'])}]: "
+              + (st["error"] if "error" in st else f"{st['step'] / f:.4g} ± {st['uncertainty'] / f:.2g} {unit} (two-plane fit, ISO 5436-1)"))  # fmt: skip
+    for p in report["profiles"]:
+        print(f"  profile {p['from']} -> {p['to']}: height range {p['height_range'] / f:.4g} {unit}")
+    for w in res.warnings:
+        print(f"  ! {w}")
+    for key in ("output", "mesh", "picture", "view3d", "record"):
+        if key in report:
+            print(f"wrote {report[key]}")
+    return 0
+
+
 def cmd_sem_info(args: argparse.Namespace) -> int:
     from vexel.packs.sem.metadata import read_metadata
 
@@ -1282,6 +1365,24 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--json", action="store_true")
     c.add_argument("--no-ocr", action="store_true")
     c.set_defaults(func=cmd_sem_plan)
+    c = ssub.add_parser("tilt3d", help="a 2.5D height map from images of one place at different stage tilts (stereo)")
+    c.add_argument("images", nargs="+", help="the reference image (the map is drawn on it) and one or more tilted views")
+    c.add_argument("--tilts", type=_floats, metavar="T0,T1,...", help="stage tilt of each image, degrees (default: from the metadata); write --tilts=-5,5 when the first is negative")
+    c.add_argument("--axis", type=float, default=0.0, help="tilt axis direction in the image, degrees from horizontal (default 0; 90: vertical)")
+    c.add_argument("--level", type=int, choices=[0, 1, 2], default=1, help="remove a plane (1, default) or a quadric (2); 0: none")
+    c.add_argument("--smooth", type=float, default=1.5, help="Gaussian on the heights, pixels (default 1.5)")
+    c.add_argument("--min-confidence", type=float, default=0.3, help="pixels below are marked unreliable (default 0.3)")
+    c.add_argument("--profile", type=_floats, action="append", metavar="X0,Y0,X1,Y1", help="a height profile (repeatable)")
+    c.add_argument("--step", type=_floats, action="append", metavar="X0,Y0,X1,Y1,X0,Y0,X1,Y1", help="step height: lower box, then upper box (repeatable)")
+    c.add_argument("-o", "--output", help="height map TIFF (height, confidence, uncertainty; float32)")
+    c.add_argument("--mesh", help="the surface as .stl or .obj")
+    c.add_argument("--picture", help="coloured height map (PNG)")
+    c.add_argument("--view3d", help="a shaded 3D preview (PNG)")
+    c.add_argument("--exaggeration", type=float, default=1.0, help="height exaggeration for the mesh and 3D preview")
+    c.add_argument("--save", action="store_true", help="keep the reconstruction in the reference image's record (the SEM window shows it)")
+    c.add_argument("--json", action="store_true")
+    c.add_argument("--no-ocr", action="store_true")
+    c.set_defaults(func=cmd_sem_tilt3d)
     c = ssub.add_parser("info", help="instrument metadata of an SEM image")
     c.add_argument("file")
     c.add_argument("--json", action="store_true")
