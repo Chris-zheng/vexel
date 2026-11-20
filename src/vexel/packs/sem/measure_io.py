@@ -59,7 +59,18 @@ def values_of(ms: MeasurementSet, image: np.ndarray | None, result: process.Resu
     return compute_all(ms, res.analysis if res else None, res.mask if res else None)
 
 
-def tables(ms: MeasurementSet, image: np.ndarray | None = None, result: process.Result | None = None) -> dict[str, pd.DataFrame]:
+def analyses_of(ms: MeasurementSet, image: np.ndarray | None, result: process.Result | None = None) -> list[Any]:
+    """Every automatic measurement of the record, recomputed on the corrected image."""
+    from vexel.packs.sem.analysis import run
+
+    res = processed(ms, image, result)
+    if res is None:
+        return []
+    return [run(spec, res.analysis, ms.scale, res.mask, ms.image.get("crop_rows")) for spec in ms.analyses]
+
+
+def tables(ms: MeasurementSet, image: np.ndarray | None = None, result: process.Result | None = None,
+           analyses: list[Any] | None = None) -> dict[str, pd.DataFrame]:  # fmt: skip
     unit, f = display_unit(ms)
     res = processed(ms, image, result)
     values = values_of(ms, image, res)
@@ -111,8 +122,11 @@ def tables(ms: MeasurementSet, image: np.ndarray | None = None, result: process.
     steps = [{"step": i, "processing": line} for i, line in enumerate(process.describe(ms.processing), start=1)]
     if res is not None and res.saturation:
         steps.append({"step": None, "processing": f"saturated pixels: {res.saturation.get('pixels', 0)} ({res.saturation.get('fraction', 0):.3%})"})
+    from vexel.packs.sem.analysis import objects_table, summary_table
+
+    ans = analyses if analyses is not None else analyses_of(ms, image, res)
     return {"measurements": table, "profile_edges": pd.DataFrame(edges), "summary": pd.DataFrame(summary), "calibration": calib,
-            "processing": pd.DataFrame(steps)}  # fmt: skip
+            "processing": pd.DataFrame(steps), "auto": summary_table(ans, unit, f), "auto_objects": objects_table(ans, unit, f)}  # fmt: skip
 
 
 def export_csv(ms: MeasurementSet, image: np.ndarray | None, path: str | Path, result: process.Result | None = None) -> list[Path]:
@@ -122,7 +136,8 @@ def export_csv(ms: MeasurementSet, image: np.ndarray | None, path: str | Path, r
     t = tables(ms, image, result)
     out = [path]
     t["measurements"].to_csv(path, index=False, encoding="utf-8-sig")  # Excel opens UTF-8 with a BOM correctly
-    for key, suffix in (("profile_edges", "_edges"), ("summary", "_summary"), ("processing", "_processing")):
+    for key, suffix in (("profile_edges", "_edges"), ("summary", "_summary"), ("processing", "_processing"), ("auto", "_auto"),
+                        ("auto_objects", "_auto_objects")):  # fmt: skip
         if len(t[key]) and (key != "processing" or ms.processing.active()):
             p = path.with_name(path.stem + suffix + path.suffix)
             t[key].to_csv(p, index=False, encoding="utf-8-sig")
@@ -135,7 +150,9 @@ def export_xlsx(ms: MeasurementSet, image: np.ndarray | None, path: str | Path, 
     t = tables(ms, image, result)
     with pd.ExcelWriter(path, engine="openpyxl") as xw:
         for name, sheet in (("measurements", "测量"), ("summary", "汇总"), ("profile_edges", "剖面边缘"), ("calibration", "标定"),
-                            ("processing", "图像处理")):  # fmt: skip
+                            ("processing", "图像处理"), ("auto", "自动测量"), ("auto_objects", "自动测量对象")):  # fmt: skip
+            if name.startswith("auto") and not ms.analyses:
+                continue
             df = t[name]
             (df if len(df) else pd.DataFrame({"": []})).to_excel(xw, sheet_name=sheet, index=False)
     return path
@@ -259,7 +276,8 @@ def render(image: np.ndarray, ms: MeasurementSet, *, crop_rows: int | None = Non
 
     lw = max(1, canvas.width // 600)
     values = values_of(ms, image, res)
-    for kind, geom, colour, anchor, label in _shapes(ms, values):
+    auto = [sh for an in analyses_of(ms, image, res) if not an.error for sh in an.shapes]
+    for kind, geom, colour, anchor, label in _shapes(ms, values) + auto:
         if kind == "points":
             for x, y in geom:
                 r = 3 * lw + 2
@@ -277,6 +295,8 @@ def render(image: np.ndarray, ms: MeasurementSet, *, crop_rows: int | None = Non
             xs = cx + a * np.cos(t) * math.cos(th) + b * np.sin(t) * math.sin(th)
             ys = cy - a * np.cos(t) * math.sin(th) + b * np.sin(t) * math.cos(th)
             dr.line(list(zip(xs, ys)), fill=colour, width=lw)
+        if not label:
+            continue
         x, y = anchor
         tw = dr.textlength(say(label), font=font)
         tx, ty = min(x + 6, canvas.width - tw - 4), max(y - size - 4, 2)
@@ -317,7 +337,8 @@ def export_svg(image: np.ndarray, ms: MeasurementSet, path: str | Path, *, crop_
     fs = max(12, w // 70)
     parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">',
              f'<image width="{w}" height="{h}" href="data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"/>']  # fmt: skip
-    for kind, geom, colour, anchor, label in _shapes(ms, values_of(ms, image, res)):
+    auto = [sh for an in analyses_of(ms, image, res) if not an.error for sh in an.shapes]
+    for kind, geom, colour, anchor, label in _shapes(ms, values_of(ms, image, res)) + auto:
         style = f'fill="none" stroke="{colour}" stroke-width="{lw}"'
         if kind == "points":
             parts += [f'<circle cx="{x:.2f}" cy="{y:.2f}" r="{3 * lw + 2}" {style}/>' for x, y in geom]
@@ -328,6 +349,8 @@ def export_svg(image: np.ndarray, ms: MeasurementSet, path: str | Path, *, crop_
         elif kind == "ellipse":
             cx, cy, a, b, deg = geom
             parts.append(f'<ellipse cx="{cx:.2f}" cy="{cy:.2f}" rx="{a:.2f}" ry="{b:.2f}" transform="rotate({-deg:.2f} {cx:.2f} {cy:.2f})" {style}/>')
+        if not label:
+            continue
         x, y = anchor
         parts.append(f'<text x="{min(x + 6, w - 10):.1f}" y="{max(y - 4, fs):.1f}" fill="{colour}" font-size="{fs}" font-family="sans-serif" '
                      f'paint-order="stroke" stroke="black" stroke-width="3">{escape(label)}</text>')  # fmt: skip

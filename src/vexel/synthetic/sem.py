@@ -312,3 +312,211 @@ def add_saturation(img: np.ndarray, *, spots: int = 3, radius: float = 18.0, see
         out += 1.2 * np.exp(-(((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * rad**2)))
     out = np.clip(out, 0, 1)
     return out, out >= 1.0
+
+
+# -- semiconductor patterns with known geometry (M4) ---------------------------------------------
+
+
+def rough_edge(n: int, sigma: float, corr: float, rng: np.random.Generator) -> np.ndarray:
+    """Edge displacement series (n lines) with exponential autocorrelation: correlation
+    length ``corr`` lines, standard deviation ``sigma`` pixels (AR(1) process)."""
+    phi = math.exp(-1.0 / corr) if corr > 0 else 0.0
+    e = rng.normal(0, sigma * math.sqrt(1 - phi**2), n)
+    x = np.empty(n)
+    x[0] = rng.normal(0, sigma)
+    for i in range(1, n):
+        x[i] = phi * x[i - 1] + e[i]
+    return x
+
+
+def _cover(x: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Fraction of pixel [i, i+1) inside [a, b), per line (a, b: one value per line)."""
+    return np.clip(np.minimum(x[None, :] + 1, b[:, None]) - np.maximum(x[None, :], a[:, None]), 0, 1)
+
+
+def rough_lines(rows: int = 512, cols: int = 640, *, width: float = 14.3, pitch: float = 36.7, offset: float = 9.4, sigma: float = 1.0,
+                corr: float = 8.0, blur: float = 1.0, noise: float = 0.03, edge_peaks: bool = False, slant: float = 0.0,
+                seed: int = 0, noise_seed: int | None = None) -> tuple[np.ndarray, dict]:  # fmt: skip
+    """Vertical bright lines whose two edges wander independently (``sigma`` px, correlation
+    length ``corr`` lines); ``slant`` px of drift per line. ``noise_seed``: a different noise
+    on the same pattern (repeated images of one place). Returns the image (0..1) and the
+    truth: per line its left and right edge series (pixel boundaries)."""
+    from scipy import ndimage as ndi
+
+    rng = np.random.default_rng(seed)
+    x = np.arange(cols, dtype=float)
+    y = np.arange(rows, dtype=float)
+    img = np.full((rows, cols), 0.2)
+    truth = {"lines": [], "width": width, "pitch": pitch, "sigma": sigma, "corr": corr}
+    k = 0
+    while offset + k * pitch + width < cols - 1:
+        s = offset + k * pitch + slant * (y - rows / 2)
+        left = s + rough_edge(rows, sigma, corr, rng)
+        right = s + width + rough_edge(rows, sigma, corr, rng)
+        if s.min() > 1:
+            img += (0.15 if edge_peaks else 0.55) * _cover(x, left, right)
+            if edge_peaks:
+                img += 0.5 * (_cover(x, left - 1, left + 1) + _cover(x, right - 1, right + 1))
+            truth["lines"].append({"left": left, "right": right})
+        k += 1
+    if blur:
+        img = ndi.gaussian_filter(img, blur)
+    img += (rng if noise_seed is None else np.random.default_rng(noise_seed)).normal(0, noise, img.shape)
+    return img, truth
+
+
+def layer_stack(rows: int = 300, cols: int = 500, *, thicknesses: tuple[float, ...] = (40.3, 23.6, 61.2), top: float = 50.5,
+                levels: tuple[float, ...] = (0.15, 0.7, 0.35, 0.85, 0.5), roughness: float = 0.6, blur: float = 1.2, noise: float = 0.03,
+                seed: int = 0) -> tuple[np.ndarray, dict]:  # fmt: skip
+    """A cross-section: horizontal layers of the given ``thicknesses`` (px) starting at row
+    ``top``, grey ``levels`` from the top (vacuum/protective layer first), interfaces
+    rough by ``roughness`` px. Returns the image and the interface series."""
+    from scipy import ndimage as ndi
+
+    rng = np.random.default_rng(seed)
+    yy = np.arange(rows, dtype=float)[:, None]
+    bounds = [top + sum(thicknesses[:i]) for i in range(len(thicknesses) + 1)]
+    series = [b + rough_edge(cols, roughness, 15, rng) for b in bounds]
+    img = np.full((rows, cols), levels[0])
+    for i, s in enumerate(series):
+        frac = np.clip(yy + 1 - s[None, :], 0, 1)  # fraction of pixel row below the interface
+        img = img + (levels[i + 1] - levels[i]) * frac
+    if blur:
+        img = ndi.gaussian_filter(img, blur)
+    img += rng.normal(0, noise, img.shape)
+    return img, {"interfaces": series, "thicknesses": thicknesses}
+
+
+def xsection_feature(rows: int = 260, cols: int = 300, *, top: float = 60.3, height: float = 140.0, width_top: float = 60.0,
+                     angle: float = 84.0, feature: str = "bright", blur: float = 1.2, noise: float = 0.03,
+                     seed: int = 0) -> tuple[np.ndarray, dict]:  # fmt: skip
+    """A trapezoid line (``bright``) or trench (``dark``) in cross-section: ``height`` rows,
+    ``width_top`` px at its top, sidewalls at ``angle`` degrees to the base inside the
+    feature (< 90: wider at the bottom)."""
+    from scipy import ndimage as ndi
+
+    rng = np.random.default_rng(seed)
+    x = np.arange(cols, dtype=float)
+    y = np.arange(rows, dtype=float) + 0.5
+    run = 1 / math.tan(math.radians(angle))  # widening per line on each side, going down
+    cx = cols / 2
+    depth = np.clip(y - top, 0, None)
+    half = width_top / 2 + run * depth
+    inside_rows = (y >= top) & (y < top + height)
+    left = np.where(inside_rows, cx - half, cx)
+    right = np.where(inside_rows, cx + half, cx)
+    cov = _cover(x, left, right)
+    # partial first and last rows
+    cov[np.floor(top).astype(int)] *= 1 - (top - math.floor(top))
+    base, fg = (0.25, 0.75) if feature == "bright" else (0.75, 0.25)
+    img = base + (fg - base) * cov
+    if blur:
+        img = ndi.gaussian_filter(img, blur)
+    img += rng.normal(0, noise, img.shape)
+    mid = top + height / 2
+    return img, {"height": height, "width_top": width_top, "width_bottom": width_top + 2 * run * height,
+                 "width_middle": width_top + 2 * run * (mid - top), "angle": angle, "top": top}  # fmt: skip
+
+
+def _disks(rows: int, cols: int, discs: list[tuple[float, float, float]], ss: int = 4) -> np.ndarray:
+    """Area coverage of discs (cx, cy, r) per pixel, ``ss``×``ss`` supersampled."""
+    off = (np.arange(ss) + 0.5) / ss
+    yy = (np.arange(rows)[:, None] + off[None, :]).reshape(-1)
+    xx = (np.arange(cols)[:, None] + off[None, :]).reshape(-1)
+    cov = np.zeros((rows * ss, cols * ss), bool)
+    for cx, cy, r in discs:
+        y0, y1 = max(int((cy - r - 1) * ss), 0), min(int((cy + r + 1) * ss) + 1, rows * ss)
+        x0, x1 = max(int((cx - r - 1) * ss), 0), min(int((cx + r + 1) * ss) + 1, cols * ss)
+        if y0 >= y1 or x0 >= x1:
+            continue
+        cov[y0:y1, x0:x1] |= (yy[y0:y1, None] - cy) ** 2 + (xx[None, x0:x1] - cx) ** 2 <= r * r
+    return cov.reshape(rows, ss, cols, ss).mean(axis=(1, 3))
+
+
+def hole_array(rows: int = 400, cols: int = 500, *, pitch: tuple[float, float] = (48.3, 48.3), diameter: float = 24.6, sd: float = 0.0,
+               missing: int = 3, blur: float = 1.2, noise: float = 0.03, rim: bool = True,
+               seed: int = 0, noise_seed: int | None = None) -> tuple[np.ndarray, dict]:  # fmt: skip
+    """A contact-hole array: dark holes (``diameter`` ± ``sd`` px) on a bright surface with
+    bright rims, ``missing`` sites left empty. Truth: every hole (cx, cy, d) and the missing sites."""
+    from scipy import ndimage as ndi
+
+    rng = np.random.default_rng(seed)
+    sites = [(x, y) for y in np.arange(pitch[1] * 0.75, rows - pitch[1] * 0.5, pitch[1])
+             for x in np.arange(pitch[0] * 0.75, cols - pitch[0] * 0.5, pitch[0])]  # fmt: skip
+    gone = set(rng.choice(len(sites), size=min(missing, len(sites)), replace=False).tolist()) if missing else set()
+    holes, discs = [], []
+    for i, (x, y) in enumerate(sites):
+        if i in gone:
+            continue
+        d = diameter + rng.normal(0, sd) if sd else diameter
+        holes.append((x, y, d))
+        discs.append((x, y, d / 2))
+    cov = _disks(rows, cols, discs)
+    img = 0.7 - 0.5 * cov
+    if rim:
+        ring = _disks(rows, cols, [(x, y, r + 1.5) for x, y, r in discs]) - cov
+        img += 0.25 * ring
+    if blur:
+        img = ndi.gaussian_filter(img, blur)
+    img += (rng if noise_seed is None else np.random.default_rng(noise_seed)).normal(0, noise, img.shape)
+    return img, {"holes": holes, "missing": [sites[i] for i in sorted(gone)], "pitch": pitch, "diameter": diameter}
+
+
+def particle_field(rows: int = 500, cols: int = 600, *, n: int = 60, d_mean: float = 24.0, d_sd: float = 6.0, touching: float = 0.2,
+                   blur: float = 1.0, noise: float = 0.03, seed: int = 0) -> tuple[np.ndarray, dict]:  # fmt: skip
+    """Bright round particles (diameters ~ normal) on a dark background; a fraction
+    ``touching`` placed against another one. Truth: every particle (cx, cy, d)."""
+    from scipy import ndimage as ndi
+
+    rng = np.random.default_rng(seed)
+    parts: list[tuple[float, float, float]] = []
+    tries = 0
+    while len(parts) < n and tries < n * 200:
+        tries += 1
+        d = max(rng.normal(d_mean, d_sd), 6.0)
+        r = d / 2
+        if parts and rng.random() < touching:
+            px, py, pd = parts[rng.integers(len(parts))]
+            ang = rng.uniform(0, 2 * np.pi)
+            cx, cy = px + (pd / 2 + r - 0.15 * min(r, pd / 2)) * np.cos(ang), py + (pd / 2 + r - 0.15 * min(r, pd / 2)) * np.sin(ang)
+            if any(np.hypot(cx - x, cy - y) < (r + q / 2) * 0.9 for x, y, q in parts if (x, y, q) != (px, py, pd)):
+                continue
+        else:
+            cx, cy = rng.uniform(r + 2, cols - r - 2), rng.uniform(r + 2, rows - r - 2)
+            if any(np.hypot(cx - x, cy - y) < r + q / 2 + 3 for x, y, q in parts):
+                continue
+        if not (r + 1 < cx < cols - r - 1 and r + 1 < cy < rows - r - 1):
+            continue
+        parts.append((cx, cy, d))
+    img = 0.2 + 0.6 * np.clip(_disks(rows, cols, [(x, y, d / 2) for x, y, d in parts]), 0, 1)
+    if blur:
+        img = ndi.gaussian_filter(img, blur)
+    img += rng.normal(0, noise, img.shape)
+    return img, {"particles": parts}
+
+
+def tip(rows: int = 400, cols: int = 300, *, radius: float = 20.0, half_angle: float = 12.0, apex: tuple[float, float] = (150.3, 80.6),
+        blur: float = 1.0, noise: float = 0.03, seed: int = 0) -> tuple[np.ndarray, dict]:  # fmt: skip
+    """A bright needle pointing up: a cone of ``half_angle`` degrees capped by a sphere of
+    ``radius`` px tangent to it, apex at ``apex`` (x, y). Truth: radius, cone angle."""
+    from scipy import ndimage as ndi
+
+    rng = np.random.default_rng(seed)
+    ss = 4
+    off = (np.arange(ss) + 0.5) / ss
+    yy = (np.arange(rows)[:, None] + off[None, :]).reshape(-1)[:, None]
+    xx = (np.arange(cols)[:, None] + off[None, :]).reshape(-1)[None, :]
+    a = math.radians(half_angle)
+    ax, ay = apex
+    cy = ay + radius  # sphere centre
+    ty = cy - radius * math.sin(a)  # where the cap meets the cone (tangent)
+    half_at_t = radius * math.cos(a)
+    inside_cap = (xx - ax) ** 2 + (yy - cy) ** 2 <= radius**2
+    half = half_at_t + (yy - ty) * math.tan(a)
+    inside_cone = (yy >= ty) & (np.abs(xx - ax) <= half)
+    cov = (inside_cap | inside_cone).reshape(rows, ss, cols, ss).mean(axis=(1, 3))
+    img = 0.2 + 0.6 * cov
+    if blur:
+        img = ndi.gaussian_filter(img, blur)
+    img += rng.normal(0, noise, img.shape)
+    return img, {"radius": radius, "cone_angle": 2 * half_angle, "apex": apex}

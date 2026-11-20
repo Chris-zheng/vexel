@@ -799,3 +799,59 @@ def test_sem_window_runs_slow_processing_in_the_background(app, tmp_path, monkey
     assert out[0].is_file() and w._result_key == w.ms.processing.model_dump_json()
     w.wait_processing()
     _dispose(w)
+
+
+def test_sem_window_automatic_measurements(app, tmp_path, monkeypatch):
+    import tifffile
+
+    from vexel.packs.sem import calibrate as C
+    from vexel.synthetic.sem import rough_lines
+    from vexel.ui.sem_window import TAB_AUTO, SemWindow
+
+    monkeypatch.setenv("VEXEL_HOME", str(tmp_path / "home"))
+    img, truth = rough_lines(rows=300, cols=400, seed=1)
+    path = tmp_path / "lines.tif"
+    tifffile.imwrite(path, (np.clip(img, 0, 1) * 65535).astype(np.uint16))
+    C.save(C.manual(path, pixel_size=1.5e-9).confirm())
+    w = SemWindow()
+    w.open_path(path, wait=True)
+    assert w.run_btn.isEnabled() and w.auto_list.count() == 0
+
+    # a region drawn the way a person does: two clicks with the region tool
+    w.set_tool("region")
+    assert w.tabs.currentIndex() == TAB_AUTO
+    from qtpy.QtCore import QPointF
+
+    w.view._add_point(QPointF(5, 10))
+    w.view._add_point(QPointF(390, 290))
+    assert w._pending_region == [5, 10, 390, 290] and w.view._region_item is not None
+    an = w.run_analysis("lines")
+    assert an is not None and an.error is None and w.ms.analyses[0].region == [5, 10, 390, 290]
+    assert an.value("cd_mean") == pytest.approx(truth["width"] * 1.5e-9, rel=0.02)
+    assert w.auto_list.count() == 1 and w.auto_list.currentRow() == 0 and w.auto_table.rowCount() == an.value("lines")
+    assert "线宽 CD" in w.auto_summary.text() and len(w.view._auto) > 10 and w._pending_region is None
+    # a second one on the whole image, with a setting; undo and redo
+    w.run_analysis("lines", None, average=3)
+    assert [a.params for a in w.ms.analyses] == [{}, {"average": 3}] and w.auto_list.currentRow() == 1
+    w.undo()
+    assert len(w.ms.analyses) == 1 and w.auto_list.count() == 1
+    w.redo()
+    assert len(w.ms.analyses) == 2
+    w.auto_list.setCurrentRow(0)
+    w._delete_analysis()
+    assert [a.id for a in w.ms.analyses] == [2]
+    # the panel's own settings and the rerun of the selected one
+    w.recipe.setCurrentIndex(w.recipe.findData("lines"))
+    w._auto_widgets["average"][1].setValue(2)
+    w.auto_list.setCurrentRow(0)
+    w._rerun_selected()
+    assert w.ms.analyses[0].params == {"average": 2}
+    # exports and reopening
+    sheets = __import__("openpyxl").load_workbook(w.export(tmp_path / "m.xlsx")[0]).sheetnames
+    assert "自动测量" in sheets and "自动测量对象" in sheets
+    assert w.export(tmp_path / "m.png")[0].is_file()
+    _dispose(w)
+    w2 = SemWindow()
+    w2.open_path(path, wait=True)
+    assert [a.id for a in w2.ms.analyses] == [2] and w2.auto_list.count() == 1 and w2.analyses[0].value("lines") >= 8
+    _dispose(w2)

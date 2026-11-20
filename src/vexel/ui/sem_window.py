@@ -7,7 +7,8 @@ pitch - with a table of results, undo and redo, and exports (CSV, Excel, annotat
 and SVG, and the measurement record itself). M3: image processing - line levelling,
 Fourier destriping, background levelling, scan-line alignment, denoising, contrast and
 sharpening - with a before/after view, the saturated-area mask, and multi-frame
-averaging.
+averaging. M4: automatic measurements on a region - line/space CD and roughness, contact
+holes, particles, cross-section layers and profiles, tips.
 
 Measurements are kept per image (by its SHA-256) and saved after every change, so
 reopening the image brings them back. Values are always recomputed from the drawn
@@ -61,7 +62,7 @@ TOOLS = [("pan", "选择", "V"), ("line", "长度", "L"), ("polyline", "折线",
          ("wand", "魔棒", "W"), ("angle", "角度", "G"), ("point", "计数", "N"), ("circle", "圆", "C"), ("ellipse", "椭圆", "E"),
          ("profile", "线剖面", "P")]  # fmt: skip
 EDGE_METHODS = [("threshold", "阈值（50% 等）"), ("gradient", "最大梯度"), ("peak", "亮边峰值")]
-TAB_CALIBRATION, TAB_PROCESSING, TAB_MEASURE = range(3)
+TAB_CALIBRATION, TAB_PROCESSING, TAB_MEASURE, TAB_AUTO = range(4)
 
 
 class _CalibrateJob(QObject):
@@ -79,6 +80,39 @@ class _CalibrateJob(QObject):
             self.done.emit(for_file(self.path))
         except Exception as e:  # noqa: BLE001 - shown to the person
             self.failed.emit(f"{type(e).__name__}: {e}")
+
+
+def _param_widget(prm: Any, value: Any) -> Any:
+    """An input for one recipe or processing setting."""
+    if prm.kind == "choice":
+        w: Any = QComboBox()
+        for v, label in prm.choices:
+            w.addItem(label, v)
+        w.setCurrentIndex(max(0, [c[0] for c in prm.choices].index(value)))
+    elif prm.kind == "bool":
+        w = QCheckBox()
+        w.setChecked(bool(value))
+    elif prm.kind == "int":
+        w = QSpinBox()
+        w.setRange(int(prm.lo), int(min(prm.hi, 2**31 - 1)))
+        w.setValue(int(value))
+    else:
+        w = QDoubleSpinBox()
+        w.setDecimals(3 if prm.step < 0.1 else 2 if prm.step < 1 else 1)
+        w.setRange(prm.lo, prm.hi)
+        w.setSingleStep(prm.step)
+        w.setValue(float(value))
+    if prm.help:
+        w.setToolTip(prm.help)
+    return w
+
+
+def _param_value(prm: Any, w: Any) -> Any:
+    if prm.kind == "choice":
+        return w.currentData()
+    if prm.kind == "bool":
+        return w.isChecked()
+    return w.value()
 
 
 class _ProcessJob(QObject):
@@ -131,6 +165,10 @@ class SemWindow(QMainWindow):
         self._proc_thread: QThread | None = None
         self._proc_job: _ProcessJob | None = None
         self._sync = False  # tests and scripts: process on this thread
+        self.analyses: list[Any] = []  # analysis.Analysis for each spec of the record
+        self._auto_key: str | None = None
+        self._pending_region: list[float] | None = None
+        self._auto_widgets: dict[str, Any] = {}
         self._param_widgets: dict[str, Any] = {}
         self._param_timer = QTimer(self)
         self._param_timer.setSingleShot(True)
@@ -150,7 +188,8 @@ class SemWindow(QMainWindow):
         root.addWidget(self.view, 1)
         self.tabs = QTabWidget()
         self.tabs.setFixedWidth(390)
-        for title, build in (("标定", self._build_calibration), ("图像处理", self._build_processing), ("测量", self._build_measurements)):
+        for title, build in (("标定", self._build_calibration), ("图像处理", self._build_processing), ("测量", self._build_measurements),
+                             ("自动测量", self._build_auto)):  # fmt: skip
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             panel = QFrame()
@@ -379,6 +418,65 @@ class SemWindow(QMainWindow):
         v.addLayout(orow)
         v.addWidget(muted("荷电最有效的办法在采集端（降低电压、缩短驻留时间、交错扫描、镀膜）；软件处理只是补救。"))
 
+    def _build_auto(self, v: QVBoxLayout) -> None:
+        from vexel.packs.sem.analysis import RECIPES
+
+        v.addWidget(heading("自动测量"))
+        self.recipe = QComboBox()
+        for name, rec in RECIPES.items():
+            self.recipe.addItem(rec.label, name)
+        self.recipe.currentIndexChanged.connect(lambda _i: self._show_recipe())
+        v.addWidget(self.recipe)
+        self.recipe_help = muted("")
+        v.addWidget(self.recipe_help)
+        rrow = QHBoxLayout()
+        self.region_btn = QPushButton("框选区域")
+        self.region_btn.setToolTip("在图上点击区域的两个对角")
+        self.region_btn.clicked.connect(lambda: self.set_tool("region"))
+        self.whole_btn = QPushButton("整张图")
+        self.whole_btn.clicked.connect(lambda: self.set_region(None))
+        rrow.addWidget(self.region_btn)
+        rrow.addWidget(self.whole_btn)
+        v.addLayout(rrow)
+        self.region_label = muted("区域：整张图（信息栏以上）")
+        v.addWidget(self.region_label)
+        self.auto_box = QWidget()
+        self.auto_form = QFormLayout(self.auto_box)
+        self.auto_form.setContentsMargins(0, 0, 0, 0)
+        v.addWidget(self.auto_box)
+        arow = QHBoxLayout()
+        self.run_btn = QPushButton("运行")
+        self.run_btn.setObjectName("primary")
+        self.run_btn.clicked.connect(lambda: self.run_analysis())
+        self.rerun_btn = QPushButton("用当前设置重算所选")
+        self.rerun_btn.clicked.connect(self._rerun_selected)
+        arow.addWidget(self.run_btn)
+        arow.addWidget(self.rerun_btn)
+        v.addLayout(arow)
+        self.auto_list = QListWidget()
+        self.auto_list.setMaximumHeight(110)
+        self.auto_list.currentRowChanged.connect(lambda _r: self._show_auto_detail())
+        v.addWidget(self.auto_list)
+        self.auto_delete = QPushButton("删除所选自动测量")
+        self.auto_delete.clicked.connect(self._delete_analysis)
+        v.addWidget(self.auto_delete)
+        self.auto_summary = QLabel("")
+        self.auto_summary.setWordWrap(True)
+        self.auto_summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        v.addWidget(self.auto_summary)
+        self.auto_notes = QLabel("")
+        self.auto_notes.setObjectName("notes")
+        self.auto_notes.setWordWrap(True)
+        self.auto_notes.hide()
+        v.addWidget(self.auto_notes)
+        self.auto_table = QTableWidget(0, 0)
+        self.auto_table.verticalHeader().setVisible(False)
+        self.auto_table.verticalHeader().setDefaultSectionSize(20)
+        self.auto_table.setMinimumHeight(180)
+        self.auto_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        v.addWidget(self.auto_table)
+        self._show_recipe()
+
     # -- opening and calibrating --------------------------------------------------------
 
     def _choose(self) -> None:
@@ -397,6 +495,7 @@ class SemWindow(QMainWindow):
             return False
         self.path, self.image, self.cal, self.ms, self.values = path, img, None, None, {}
         self.processor, self.result, self._result_key = None, None, None
+        self.analyses, self._auto_key, self._pending_region = [], None, None
         self._undo, self._redo = [], []
         self.view.set_image(img)
         self.file_label.setText(f"{path.name}：{img.shape[1]}×{img.shape[0]} 像素")
@@ -536,6 +635,11 @@ class SemWindow(QMainWindow):
         self.up_btn.setEnabled(ready and row > 0)
         self.down_btn.setEnabled(ready and 0 <= row < n - 1)
         self.remove_step_btn.setEnabled(ready and 0 <= row < n)
+        arow = self.auto_list.currentRow()
+        for w in (self.run_btn, self.region_btn, self.whole_btn, self.recipe):
+            w.setEnabled(ready)
+        self.rerun_btn.setEnabled(ready and arow >= 0)
+        self.auto_delete.setEnabled(ready and arow >= 0)
 
     def _hover(self, x: float, y: float) -> None:
         if self.image is None or not (0 <= x < self.image.shape[1] and 0 <= y < self.image.shape[0]):
@@ -584,6 +688,8 @@ class SemWindow(QMainWindow):
     def set_tool(self, tool: str) -> None:
         if tool == "calibrate":
             self.tabs.setCurrentIndex(TAB_CALIBRATION)
+        elif tool == "region":
+            self.tabs.setCurrentIndex(TAB_AUTO)
         elif tool != "pan":
             self.tabs.setCurrentIndex(TAB_MEASURE)  # the results appear there
         self.view.set_tool(tool)
@@ -599,6 +705,11 @@ class SemWindow(QMainWindow):
         return {"width": int(self.profile_width.value()), "method": self.edge_method.currentData(), "level": self.edge_level.value() / 100}
 
     def _shape_done(self, tool: str, points: list[list[float]]) -> None:
+        if tool == "region":
+            self.set_tool("pan")
+            (x0, y0), (x1, y1) = points
+            self.set_region([min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)])
+            return
         if tool == "calibrate":
             self.set_tool("pan")
             length_px = float(np.hypot(points[1][0] - points[0][0], points[1][1] - points[0][1]))
@@ -759,6 +870,7 @@ class SemWindow(QMainWindow):
         tilt_note = f"；倾斜校正 {self.ms.scale.tilt:.1f}°" if self.ms.scale.tilt else ""
         self.summary.setText(f"{n} 项测量{unit_note}{tilt_note}。自动保存，重新打开这张图时恢复。" if n else f"选择上方工具在图上测量{unit_note}。")
         self._show_profile(self.values.get(select) if select is not None else None, unit, f)
+        self._refresh_auto(res, unit, f)
         self._fill_steps()
         self._set_buttons()
 
@@ -853,6 +965,168 @@ class SemWindow(QMainWindow):
         self._changed(select=None)
         return True
 
+
+    # -- automatic measurements ----------------------------------------------------------------
+
+    def _show_recipe(self) -> None:
+        from vexel.packs.sem.analysis import RECIPES
+
+        rec = RECIPES[self.recipe.currentData()]
+        self.recipe_help.setText(rec.help)
+        while self.auto_form.rowCount():
+            self.auto_form.removeRow(0)
+        self._auto_widgets = {}
+        for prm in rec.params:
+            w = _param_widget(prm, prm.default)
+            self._auto_widgets[prm.name] = (prm, w)
+            self.auto_form.addRow(prm.label, w)
+
+    def _recipe_params(self) -> dict[str, Any]:
+        out = {}
+        for name, (prm, w) in self._auto_widgets.items():
+            v = _param_value(prm, w)
+            if v != prm.default:
+                out[name] = v
+        return out
+
+    def set_region(self, region: list[float] | None) -> None:
+        self._pending_region = region
+        self.view.show_region(region)
+        if region:
+            x0, y0, x1, y1 = region
+            self.region_label.setText(f"区域：x {x0:.0f}–{x1:.0f}，y {y0:.0f}–{y1:.0f}（{x1 - x0:.0f}×{y1 - y0:.0f} 像素）")
+        else:
+            self.region_label.setText("区域：整张图（信息栏以上）")
+
+    def run_analysis(self, recipe: str | None = None, region: list[float] | None | str = "pending", **params: Any) -> Any:
+        """Add an automatic measurement (the panel's recipe, region and settings unless given) and run it."""
+        if self.ms is None:
+            return None
+        recipe = recipe or self.recipe.currentData()
+        region = self._pending_region if region == "pending" else region
+        params = params or (self._recipe_params() if recipe == self.recipe.currentData() else {})
+        self._push_undo()
+        try:
+            spec = self.ms.add_analysis(recipe, region, **params)  # type: ignore[arg-type]
+        except ValueError as e:
+            self._pop_undo()
+            QMessageBox.warning(self, "无法测量", str(e))
+            return None
+        self.tabs.setCurrentIndex(TAB_AUTO)
+        self._auto_select = spec.id
+        self.set_region(None)
+        self._changed()
+        return next((a for a in self.analyses if a.spec.id == spec.id), None)
+
+    _auto_select: int | None = None
+
+    def _rerun_selected(self) -> None:
+        row = self.auto_list.currentRow()
+        if self.ms is None or not 0 <= row < len(self.ms.analyses):
+            return
+        spec = self.ms.analyses[row]
+        if spec.recipe != self.recipe.currentData():
+            self.statusBar().showMessage("所选自动测量用的是另一种方法：先在上方选同一方法")
+            return
+        self._push_undo()
+        spec.params = self._recipe_params()
+        if self._pending_region:
+            spec.region = self._pending_region
+            self.set_region(None)
+        self._auto_select = spec.id
+        self._changed()
+
+    def _delete_analysis(self) -> None:
+        row = self.auto_list.currentRow()
+        if self.ms is None or not 0 <= row < len(self.ms.analyses):
+            return
+        self._push_undo()
+        self.ms.analyses.pop(row)
+        self._changed()
+
+    def _refresh_auto(self, res: Any, unit: str, f: float) -> None:
+        from vexel.packs.sem.analysis import RECIPES, run
+
+        if self.ms is None:
+            return
+        key = json.dumps([[a.model_dump() for a in self.ms.analyses], self._result_key, self.ms.scale.model_dump()], sort_keys=True, default=str)
+        if key != self._auto_key:
+            img = res.analysis if res is not None else self.image
+            mask = res.mask if res is not None else None
+            QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                self.analyses = [run(spec, img, self.ms.scale, mask, self.ms.image.get("crop_rows")) for spec in self.ms.analyses]
+            finally:
+                QGuiApplication.restoreOverrideCursor()
+            self._auto_key = key
+            self.view.show_analysis([sh for an in self.analyses if not an.error for sh in an.shapes])
+        want = self._auto_select
+        row = self.auto_list.currentRow()
+        self.auto_list.blockSignals(True)
+        self.auto_list.clear()
+        for an in self.analyses:
+            text = f"A{an.spec.id} {RECIPES[an.spec.recipe].label if an.spec.recipe in RECIPES else an.spec.recipe}"
+            main = next(((lab, v, kind) for k, lab, v, kind in an.summary if kind in ("length", "angle") and v is not None), None)
+            if an.error:
+                text += f"：{an.error}"
+            elif main:
+                text += f"：{main[0]} {self._fmt(main[1], main[2], unit, f)}"
+            self.auto_list.addItem(text)
+        if want is not None:
+            row = next((i for i, a in enumerate(self.analyses) if a.spec.id == want), row)
+            self._auto_select = None
+        self.auto_list.setCurrentRow(min(row, self.auto_list.count() - 1) if row >= 0 or want is not None else -1)
+        self.auto_list.blockSignals(False)
+        self._show_auto_detail(unit, f)
+
+    @staticmethod
+    def _fmt(v: Any, kind: str, unit: str, f: float) -> str:
+        from vexel.packs.sem.measure_io import num
+
+        if v is None:
+            return "–"
+        if kind == "length":
+            return f"{num(v / f)} {unit}"
+        if kind == "area":
+            return f"{num(v / f**2)} {unit}²"
+        if kind == "angle":
+            return f"{v:.2f}°"
+        if kind == "ratio":
+            return f"{v:.3f}"
+        return str(v)
+
+    def _show_auto_detail(self, unit: str | None = None, f: float | None = None) -> None:
+        from vexel.packs.sem import measure_io
+        from vexel.packs.sem.analysis import objects_table
+
+        row = self.auto_list.currentRow()
+        if self.ms is None or not 0 <= row < len(self.analyses):
+            self.auto_summary.setText("选择方法、框选区域（或用整张图），点“运行”。" if self.ms is not None else "")
+            self.auto_notes.hide()
+            self.auto_table.setRowCount(0)
+            self.auto_table.setColumnCount(0)
+            self._set_buttons()
+            return
+        if unit is None or f is None:
+            unit, f = measure_io.display_unit(self.ms)
+        an = self.analyses[row]
+        if an.error:
+            self.auto_summary.setText(f"无法测量：{an.error}")
+        else:
+            lines = [f"<b>A{an.spec.id}</b>" + (f"（区域 {an.extra.get('region')}）" if an.spec.region else "（整张图）")]
+            lines += [f"{lab}：<b>{self._fmt(v, kind, unit, f)}</b>" for k, lab, v, kind in an.summary if v is not None]
+            self.auto_summary.setText("<br>".join(lines))
+        self.auto_notes.setText("\n".join(f"• {w}" for w in an.warnings))
+        self.auto_notes.setVisible(bool(an.warnings))
+        df = objects_table([an], unit, f).drop(columns=["analysis", "recipe"], errors="ignore").head(500)
+        self.auto_table.setRowCount(len(df))
+        self.auto_table.setColumnCount(len(df.columns))
+        self.auto_table.setHorizontalHeaderLabels([str(c) for c in df.columns])
+        for i, r in enumerate(df.itertuples(index=False)):
+            for j, val in enumerate(r):
+                text = f"{val:.4g}" if isinstance(val, float) else str(val)
+                self.auto_table.setItem(i, j, QTableWidgetItem(text))
+        self._set_buttons()
 
     # -- image processing ---------------------------------------------------------------------
 

@@ -45,6 +45,7 @@ from typing import Any, Literal
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
+from vexel.packs.sem.analysis import AnalysisSpec
 from vexel.packs.sem.process import Processing
 
 SCHEMA_VERSION = 1
@@ -106,11 +107,22 @@ class MeasurementSet(BaseModel):
     scale: Scale = Field(default_factory=Scale)
     items: list[Item] = Field(default_factory=list)
     processing: Processing = Field(default_factory=Processing)
+    analyses: list[AnalysisSpec] = Field(default_factory=list)  # automatic measurements (recipe, region, settings)
     author: str = ""
     modified: str = ""
 
     def next_id(self) -> int:
         return max((i.id for i in self.items), default=0) + 1
+
+    def add_analysis(self, recipe: str, region: list[float] | None = None, **params: Any) -> AnalysisSpec:
+        from vexel.packs.sem.analysis import RECIPES
+
+        if recipe not in RECIPES:
+            raise ValueError(f"unknown recipe {recipe!r}; one of {', '.join(RECIPES)}")
+        RECIPES[recipe].resolve(params)
+        spec = AnalysisSpec(id=max((a.id for a in self.analyses), default=0) + 1, recipe=recipe, region=region, params=params)
+        self.analyses.append(spec)
+        return spec
 
     def add(self, kind: str, points: list[tuple[float, float]] | list[list[float]], **kw: Any) -> Item:
         item = Item(id=self.next_id(), kind=kind, points=[(float(x), float(y)) for x, y in points], **kw)

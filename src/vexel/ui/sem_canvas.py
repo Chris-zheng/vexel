@@ -36,7 +36,7 @@ from qtpy.QtCore import QPointF, QRectF, Qt, Signal
 from qtpy.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap
 from qtpy.QtWidgets import QGraphicsEllipseItem, QGraphicsItem, QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView
 
-AUTO_FINISH = {"line": 2, "profile": 2, "angle": 3, "calibrate": 2}
+AUTO_FINISH = {"line": 2, "profile": 2, "angle": 3, "calibrate": 2, "region": 2}
 FINISH_ON_ENTER = {"polyline": 2, "polygon": 3, "circle": 3, "ellipse": 5, "point": 1}
 TOOL_HINTS = {
     "pan": "拖动平移，滚轮缩放；点击测量可选中，拖动小圆点修改",
@@ -51,6 +51,7 @@ TOOL_HINTS = {
     "ellipse": "在椭圆周上点击五个或更多点；双击或回车拟合",
     "point": "点击每个要计数的目标；回车结束这一组",
     "calibrate": "依次点击比例尺的两端",
+    "region": "点击自动测量区域的两个对角",
 }
 
 
@@ -118,6 +119,8 @@ class ImageView(QGraphicsView):
         self._mask_item: Any = None
         self._original: QImage | None = None
         self.split: float | None = None  # 0..1 of the width, or None: no comparison
+        self._auto: list[Any] = []  # automatic-measurement drawings (not selectable)
+        self._region_item: Any = None
         self.shapes: list[tuple[int, str, Any, str, tuple[float, float], str]] = []
         self._freehand = False
         self.selected: int | None = None
@@ -129,6 +132,7 @@ class ImageView(QGraphicsView):
         self.scene().clear()
         self.overlay, self._preview, self._handles, self._drawn, self.points = [], [], [], {}, []
         self._before = self._divider = self._mask_item = self._original = None
+        self._auto, self._region_item = [], None
         self.split = None
         self._pix = self.scene().addPixmap(QPixmap.fromImage(to_qimage(img)))
         self._pix.setZValue(-10)
@@ -243,6 +247,10 @@ class ImageView(QGraphicsView):
             for p in self.points:
                 self._preview.append(self.scene().addEllipse(QRectF(p.x() - 4, p.y() - 4, 8, 8), _pen("#f59e0b", 2)))
             return
+        if self.tool == "region":
+            a, b = pts[0], pts[-1]
+            self._preview.append(self.scene().addRect(QRectF(a, b).normalized(), pen))
+            return
         path = QPainterPath(pts[0])
         for p in pts[1:]:
             path.lineTo(p)
@@ -300,6 +308,51 @@ class ImageView(QGraphicsView):
             for d in drawn:
                 d.setData(0, item_id)
             self._drawn[item_id] = drawn
+
+    def show_analysis(self, shapes: list[tuple[str, Any, str, tuple[float, float], str]]) -> None:
+        """Draw automatic measurements (outlines, edges, fits): a layer apart from the manual ones."""
+        for it in self._auto:
+            self.scene().removeItem(it)
+        self._auto = []
+        font = QFont()
+        font.setPointSize(10)
+        for kind, geom, colour, anchor, label in shapes:
+            pen = _pen(colour, 1.5)
+            pen.setCosmetic(True)
+            if kind == "points":
+                for x, y in geom:
+                    self._auto.append(self.scene().addEllipse(QRectF(x - 5, y - 5, 10, 10), pen))
+            elif kind in ("polygon", "polyline") and len(geom) >= 2:
+                path = QPainterPath(QPointF(*geom[0]))
+                for x, y in geom[1:]:
+                    path.lineTo(x, y)
+                if kind == "polygon":
+                    path.closeSubpath()
+                self._auto.append(self.scene().addPath(path, pen))
+            if label:
+                text = QGraphicsSimpleTextItem(label)
+                text.setFont(font)
+                text.setBrush(QBrush(QColor(colour)))
+                text.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+                text.setPos(anchor[0] + 3, anchor[1] + 2)
+                back = self.scene().addRect(QRectF(text.boundingRect()).adjusted(-2, -1, 2, 1), QPen(Qt.PenStyle.NoPen), QBrush(QColor(0, 0, 0, 160)))
+                back.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations)
+                back.setPos(text.pos())
+                self.scene().addItem(text)
+                self._auto += [back, text]
+        for it in self._auto:
+            it.setZValue(-5)
+
+    def show_region(self, region: list[float] | None) -> None:
+        """The region chosen for the next automatic measurement (dashed)."""
+        if self._region_item is not None:
+            self.scene().removeItem(self._region_item)
+            self._region_item = None
+        if region:
+            x0, y0, x1, y1 = region
+            pen = _pen("#facc15", 2, dash=True)
+            pen.setCosmetic(True)
+            self._region_item = self.scene().addRect(QRectF(QPointF(x0, y0), QPointF(x1, y1)).normalized(), pen)
 
     def show_handles(self, item_id: int | None, points: list[tuple[float, float]] | None) -> None:
         for h in self._handles:

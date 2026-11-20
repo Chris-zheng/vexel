@@ -1,5 +1,12 @@
 # 更新记录
 
+## Unreleased — SEM M4: semiconductor metrology and segmentation
+
+- Automatic measurements on a region, kept in the image's record: line/space CD, pitch, LER/LWR with noise-bias correction; contact holes with array pitch and missing holes; particles with Feret diameters and size distributions; cross-section layer thickness; line/trench profiles with sidewall angles; tip radius and cone angle.
+- "自动测量" tab with region selection; Excel sheets and annotated pictures include the results.
+- `vexel sem analyze`: many images at once, with repeatability (mean, SD, 3σ) per folder.
+- Acceptance script `tests/benchmarks/sem_metrology_eval.py`.
+
 ## Unreleased — SEM M3: image processing
 
 - Line levelling, Fourier destriping, background levelling, scan-line alignment, denoising, contrast/CLAHE and sharpening; the chain is kept in the measurement record.

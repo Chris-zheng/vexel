@@ -565,6 +565,135 @@ def cmd_sem_average(args: argparse.Namespace) -> int:
     return 0
 
 
+def _region(text: str) -> list[float]:
+    try:
+        v = [float(x) for x in text.split(",")]
+    except ValueError as e:
+        raise argparse.ArgumentTypeError("expected X0,Y0,X1,Y1 (pixels)") from e
+    if len(v) != 4:
+        raise argparse.ArgumentTypeError("expected X0,Y0,X1,Y1 (pixels)")
+    return v
+
+
+def cmd_sem_analyze(args: argparse.Namespace) -> int:
+    """Automatic measurements (CD/LER, holes, particles, layers, profiles, tips) on one or many images.
+
+    Several images: one row per image and the spread across images (mean, SD, 3σ) per
+    folder - repeated images of the same place give the measurement's repeatability."""
+    import pandas as pd
+
+    from vexel.packs.sem import calibrate as semcal
+    from vexel.packs.sem import measure_io
+    from vexel.packs.sem.analysis import RECIPES
+    from vexel.packs.sem.measure import scale_from
+    from vexel.packs.sem.process import parse_step
+
+    if args.list:
+        for name, rec in RECIPES.items():
+            print(f"{name:10s} {rec.label}: {rec.help}")
+            for prm in rec.params:
+                extra = " | ".join(c[0] for c in prm.choices) if prm.choices else f"{prm.lo:g}..{prm.hi:g}" if prm.kind in ("int", "float") else "true|false"
+                print(f"    {prm.name}={prm.default}  ({extra}) {prm.label}")
+        return 0
+    if not args.images:
+        print("give images (or --list)")
+        return 2
+    params: dict[str, Any] = {}
+    for kv in args.param or []:
+        k, eq, v = kv.partition("=")
+        if not eq:
+            raise ValueError(f"expected key=value, got {kv!r}")
+        params[k.strip()] = v.strip()
+    if args.recipe:
+        typed = RECIPES[args.recipe].resolve(params)
+        params = {k: typed[k] for k in params}
+    rows, objects, reports = [], [], []
+    for f in args.images:
+        path = Path(f)
+        cal = semcal.for_file(path, use_ocr=not args.no_ocr)
+        ms = measure_io.load_record(cal.sha256) or measure_io.new_set(path, cal)
+        ms.scale = scale_from(cal, args.tilt if args.tilt is not None else ms.scale.tilt)
+        if args.step:
+            ms.processing.steps = [parse_step(t) for t in args.step]
+        if args.recipe:
+            ms.analyses = [a for a in ms.analyses if not args.replace] if args.save else []
+            ms.add_analysis(args.recipe, args.region, **params)
+        if not ms.analyses:
+            print(f"{path.name}: no automatic measurements (give --recipe)")
+            continue
+        img = semcal.load_image(path)
+        unit, fct = measure_io.display_unit(ms)
+        ans = measure_io.analyses_of(ms, img)
+        if args.save:
+            measure_io.autosave(ms)
+        for an in ans:
+            entry = {"file": path.name, "group": path.parent.name, "analysis": an.spec.id, "recipe": an.spec.recipe,
+                     "calibration": cal.describe(), "error": an.error, "warnings": an.warnings}  # fmt: skip
+            for key, label, v, kind in an.summary:
+                if kind == "length" and v is not None and cal.ok:
+                    v = v / fct
+                entry[key] = v
+            rows.append(entry)
+            if not an.objects.empty:
+                df = an.objects.copy()
+                df.insert(0, "file", path.name)
+                df.insert(1, "analysis", an.spec.id)
+                objects.append(df)
+            reports.append((path, an, unit, fct, cal))
+    if not rows:
+        return 1
+    table = pd.DataFrame(rows)
+    numeric = [c for c in table.columns if c not in ("file", "group", "analysis", "recipe", "calibration", "error", "warnings")
+               and pd.api.types.is_numeric_dtype(table[c])]  # fmt: skip
+    spread = []
+    if len(table) > 1:
+        for (grp, rec), g in table.groupby(["group", "recipe"]):
+            for c in numeric:
+                v = g[c].dropna()
+                if len(v) >= 2:
+                    spread.append({"group": grp, "recipe": rec, "quantity": c, "n": len(v), "mean": v.mean(), "sd": v.std(ddof=1), "3sigma": 3 * v.std(ddof=1),
+                                   "min": v.min(), "max": v.max()})  # fmt: skip
+    spread_df = pd.DataFrame(spread)
+    if args.json:
+        print(json.dumps({"results": rows, "repeatability": spread}, ensure_ascii=False, indent=2, default=float))
+    else:
+        for path, an, unit, fct, cal in reports:
+            print(f"{path.name}  A{an.spec.id} {RECIPES[an.spec.recipe].label}  ({cal.describe()})")
+            if an.error:
+                print(f"  error: {an.error}")
+            for key, label, v, kind in an.summary:
+                if v is None:
+                    continue
+                if kind == "length":
+                    text = f"{v / fct:.4g} {unit}" if cal.ok else f"{v:.4g} px"
+                elif kind == "angle":
+                    text = f"{v:.2f}°"
+                elif kind == "ratio":
+                    text = f"{v:.3f}"
+                else:
+                    text = str(v)
+                print(f"  {label}: {text}")
+            for w in an.warnings:
+                print(f"  ! {w}")
+        if len(spread_df):
+            print("\nspread across images (repeatability):")
+            with pd.option_context("display.max_rows", 200, "display.width", 200):
+                print(spread_df.to_string(index=False, float_format=lambda x: f"{x:.4g}"))
+    if args.output:
+        out = Path(args.output)
+        if out.suffix.lower() == ".xlsx":
+            with pd.ExcelWriter(out, engine="openpyxl") as xw:
+                table.assign(warnings=table["warnings"].map("; ".join)).to_excel(xw, sheet_name="结果", index=False)
+                (spread_df if len(spread_df) else pd.DataFrame({"": []})).to_excel(xw, sheet_name="重复性", index=False)
+                (pd.concat(objects, ignore_index=True) if objects else pd.DataFrame({"": []})).to_excel(xw, sheet_name="对象", index=False)
+        else:
+            table.assign(warnings=table["warnings"].map("; ".join)).to_csv(out, index=False, encoding="utf-8-sig")
+            if len(spread_df):
+                spread_df.to_csv(out.with_name(out.stem + "_repeatability.csv"), index=False, encoding="utf-8-sig")
+        print(f"wrote {out}")
+    return 0
+
+
 def cmd_sem_info(args: argparse.Namespace) -> int:
     from vexel.packs.sem.metadata import read_metadata
 
@@ -1055,6 +1184,21 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--json", action="store_true")
     c.add_argument("--no-ocr", action="store_true")
     c.set_defaults(func=cmd_sem_average)
+    c = ssub.add_parser("analyze", help="automatic measurements: CD/LER/LWR, contact holes, particles, layer thickness, sidewall angle, tips")
+    c.add_argument("images", nargs="*")
+    c.add_argument("-r", "--recipe", choices=["lines", "holes", "particles", "layers", "profile", "tip"],
+                   help="what to measure; without it: the automatic measurements saved in each image's record")
+    c.add_argument("--region", type=_region, metavar="X0,Y0,X1,Y1", help="pixels (default: the whole micrograph)")
+    c.add_argument("-p", "--param", action="append", metavar="KEY=VALUE", help="a recipe setting (repeatable; --list shows them)")
+    c.add_argument("-s", "--step", action="append", metavar="OP[:KEY=VALUE,...]", help="processing steps first (default: the record's)")
+    c.add_argument("--list", action="store_true", help="list the recipes and their settings")
+    c.add_argument("-o", "--output", help=".xlsx (results, repeatability, objects) or .csv")
+    c.add_argument("--save", action="store_true", help="add the measurement to each image's record (the SEM window shows it)")
+    c.add_argument("--replace", action="store_true", help="with --save: replace the record's automatic measurements")
+    c.add_argument("--tilt", type=float)
+    c.add_argument("--json", action="store_true")
+    c.add_argument("--no-ocr", action="store_true")
+    c.set_defaults(func=cmd_sem_analyze)
     c = ssub.add_parser("info", help="instrument metadata of an SEM image")
     c.add_argument("file")
     c.add_argument("--json", action="store_true")
