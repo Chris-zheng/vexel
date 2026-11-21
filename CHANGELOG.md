@@ -1,5 +1,12 @@
 # 更新记录
 
+## Unreleased — SEM window: result first
+
+- Opening an image without automatic measurements recognises, plans and tries it at once (switch "打开图片时自动规划", remembered): the trial is drawn on the image and summarised on a card in the panel (image type, method, key numbers, checks, the first reasons) with three choices: accept, adjust (method, settings and region into the panel), do it myself. The plan no longer opens a dialog.
+- Method settings live in a collapsed "高级设置" drawer: changed ones are marked with their default in the tooltip, one button restores the defaults; selecting an automatic measurement shows its settings, and a change re-runs it after a moment.
+- A calibration banner above the panel: pixel size and source, with "确认" when it waits for a person and "标定…" when there is none.
+- The side panel no longer scrolls sideways: long choices and labels shrink or wrap.
+
 ## Unreleased — SEM materials measurements and reports
 
 - Particles: solidity, convexity and mean grey level; rule-based classes (agglomerate, irregular / possibly broken, outlier / possibly foreign, normal) with the reason for each, coloured on the image. A round particle split in two by a noisy outline is merged back.

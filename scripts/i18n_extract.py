@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-FILES = ["src/vexel/ui/sem_window.py", "src/vexel/ui/sem_canvas.py", "src/vexel/ui/sem_charts.py", *sorted(str(p.relative_to(ROOT)) for p in (ROOT / "src/vexel/packs/sem").glob("*.py"))]
+FILES = ["src/vexel/ui/sem_window.py", "src/vexel/ui/sem_canvas.py", "src/vexel/ui/sem_charts.py", "src/vexel/ui/sem_cards.py", *sorted(str(p.relative_to(ROOT)) for p in (ROOT / "src/vexel/packs/sem").glob("*.py"))]
 CJK = re.compile(r"[一-鿿]")
 SKIP_CALLS = {"compile"}  # regular expressions (goal words) are not shown
 

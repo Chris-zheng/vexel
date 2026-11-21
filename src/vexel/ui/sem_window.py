@@ -88,6 +88,8 @@ def _param_widget(prm: Any, value: Any) -> Any:
     """An input for one recipe or processing setting."""
     if prm.kind == "choice":
         w: Any = QComboBox()
+        w.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        w.setMinimumContentsLength(6)
         for v, label in prm.choices:
             w.addItem(tr(label), v)
         w.setCurrentIndex(max(0, [c[0] for c in prm.choices].index(value)))
@@ -117,21 +119,39 @@ def _param_value(prm: Any, w: Any) -> Any:
     return w.value()
 
 
+def plan_preview(plan: Any, ms: Any, image: Any) -> Any:
+    """The plan's measurement as it would be on this image (on a copy of the record), for the
+    card and the picture before the person decides; None when the plan has no measurement."""
+    from vexel.packs.sem import measure_io
+
+    if plan is None or plan.recipe is None or ms is None:
+        return None
+    m = ms.model_copy(deep=True)
+    try:
+        spec = plan.apply(m)
+        return next((a for a in measure_io.analyses_of(m, image) if a.spec.id == spec.id), None)
+    except (ValueError, OSError):
+        return None
+
+
 class _PlanJob(QObject):
-    """Plans an SEM measurement away from the window (a language-model tier may take a while)."""
+    """Plans an SEM measurement away from the window (a language-model tier may take a while)
+    and computes its preview."""
 
     done = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, kwargs: dict[str, Any]) -> None:
+    def __init__(self, kwargs: dict[str, Any], ms: Any) -> None:
         super().__init__()
         self.kwargs = kwargs
+        self.ms = ms
 
     def run(self) -> None:
         from vexel.packs.sem.plan import make_plan
 
         try:
-            self.done.emit(make_plan(**self.kwargs))
+            plan = make_plan(**self.kwargs)
+            self.done.emit((plan, plan_preview(plan, self.ms, self.kwargs["image"])))
         except Exception as e:  # noqa: BLE001 - shown to the person
             self.failed.emit(f"{type(e).__name__}: {e}")
 
@@ -185,6 +205,25 @@ def _slow(chain: Any) -> bool:
     return False
 
 
+def _config() -> dict[str, Any]:
+    from vexel.i18n import _config_path
+
+    try:
+        return json.loads(_config_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _set_config(key: str, value: Any) -> None:
+    from vexel.i18n import _config_path
+
+    cfg = _config()
+    cfg[key] = value
+    p = _config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 class SemWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -233,12 +272,23 @@ class SemWindow(QMainWindow):
         root.addWidget(self.view, 1)
         self.tabs = QTabWidget()
         from vexel.i18n import language
+        from vexel.ui.sem_cards import CalibrationBanner
 
-        self.tabs.setFixedWidth(390 if language() == "zh" else 450)  # English tab names are longer
+        side = QWidget()
+        side.setFixedWidth(390 if language() == "zh" else 450)  # English tab names are longer
+        sv = QVBoxLayout(side)
+        sv.setContentsMargins(0, 0, 0, 0)
+        sv.setSpacing(0)
+        self.banner = CalibrationBanner()
+        self.banner.confirm.connect(self._confirm)
+        self.banner.open_calibration.connect(lambda: self.tabs.setCurrentIndex(TAB_CALIBRATION))
+        sv.addWidget(self.banner)
+        sv.addWidget(self.tabs, 1)
         for title, build in ((tr("标定"), self._build_calibration), (tr("图像处理"), self._build_processing), (tr("测量"), self._build_measurements),
                              (tr("自动测量"), self._build_auto), (tr("三维"), self._build_3d)):  # fmt: skip
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)  # the panel wraps instead
             panel = QFrame()
             panel.setObjectName("sidebar")
             scroll.setWidget(panel)
@@ -246,7 +296,10 @@ class SemWindow(QMainWindow):
             build(v)
             v.addStretch(1)
             self.tabs.addTab(scroll, title)
-        root.addWidget(self.tabs)
+        for box in self.tabs.findChildren(QComboBox):  # long choices must not widen the panel
+            box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            box.setMinimumContentsLength(6)
+        root.addWidget(side)
         self.setCentralWidget(central)
         self._set_buttons()
         self.say(tr("打开一张 SEM 图片开始"))
@@ -486,8 +539,19 @@ class SemWindow(QMainWindow):
         prow.addWidget(self.goal, 1)
         prow.addWidget(self.plan_btn)
         v.addLayout(prow)
-        self.plan_info = muted("")
-        v.addWidget(self.plan_info)
+        self.goal.returnPressed.connect(lambda: self.auto_plan())
+        self.autoplan_on = QCheckBox(tr("打开图片时自动规划"))
+        self.autoplan_on.setToolTip(tr("图片还没有自动测量时，打开后立即识别、规划并试运行；结果先给你看，采用后才加入记录"))
+        self.autoplan_on.setChecked(bool(_config().get("sem_autoplan", True)))
+        self.autoplan_on.toggled.connect(lambda on: _set_config("sem_autoplan", bool(on)))
+        v.addWidget(self.autoplan_on)
+        from vexel.ui.sem_cards import PlanCard
+
+        self.plan_card = PlanCard()
+        self.plan_card.accepted.connect(lambda: self._decide_plan("accept"))
+        self.plan_card.adjust.connect(lambda: self._decide_plan("adjust"))
+        self.plan_card.dismissed.connect(lambda: self._decide_plan("dismiss"))
+        v.addWidget(self.plan_card)
         v.addWidget(muted(tr("或手动选择：")))
         self.recipe = QComboBox()
         for name, rec in RECIPES.items():
@@ -507,10 +571,29 @@ class SemWindow(QMainWindow):
         v.addLayout(rrow)
         self.region_label = muted(tr("区域：整张图（信息栏以上）"))
         v.addWidget(self.region_label)
+        self.advanced_btn = QPushButton("")
+        self.advanced_btn.setCheckable(True)
+        self.advanced_btn.setFlat(True)
+        self.advanced_btn.setStyleSheet("text-align: left; padding: 2px 0;")
+        self.advanced_btn.setToolTip(tr("每种方法的全部设置；一般不用改。选中一项自动测量时，改动会立即重算它"))
+        self.advanced_btn.toggled.connect(lambda _on: self._mark_params())
+        v.addWidget(self.advanced_btn)
         self.auto_box = QWidget()
-        self.auto_form = QFormLayout(self.auto_box)
+        box_v = QVBoxLayout(self.auto_box)
+        box_v.setContentsMargins(0, 0, 0, 0)
+        self.auto_form = QFormLayout()
         self.auto_form.setContentsMargins(0, 0, 0, 0)
+        self.auto_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        box_v.addLayout(self.auto_form)
+        self.reset_params_btn = QPushButton(tr("恢复默认设置"))
+        self.reset_params_btn.clicked.connect(self.reset_params)
+        box_v.addWidget(self.reset_params_btn)
+        self.auto_box.hide()
         v.addWidget(self.auto_box)
+        self._live_timer = QTimer(self)
+        self._live_timer.setSingleShot(True)
+        self._live_timer.setInterval(400)
+        self._live_timer.timeout.connect(self._live_apply)
         arow = QHBoxLayout()
         self.run_btn = QPushButton(tr("运行"))
         self.run_btn.setObjectName("primary")
@@ -661,8 +744,14 @@ class SemWindow(QMainWindow):
         if path:
             self.open_path(path)
 
-    def open_path(self, path: str | Path, *, wait: bool = False) -> bool:
+    def open_path(self, path: str | Path, *, wait: bool = False, plan: bool | None = None) -> bool:
+        """Open an image: calibrate it and load its record. ``plan``: recognise and plan it
+        right away when the record has no automatic measurement (None: the panel's switch;
+        with ``wait``, only when asked)."""
         from vexel.packs.sem.calibrate import load_image
+
+        self._plan_on_open = plan
+        self.plan_card.hide()
 
         path = Path(path)
         try:
@@ -778,6 +867,32 @@ class SemWindow(QMainWindow):
                 self.tilt.setValue(self.ms.scale.tilt)
         self._apply_scale(record=False)
         self.say(tr(cal.describe()))
+        self._show_banner()
+        want = self._plan_on_open
+        if want is None:
+            want = self.autoplan_on.isChecked() and not self._sync
+        self._plan_on_open = False
+        if want and not self.ms.analyses and not self.ms.items and self.ms.tilt3d is None:
+            self.auto_plan()
+
+    _plan_on_open: bool | None = None
+
+    def _show_banner(self) -> None:
+        from vexel.packs.sem.calibrate import format_length
+
+        cal = self.cal
+        if cal is None:
+            self.banner.hide()
+            return
+        if not cal.ok:
+            self.banner.set_state("none", tr("未标定：长度以像素为单位"))
+            return
+        src = tr(SOURCES.get(cal.source, cal.source))
+        size = tr(f"{format_length(cal.pixel_size)} / 像素")
+        if cal.needs_confirmation:
+            self.banner.set_state("pending", f"<b>{size}</b> · {src} · " + tr("待确认"))
+        else:
+            self.banner.set_state("confirmed", f"<b>{size}</b> · {src}")
 
     def _apply_scale(self, record: bool = True) -> None:
         from vexel.packs.sem.measure import scale_from
@@ -819,6 +934,7 @@ class SemWindow(QMainWindow):
         for w in (self.run_btn, self.region_btn, self.whole_btn, self.recipe):
             w.setEnabled(ready)
         self.plan_btn.setEnabled(ready and getattr(self, "_plan_thread", None) is None)
+        self.plan_card.setEnabled(ready)
         has_tilt = ready and self.ms.tilt3d is not None and bool(self.ms.tilt3d.views)
         done = self.tilt_result is not None
         for w in (self.tilt_add_btn, self.tilt_axis, self.tilt_level, self.tilt_smooth, self.tilt_conf):
@@ -1193,10 +1309,85 @@ class SemWindow(QMainWindow):
         while self.auto_form.rowCount():
             self.auto_form.removeRow(0)
         self._auto_widgets = {}
+        self._auto_labels: dict[str, QLabel] = {}
         for prm in rec.params:
             w = _param_widget(prm, prm.default)
             self._auto_widgets[prm.name] = (prm, w)
-            self.auto_form.addRow(tr(prm.label), w)
+            lab = QLabel(tr(prm.label))
+            lab.setWordWrap(True)
+            self._auto_labels[prm.name] = lab
+            self.auto_form.addRow(lab, w)
+            for sig in ("currentIndexChanged", "toggled", "valueChanged"):
+                if hasattr(w, sig):
+                    getattr(w, sig).connect(lambda *_a: self._param_edited())
+                    break
+        self._mark_params()
+
+    def _default_text(self, prm: Any) -> str:
+        if prm.kind == "choice":
+            return tr(dict(prm.choices).get(prm.default, str(prm.default)))
+        if prm.kind == "bool":
+            return tr("是") if prm.default else tr("否")
+        return f"{prm.default:g}"
+
+    def _mark_params(self) -> None:
+        """Changed settings in bold with their default in the tooltip; the drawer's button
+        says how many are changed."""
+        changed = self._recipe_params() if self._auto_widgets else {}
+        for name, (prm, _w) in self._auto_widgets.items():
+            lab = self._auto_labels[name]
+            on = name in changed
+            lab.setText(("● " if on else "") + tr(prm.label))
+            lab.setStyleSheet("font-weight: 600; color: #2563eb;" if on else "")
+            lab.setToolTip(tr(f"默认：{self._default_text(prm)}"))
+        n = len(changed)
+        opened = self.advanced_btn.isChecked()
+        self.auto_box.setVisible(opened)
+        self.advanced_btn.setText(("▾ " if opened else "▸ ") + tr("高级设置") + (tr(f"（{n} 项已改）") if n else ""))
+        self.reset_params_btn.setEnabled(bool(n))
+
+    def _param_edited(self) -> None:
+        self._mark_params()
+        if not getattr(self, "_loading_params", False):
+            self._live_timer.start()
+
+    def _live_apply(self, refresh: bool = True) -> bool:
+        """Changed settings apply at once to the automatic measurement shown in the panel (the
+        selected one) when it uses the same method."""
+        if self.ms is None or self._shown_spec is None:
+            return False
+        spec = next((a for a in self.ms.analyses if a.id == self._shown_spec), None)
+        new = self._recipe_params()
+        if spec is None or spec.recipe != self.recipe.currentData() or spec.params == new:
+            return False
+        self._push_undo()
+        spec.params = new
+        if refresh:
+            self._auto_select = spec.id
+            self._changed()
+        return True
+
+    def reset_params(self) -> None:
+        self._load_params({})
+        self._live_apply()
+
+    def _load_params(self, params: dict[str, Any], recipe: str | None = None) -> None:
+        """Show a method and its settings in the panel (without re-running anything)."""
+        self._loading_params = True
+        try:
+            if recipe and recipe != self.recipe.currentData():
+                self.recipe.setCurrentIndex(self.recipe.findData(recipe))
+            for name, (prm, w) in self._auto_widgets.items():
+                v = params.get(name, prm.default)
+                if prm.kind == "choice":
+                    w.setCurrentIndex(max(0, w.findData(v)))
+                elif prm.kind == "bool":
+                    w.setChecked(bool(v))
+                else:
+                    w.setValue(v)
+        finally:
+            self._loading_params = False
+        self._mark_params()
 
     def _recipe_params(self) -> dict[str, Any]:
         out = {}
@@ -1256,18 +1447,20 @@ class SemWindow(QMainWindow):
             QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             try:
                 plan = make_plan(**kwargs)
+                preview = plan_preview(plan, self.ms, self.image) if accept is None else None
             finally:
                 QGuiApplication.restoreOverrideCursor()
-            return self._plan_ready(plan)
+            return self._plan_ready((plan, preview))
         if self._plan_thread is not None:
             return None
-        self.plan_info.setText(tr("正在识别图像并试运行…"))
+        self.plan_card.busy(tr("正在识别图像并试运行…"))
         self._plan_thread = QThread()
-        self._plan_job = _PlanJob(kwargs)
+        self._plan_job = _PlanJob(kwargs, self.ms.model_copy(deep=True))
         self._plan_job.moveToThread(self._plan_thread)
         self._plan_thread.started.connect(self._plan_job.run)
         self._plan_job.done.connect(self._plan_ready)
-        self._plan_job.failed.connect(lambda msg: (self._end_plan(), self.plan_info.setText(tr(f"规划失败：{msg}"))))
+        self._plan_job.failed.connect(lambda msg: (self._end_plan(), self.plan_card.set_plan(f"<b>{tr('自动规划')}</b>", "needs_user", [],
+                                                                                          [("✗", tr(f"规划失败：{msg}"))], [], False)))  # fmt: skip
         self._plan_thread.start()
         self._set_buttons()
         return None
@@ -1279,41 +1472,77 @@ class SemWindow(QMainWindow):
             self._plan_thread, self._plan_job = None, None
         self._set_buttons()
 
-    def _plan_ready(self, plan: Any) -> Any:
+    def _plan_ready(self, result: Any) -> Any:
+        """Show the plan on its card and its trial on the image; it enters the record only
+        when accepted (``auto_plan(accept=...)`` decides without asking)."""
+        from vexel.packs.sem import measure_io
         from vexel.packs.sem.analysis import RECIPES
-        from vexel.packs.sem.plan import memory_store, remember
         from vexel.packs.sem.recognize import KIND_NAMES
 
+        plan, preview = result if isinstance(result, tuple) else (result, None)
         self._end_plan()
         self.last_plan = plan
+        self.plan_preview = preview
         fp = plan.fingerprint
-        status = {"ready": tr("试运行通过"), "check": tr("试运行通过，有提示"), "needs_user": tr("需要你来决定")}[plan.status]
-        who = tr("离线规则") if plan.planner == "rules" else (plan.model or plan.planner)
-        head = tr(f"图像：{KIND_NAMES.get(fp.kind, fp.kind)}（{fp.confidence:.2f}）；测量：{RECIPES[plan.recipe].label if plan.recipe else '无'}；{status}；规划：{who}")
-        self.plan_info.setText(head)
-        detail = "\n".join(f"• {tr(r)}" for r in plan.reasons)
-        if plan.params:
-            detail += tr(f"\n\n设置：{plan.params}")
-        if plan.steps:
-            detail += tr("\n图像处理：") + tr("、").join(s["op"] for s in plan.steps)
         usable = plan.recipe is not None and plan.status != "needs_user"
-        accept = self._plan_accept
-        if accept is None:
-            if usable:
-                answer = QMessageBox.question(self, tr("自动规划"), tr(f"{head}\n\n{detail}\n\n采用这个规划？（加入记录，可撤销）"))
-                accept = answer == QMessageBox.StandardButton.Yes
-            else:
-                QMessageBox.information(self, tr("自动规划"), f"{head}\n\n{detail}")
-                accept = False
-        if not (accept and usable):
-            remember(memory_store(), plan, False) if usable else None
-            return plan
-        self._push_undo()
-        spec = plan.apply(self.ms)
-        remember(memory_store(), plan, True, str(self.path) if self.path else None)
+        who = tr("离线规则") if plan.planner == "rules" else (plan.model or plan.planner)
+        what = tr(RECIPES[plan.recipe].label) if plan.recipe else tr("无")
+        title = f"<b>{tr(KIND_NAMES.get(fp.kind, fp.kind))}</b> → <b>{what}</b><br><span style='color:#6b7280'>" + tr(
+            f"识别置信度 {fp.confidence:.2f} · 规划：{who}") + "</span>"
+        numbers = []
+        if preview is not None and not preview.error and self.ms is not None:
+            unit, f = measure_io.display_unit(self.ms)
+            # the main count first, then the first two lengths or angles
+            vals = [(lab, v, kind) for k, lab, v, kind in preview.summary if v is not None and k != "at_border" and not k.startswith("class_")]
+            picked = [x for x in vals if x[2] == "count"][:1] + [x for x in vals if x[2] in ("length", "angle")][:2]
+            numbers = [f"{tr(lab)} <b>{self._fmt(v, kind, unit, f)}</b>" for lab, v, kind in picked]
+        best = plan.best
+        checks: list[tuple[str, str]] = []
+        if best is not None:
+            checks += [("✗", tr(t)) for t in ([best.error] if best.error else []) + best.problems]
+            checks += [("!", tr(t)) for t in best.warnings[:3]]
+            if not checks:
+                checks.append(("✓", tr("试运行通过全部检查")))
+        reasons = [tr(r) for r in plan.reasons if not r.startswith("试运行通过")]
+        self.plan_card.set_plan(title, plan.status, numbers, checks, reasons, usable)
+        if preview is not None and not preview.error:
+            self.view.show_analysis([sh for an in self.analyses if not an.error for sh in an.shapes] + preview.shapes)
         self.tabs.setCurrentIndex(TAB_AUTO)
-        self._auto_select = spec.id
-        self._changed()
+        accept = self._plan_accept
+        self._plan_accept = None
+        if accept is not None:
+            return self._decide_plan("accept" if accept else "dismiss")
+        return plan
+
+    _plan_accept: bool | None = None
+    plan_preview: Any = None
+
+    def _decide_plan(self, choice: str) -> Any:
+        """accept: into the record; adjust: method, settings and region into the panel;
+        dismiss: neither (remembered as not accepted)."""
+        from vexel.packs.sem.plan import memory_store, remember
+
+        plan = self.last_plan
+        self.plan_card.hide()
+        if plan is None or self.ms is None:
+            return plan
+        usable = plan.recipe is not None and plan.status != "needs_user"
+        if choice == "accept" and usable:
+            self._push_undo()
+            spec = plan.apply(self.ms)
+            remember(memory_store(), plan, True, str(self.path) if self.path else None)
+            self.tabs.setCurrentIndex(TAB_AUTO)
+            self._auto_select = spec.id
+            self._changed()
+            return plan
+        if choice == "adjust" and plan.recipe:
+            self.auto_list.setCurrentRow(-1)
+            self._load_params(plan.params, plan.recipe)
+            self.set_region(plan.region)
+            self.advanced_btn.setChecked(True)
+        elif usable:
+            remember(memory_store(), plan, False)
+        self.view.show_analysis([sh for an in self.analyses if not an.error for sh in an.shapes])
         return plan
 
     def _rerun_selected(self) -> None:
@@ -1391,12 +1620,15 @@ class SemWindow(QMainWindow):
             return f"{v:.3f}"
         return tr(str(v))
 
+    _shown_spec: int | None = None
+
     def _show_auto_detail(self, unit: str | None = None, f: float | None = None) -> None:
         from vexel.packs.sem import measure_io
         from vexel.packs.sem.analysis import objects_table
 
         row = self.auto_list.currentRow()
         if self.ms is None or not 0 <= row < len(self.analyses):
+            self._shown_spec = None
             self.auto_summary.setText(tr("选择方法、框选区域（或用整张图），点“运行”。") if self.ms is not None else "")
             self.auto_notes.hide()
             self.auto_table.setRowCount(0)
@@ -1407,6 +1639,13 @@ class SemWindow(QMainWindow):
         if unit is None or f is None:
             unit, f = measure_io.display_unit(self.ms)
         an = self.analyses[row]
+        if self._shown_spec != an.spec.id and self._live_timer.isActive():  # a setting was just changed: keep it
+            self._live_timer.stop()
+            if self._live_apply(refresh=False):
+                QTimer.singleShot(0, lambda: self._changed())
+        if self._shown_spec != an.spec.id:  # the panel shows the selected measurement's method and settings
+            self._shown_spec = an.spec.id
+            self._load_params(an.spec.params, an.spec.recipe)
         if an.error:
             self.auto_summary.setText(tr(f"无法测量：{an.error}"))
         else:

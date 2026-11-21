@@ -845,11 +845,17 @@ def test_sem_window_automatic_measurements(app, tmp_path, monkeypatch):
     w.auto_list.setCurrentRow(0)
     w._delete_analysis()
     assert [a.id for a in w.ms.analyses] == [2]
-    # the panel's own settings and the rerun of the selected one
-    w.recipe.setCurrentIndex(w.recipe.findData("lines"))
-    w._auto_widgets["average"][1].setValue(2)
+    # selecting a measurement shows its method and settings; a changed setting re-runs it at once
     w.auto_list.setCurrentRow(0)
-    w._rerun_selected()
+    assert w.recipe.currentData() == "lines" and w._auto_widgets["average"][1].value() == 3
+    w._auto_widgets["average"][1].setValue(2)
+    assert "1" in w.advanced_btn.text() and w._auto_labels["average"].text().startswith("●")
+    w._live_timer.stop()
+    w._live_apply()
+    assert w.ms.analyses[0].params == {"average": 2}
+    w.reset_params()
+    assert w.ms.analyses[0].params == {} and not w.reset_params_btn.isEnabled()
+    w.undo()
     assert w.ms.analyses[0].params == {"average": 2}
     # exports and reopening
     sheets = __import__("openpyxl").load_workbook(w.export(tmp_path / "m.xlsx")[0]).sheetnames
@@ -924,7 +930,7 @@ def test_sem_window_auto_plan(app, tmp_path, monkeypatch):
     assert w.plan_btn.isEnabled()
     # declined: nothing enters the record
     plan = w.auto_plan(accept=False)
-    assert plan.recipe == "holes" and plan.status == "ready" and not w.ms.analyses and "接触孔" in w.plan_info.text()
+    assert plan.recipe == "holes" and plan.status == "ready" and not w.ms.analyses and "接触孔" in w.plan_card.title.text()
     # accepted: the measurement is added, selected and shown; one undo removes it
     w.goal.setText("孔径")
     plan = w.auto_plan(accept=True)
@@ -944,6 +950,69 @@ def test_sem_window_auto_plan(app, tmp_path, monkeypatch):
         QCoreApplication.processEvents()
         QThread.msleep(10)
     assert w._plan_thread is None and len(w.ms.analyses) == 1 and w.plan_btn.isEnabled()
+    _dispose(w)
+
+
+def test_sem_window_plan_card_banner_and_panel(app, tmp_path, monkeypatch):
+    import tifffile
+    from qtpy.QtWidgets import QScrollArea
+
+    from vexel.packs.sem import calibrate as C
+    from vexel.synthetic.sem import hole_array, write_sem
+    from vexel.ui.sem_window import TAB_AUTO, TAB_CALIBRATION, SemWindow
+
+    monkeypatch.setenv("VEXEL_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("VEXEL_OFFLINE", "1")
+    img, _ = hole_array(seed=1)
+    path = tmp_path / "holes.tif"
+    tifffile.imwrite(path, (np.clip(img, 0, 1) * 65535).astype(np.uint16))
+    C.save(C.manual(path, pixel_size=2e-9).confirm())
+    w = SemWindow()
+    w.show()
+    # opening plans at once: the card shows the trial's numbers and checks, the image its outlines
+    w.open_path(path, wait=True, plan=True)
+    card = w.plan_card
+    assert card.isVisibleTo(w) and w.tabs.currentIndex() == TAB_AUTO and not w.ms.analyses
+    assert "接触孔" in card.title.text() and "✓" in card.checks.text() and "nm" in card.numbers.text()
+    assert w.plan_preview is not None and len(w.view._auto) > 10 and card.accept_btn.isVisibleTo(w)
+    # "adjust": method, settings and region go to the panel, nothing to the record
+    card.adjust_btn.click()
+    assert not card.isVisibleTo(w) and w.recipe.currentData() == "holes" and w.auto_box.isVisibleTo(w) and not w.ms.analyses
+    assert len(w.view._auto) == 0
+    # "accept"
+    w.auto_plan(wait=True)
+    card.accept_btn.click()
+    assert [a.recipe for a in w.ms.analyses] == ["holes"] and not card.isVisibleTo(w)
+    # "do it myself": nothing changes
+    w.auto_plan(wait=True)
+    card.self_btn.click()
+    assert len(w.ms.analyses) == 1 and not card.isVisibleTo(w)
+    # a record with measurements is not planned again on opening
+    w.open_path(path, wait=True, plan=True)
+    assert not card.isVisibleTo(w) and len(w.ms.analyses) == 1
+    # the switch is remembered
+    w.autoplan_on.setChecked(False)
+    from vexel.ui.sem_window import _config
+
+    assert _config()["sem_autoplan"] is False
+    # calibration banner: confirmed, waiting for a person, none
+    assert w.banner.isVisibleTo(w) and "nm" in w.banner.text.text() and not w.banner.button.isVisibleTo(w)
+    bar = tmp_path / "bar.tif"
+    write_sem(bar, "plain", pixel_size=2e-9, rows=300, cols=600)
+    w.open_path(bar, wait=True)
+    if w.cal.ok:  # OCR installed: read from the data bar, to be confirmed by a person
+        assert w.cal.needs_confirmation and w.banner.button.isVisibleTo(w) and "待确认" in w.banner.text.text()
+        w.banner.button.click()
+        assert w.cal.confirmed and not w.banner.button.isVisibleTo(w)
+    plain = tmp_path / "plain.tif"
+    tifffile.imwrite(plain, np.zeros((64, 80), np.uint8))
+    w.open_path(plain, wait=True)
+    assert not w.cal.ok and w.banner.button.isVisibleTo(w)
+    w.banner.button.click()
+    assert w.tabs.currentIndex() == TAB_CALIBRATION
+    # no panel is wider than the side bar
+    for sc in w.tabs.findChildren(QScrollArea):
+        assert sc.widget().minimumSizeHint().width() <= sc.viewport().width() + 1, sc
     _dispose(w)
 
 
