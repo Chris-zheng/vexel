@@ -261,6 +261,55 @@ def roughness(z: np.ndarray, mask: np.ndarray | None = None) -> dict[str, float]
             "Ssk": float(np.mean(d**3) / sq**3) if sq else 0.0, "Sku": float(np.mean(d**4) / sq**4) if sq else 0.0, "pixels": int(v.size)}  # fmt: skip
 
 
+def profile_roughness(height: np.ndarray, spacing: float, cutoff: float = 0.0, short_cutoff: float = 0.0) -> dict[str, Any]:
+    """ISO 21920-2 profile parameters of one height profile (samples ``spacing`` apart).
+
+    The least-squares line is removed; with ``cutoff`` (λc, same unit as ``spacing``) the
+    waviness - the profile smoothed by the ISO 16610-21 Gaussian filter (50 % transmission
+    at λc) - is removed too, and ``short_cutoff`` (λs) smooths away shorter wavelengths.
+    Ra, Rq, Rsk, Rku over the whole evaluation length; Rp, Rv, Rz as the mean over the
+    sections λc long (five when the profile is long enough, as ISO 21920-3 assumes), Rt
+    over the whole length. ``cutoff`` 0: one fifth of the profile, as the ISO default
+    evaluation length is five sampling lengths."""
+    from scipy import ndimage as ndi
+
+    z = np.asarray(height, np.float64)
+    x = np.arange(len(z)) * spacing
+    ok = np.isfinite(z)
+    if ok.sum() < 16:
+        return {}
+    z = np.interp(x, x[ok], z[ok])
+    z = z - np.polyval(np.polyfit(x, z, 1), x)
+    alpha = math.sqrt(math.log(2) / math.pi)
+    lc = cutoff if cutoff > 0 else x[-1] / 5
+    sig = alpha * lc / math.sqrt(2 * math.pi) / spacing  # Gaussian weighting function as a standard deviation in samples
+    notes = []
+    if lc < 4 * spacing:
+        notes.append("λc 短于四个采样点：未扣除波纹度")
+        r = z.copy()
+    else:
+        r = z - ndi.gaussian_filter1d(z, sig, mode="reflect")
+    if short_cutoff > 0:
+        r = ndi.gaussian_filter1d(r, alpha * short_cutoff / math.sqrt(2 * math.pi) / spacing, mode="reflect")
+    # the filter's end effects: leave out λc/2 at each end when that keeps at least one λc
+    n_edge = int(round(lc / 2 / spacing))
+    if len(r) - 2 * n_edge >= max(lc / spacing, 16):
+        r = r[n_edge : len(r) - n_edge]
+    else:
+        notes.append("剖面短于 2 λc：结果包含滤波的端部效应")
+    r = r - r.mean()
+    rq = float(np.sqrt(np.mean(r**2)))
+    n_sec = max(1, min(5, int(len(r) * spacing / lc + 1e-9)))
+    secs = np.array_split(r, n_sec)
+    rp = float(np.mean([v.max() for v in secs]))
+    rv = float(np.mean([-v.min() for v in secs]))
+    if n_sec < 5:
+        notes.append(f"Rz 按 {n_sec} 段 λc 计算（标准为五段）")
+    return {"Ra": float(np.mean(np.abs(r))), "Rq": rq, "Rp": rp, "Rv": rv, "Rz": rp + rv, "Rt": float(r.max() - r.min()),
+            "Rsk": float(np.mean(r**3) / rq**3) if rq else 0.0, "Rku": float(np.mean(r**4) / rq**4) if rq else 0.0,
+            "cutoff": lc, "sections": n_sec, "notes": notes}  # fmt: skip
+
+
 def profile(hm: HeightMap, z: np.ndarray, a: tuple[float, float], b: tuple[float, float], width: int = 3) -> dict[str, np.ndarray]:
     """Heights along a line a -> b ([x, y] pixels): distance, height, confidence."""
     from vexel.packs.sem.measure import sample_profile
@@ -420,7 +469,7 @@ def save_mesh(hm: HeightMap, path: str | Path, z: np.ndarray | None = None, max_
     return path
 
 
-__all__ = ["HeightMap", "colour", "level", "match_pair", "mesh", "profile", "reconstruct", "render_3d", "roughness", "save_mesh", "save_tiff",
+__all__ = ["HeightMap", "colour", "level", "match_pair", "mesh", "profile", "profile_roughness", "reconstruct", "render_3d", "roughness", "save_mesh", "save_tiff",
            "step_height"]  # fmt: skip
 
 
@@ -453,6 +502,8 @@ class Tilt3DSpec(BaseModel):
     level_region: list[float] | None = None
     profiles: list[list[list[float]]] = Field(default_factory=list)  # [[x0, y0], [x1, y1]]
     steps: list[dict[str, list[float]]] = Field(default_factory=list)  # {"lower": box, "upper": box}
+    cutoff: float = 0.0  # profile roughness λc, metres (pixels when uncalibrated); 0: one fifth of each profile
+    short_cutoff: float = 0.0  # λs; 0: none
 
 
 def stage_tilt(path: str | Path) -> float | None:
@@ -515,7 +566,10 @@ def analyse(hm: HeightMap, spec: Tilt3DSpec, warnings: list[str] | None = None) 
     profs = []
     for a, b in spec.profiles:
         pr = profile(hm, z, tuple(a), tuple(b))
-        profs.append({"from": a, "to": b, **{k: v.tolist() for k, v in pr.items()}})
+        dist = pr["distance"]
+        h = np.where(pr["confidence"] >= hm.min_confidence, pr["height"], np.nan)
+        rough = profile_roughness(h, float(dist[1] - dist[0]) if len(dist) > 1 else 1.0, spec.cutoff, spec.short_cutoff)
+        profs.append({"from": a, "to": b, **{k: v.tolist() for k, v in pr.items()}, "roughness": rough})
     steps = []
     for st in spec.steps:
         try:

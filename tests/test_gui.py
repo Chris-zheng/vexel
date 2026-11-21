@@ -862,6 +862,50 @@ def test_sem_window_automatic_measurements(app, tmp_path, monkeypatch):
     _dispose(w2)
 
 
+def test_sem_window_materials_chart_pooling_and_report(app, tmp_path, monkeypatch):
+    import openpyxl
+    import tifffile
+
+    from vexel.packs.sem import calibrate as C
+    from vexel.synthetic.sem import fibre_mat, particle_field
+    from vexel.ui.sem_window import SemWindow
+
+    monkeypatch.setenv("VEXEL_HOME", str(tmp_path / "home"))
+    paths = []
+    for k in range(3):
+        img, _ = particle_field(rows=250, cols=300, n=20, seed=k, touching=0.0)
+        p = tmp_path / f"p{k}.tif"
+        tifffile.imwrite(p, (np.clip(img, 0, 1) * 65535).astype(np.uint16))
+        C.save(C.manual(p, pixel_size=2e-9).confirm())
+        paths.append(p)
+    w = SemWindow()
+    w.open_path(paths[0], wait=True)
+    an = w.run_analysis("particles")
+    assert an.error is None and "class" in an.objects.columns
+    assert w.auto_chart.isVisibleTo(w) and w.auto_chart.xq.currentData().startswith("eq_diameter")
+    for i in range(w.auto_chart.scale.count()):  # linear, log, log-log draw without errors
+        w.auto_chart.scale.setCurrentIndex(i)
+    w.auto_chart.weight.setCurrentIndex(1)
+    w.auto_chart.yq.setCurrentIndex(w.auto_chart.yq.findData("circularity"))
+    w.auto_chart.grab()
+    assert w.pool_btn.isEnabled()
+    table, per = w.pool_files(paths[1:])
+    assert len(per) == 3 and table.iloc[0]["images"] == 3 and table.iloc[0]["objects"] == sum(len(a.objects) for _, a, _ in per)
+    assert "合并统计" in openpyxl.load_workbook(w.save_pool(tmp_path / "pool.xlsx", table, per)).sheetnames
+    out = w.export(tmp_path / "r.html")[0]
+    assert out.suffix == ".html" and "<svg" in out.read_text(encoding="utf-8")
+    # fibres: the chart shows the centre-line samples
+    img, _ = fibre_mat((300, 300), n=6, seed=1)
+    fp = tmp_path / "f.tif"
+    tifffile.imwrite(fp, (np.clip(img, 0, 1) * 65535).astype(np.uint16))
+    C.save(C.manual(fp, pixel_size=2e-9).confirm())
+    w.open_path(fp, wait=True)
+    an = w.run_analysis("fibres")
+    assert an.error is None and an.value("segments") > 3 and w.auto_chart.weights is not None
+    assert "angle (°)" in w.auto_chart.columns
+    _dispose(w)
+
+
 def test_sem_window_auto_plan(app, tmp_path, monkeypatch):
     import tifffile
 
@@ -936,6 +980,9 @@ def test_sem_window_tilt_3d(app, tmp_path, monkeypatch):
     w.add_height_profile([10, rows / 2], [cols - 10, rows / 2])
     st = w.tilt_result.steps[0]
     assert st["step"] == pytest.approx(40e-9, rel=0.05) and "台阶 1" in w.tilt_info.text() and w.height_plot.isVisibleTo(w)
+    assert w.tilt_result.profiles[0]["roughness"]["Ra"] > 0 and "Ra" in w.tilt_info.text()
+    w.tilt_cutoff.setValue(100.0)  # λc 100 nm
+    assert w.ms.tilt3d.cutoff == pytest.approx(100e-9) and w.tilt_result.profiles[0]["roughness"]["cutoff"] == pytest.approx(100e-9)
     # the drawing tools: a profile by two clicks, a step by two boxes
     from qtpy.QtCore import QPointF
 

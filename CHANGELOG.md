@@ -1,5 +1,16 @@
 # 更新记录
 
+## Unreleased — SEM materials measurements and reports
+
+- Particles: solidity, convexity and mean grey level; rule-based classes (agglomerate, irregular / possibly broken, outlier / possibly foreign, normal) with the reason for each, coloured on the image. A round particle split in two by a noisy outline is merged back.
+- Pores: porosity (pores cut by the border included) and pore size and shape distributions.
+- Fibres: diameter along each fibre's centre line from the grey profile across it (steepest-edge default, not moved by edge brightening), away from crossings, ends and the border; orientation distribution and alignment; gaps between fibres; physical diameters with rectangular pixels. Synthetic fibre mats with ground truth (`vexel.synthetic.sem.fibre_mat`).
+- Profile roughness (ISO 21920: Ra, Rq, Rz, Rp, Rv, Rt, Rsk, Rku) on tilt-3D height profiles, with an ISO 16610-21 Gaussian waviness filter (λc setting, `--cutoff`).
+- Distribution chart in the SEM window (histogram by number or volume, linear or log, or a scatter plot); pooled statistics over many images in the window and in `vexel sem analyze` (sheet 合并统计, `_pooled.csv`).
+- HTML report of an image's record (calibration, processing, annotated image, results, distributions, tilt 3D): export menu and `vexel sem report`.
+- Planning: goals such as 孔隙率 or 纤维直径 choose the new recipes, with trial checks and alternatives; the model schema and MCP tools know them.
+- Acceptance script `tests/benchmarks/sem_materials_eval.py`.
+
 ## Unreleased — user manual
 
 - User manual restructured: a feature list for both modules, a new chapter on starting Vexel (opening the interface, choosing a module, opening the SEM preview, command overview, where data and settings are kept, interface language) and a full SEM chapter; droplet chapters renumbered, SEM limits and FAQ added.

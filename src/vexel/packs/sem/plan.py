@@ -40,6 +40,8 @@ MEMORY_DISTANCE = 0.6
 
 GOALS = [
     ("lines", re.compile(r"线宽|线条|间隔|周期|粗糙度|\bCD\b|LER|LWR|line ?width|line/space|pitch|roughness|critical dimension", re.I)),
+    ("pores", re.compile(r"孔隙|多孔|气孔|porosity|porous|\bpores?\b", re.I)),
+    ("fibres", re.compile(r"纤维|无纺|静电纺|熔喷|纺粘|fib(?:er|re)|nonwoven|electrospun|meltblown|spunbond", re.I)),
     ("holes", re.compile(r"接触孔|通孔|孔径|孔阵列|contact|via|hole", re.I)),
     ("particles", re.compile(r"颗粒|粒径|粒度|缺陷|粉末|particle|defect|powder|grain size", re.I)),
     ("layers", re.compile(r"膜厚|层厚|厚度|多层|layer|thickness|film|stack", re.I)),
@@ -177,7 +179,7 @@ def draft(fp: SemFingerprint, goal: str = "", memory: Any = None) -> SemPlan:
             p["min_diameter"] = round(0.05 * d, 1)
         if d and d < 15:
             plan.reasons.append(f"颗粒较小（约 {d:.0f} 像素）：保持 0.5 像素的轻度平滑")
-    elif recipe in ("profile", "tip"):
+    elif recipe in ("profile", "tip", "fibres"):
         if pol == "dark":
             p["feature"] = "dark"
     plan.params = p
@@ -232,6 +234,12 @@ def checks(recipe: str, an: Any) -> tuple[list[str], list[str]]:
     elif recipe == "particles":
         if (v("particles") or 0) < 1:
             problems.append("没有找到完整的颗粒")
+    elif recipe == "pores":
+        if v("porosity") is None or (v("pores") or 0) + (v("at_border") or 0) < 1:
+            problems.append("没有找到孔")
+    elif recipe == "fibres":
+        if (v("segments") or 0) < 1 or (v("samples") or 0) < 30:
+            problems.append("找到的纤维太少（有效测量点少于 30）")
     elif recipe == "layers":
         if (v("interfaces") or 0) < 2:
             problems.append("找到的界面少于 2 个")
@@ -255,6 +263,8 @@ ALTERNATIVES: dict[str, list[tuple[str, dict[str, Any], list[str]]]] = {
               ("每 2 行平均后再找边缘", {"average": 2}, [])],
     "holes": [("孔的灰度反过来", {"feature": "flip"}, []), ("边缘定义改为最大梯度", {"method": "gradient"}, []), ("加强平滑", {"smooth": 2.0}, [])],
     "particles": [("颗粒的灰度反过来", {"feature": "flip"}, []), ("改用局部阈值", {"threshold": "local"}, []), ("先去噪", {}, ["denoise"])],
+    "pores": [("孔的灰度反过来", {"feature": "flip"}, []), ("改用局部阈值", {"threshold": "local"}, [])],
+    "fibres": [("纤维的灰度反过来", {"feature": "flip"}, []), ("改用局部阈值", {"threshold": "local"}, []), ("边缘定义改为阈值", {"method": "threshold"}, [])],
     "layers": [("边缘定义改为阈值", {"method": "threshold"}, []), ("加强平滑", {"smooth": 3.0}, [])],
     "profile": [("特征的灰度反过来", {"feature": "flip"}, []), ("加强平滑", {"smooth": 2.0}, [])],
     "tip": [("尖端的灰度反过来", {"feature": "flip"}, []), ("加强平滑", {"smooth": 2.0}, [])],

@@ -23,6 +23,7 @@ import json
 import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -603,3 +604,58 @@ def tilt_view(z: np.ndarray, albedo: np.ndarray, tilt: float, *, noise: float = 
     if blur:
         out = ndi.gaussian_filter(out, blur)
     return out + np.random.default_rng(seed).normal(0, noise, out.shape)
+
+
+def fibre_mat(shape: tuple[int, int] = (512, 512), n: int = 12, diameter: tuple[float, float] = (6.0, 20.0), *, seed: int = 0,
+          noise: float = 0.04, blur: float = 1.0, curve: float = 0.0, angle: tuple[float, float] = (0.0, 180.0),
+          background: float = 0.15, fibre: float = 0.6, edge: float = 0.25) -> tuple[np.ndarray, list[dict[str, Any]]]:  # fmt: skip
+    """A fibre mat: ``n`` fibres across the field, drawn on top of one another, with SEM-like
+    edge brightening, blur and noise. Returns the image and, per fibre, its diameter,
+    direction (degrees counter-clockwise, 0..180), centre-line points and the fibre's
+    visible pixels (where it is on top)."""
+    from scipy import ndimage as ndi
+
+    rng = np.random.default_rng(seed)
+    h, w = shape
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
+    img = np.full(shape, background) + 0.05 * (xx / w)
+    owner = np.full(shape, -1)
+    truth = []
+    for k in range(n):
+        d = float(rng.uniform(*diameter))
+        th = math.radians(rng.uniform(*angle))
+        cx, cy = rng.uniform(0.15 * w, 0.85 * w), rng.uniform(0.15 * h, 0.85 * h)
+        L = 1.6 * max(h, w)
+        t = np.linspace(-L / 2, L / 2, 400)
+        bend = curve * L * (rng.uniform(-1, 1)) * (t / L) ** 2
+        px_ = cx + t * math.cos(th) - bend * math.sin(th)
+        py_ = cy - t * math.sin(th) - bend * math.cos(th)
+        pts = np.column_stack([px_, py_])
+        # distance to the polyline (dense enough to treat as points with a tangent correction)
+        tree_d = np.full(shape, np.inf)
+        for i in range(len(pts) - 1):
+            p0, p1 = pts[i], pts[i + 1]
+            v = p1 - p0
+            vv = float(v @ v)
+            # only pixels near this piece
+            x0, x1 = int(max(min(p0[0], p1[0]) - d, 0)), int(min(max(p0[0], p1[0]) + d + 1, w))
+            y0, y1 = int(max(min(p0[1], p1[1]) - d, 0)), int(min(max(p0[1], p1[1]) + d + 1, h))
+            if x0 >= x1 or y0 >= y1:
+                continue
+            X, Y = xx[y0:y1, x0:x1], yy[y0:y1, x0:x1]
+            u = np.clip(((X - p0[0]) * v[0] + (Y - p0[1]) * v[1]) / vv, 0, 1)
+            dd = np.hypot(X - p0[0] - u * v[0], Y - p0[1] - u * v[1])
+            tree_d[y0:y1, x0:x1] = np.minimum(tree_d[y0:y1, x0:x1], dd)
+        r = d / 2
+        cover = np.clip(r - tree_d + 0.5, 0, 1)  # anti-aliased disc profile
+        # secondary-electron yield of a cylinder rises towards its silhouette (~1 / cos of the surface tilt)
+        cos_t = np.sqrt(np.clip(1 - (np.minimum(tree_d, r) / r) ** 2, 0.02, 1))
+        shade = fibre + edge * np.clip((1 / cos_t - 1) / 3, 0, 1)
+        img = img * (1 - cover) + shade * cover
+        owner[cover > 0.5] = k
+        truth.append({"diameter": d, "angle": math.degrees(th) % 180.0, "points": pts})
+    for k, tr_ in enumerate(truth):
+        tr_["visible"] = owner == k
+    img = ndi.gaussian_filter(img, blur) if blur else img
+    img = img + rng.normal(0, noise, shape)
+    return img, truth

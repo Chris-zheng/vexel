@@ -159,7 +159,7 @@ def holes(a: np.ndarray, *, feature: str = "dark", method: str = "threshold", le
     lab, n = ndi.label(ndi.binary_fill_holes(inside))
     min_area = math.pi * (min_diameter / 2) ** 2
     rows_out, edge_count, warnings = [], 0, []
-    props = [p for p in regionprops(lab) if p.area >= min_area]
+    props = [p for p in regionprops(lab, intensity_image=a) if p.area >= min_area]
     areas = np.array([p.area for p in props]) if props else np.zeros(0)
     typical = float(np.median(areas)) if len(areas) else 0.0
     for p in props:
@@ -266,9 +266,18 @@ def lattice(centres: np.ndarray, shape: tuple[int, int], tolerance: float = 0.3)
 
 
 def particles(a: np.ndarray, *, feature: str = "bright", threshold: str = "mid", split: bool = True, min_diameter: float = 3.0,
-              smooth: float = 0.5, mask: np.ndarray | None = None) -> dict[str, Any]:  # fmt: skip
+              smooth: float = 0.5, mask: np.ndarray | None = None, fill: bool = True, solidity_min: float = 0.85,
+              outlier_k: float = 4.0) -> dict[str, Any]:  # fmt: skip
     """Particles: one row per particle (equivalent diameter, Feret max/min, circularity,
-    aspect ratio, centre, whether it touches others) and the size distribution."""
+    aspect ratio, solidity, convexity, mean grey level, centre, whether it touches others,
+    a class) and the size distribution.
+
+    Classes are rules that can be checked, not a trained model:
+    ``agglomerate`` touches other particles (one connected blob split by the watershed);
+    ``irregular`` has a solidity (area / convex-hull area) below ``solidity_min``: broken,
+    angular or fused particles; ``outlier`` differs from the population by more than
+    ``outlier_k`` robust standard deviations in log size or in grey level: possibly foreign
+    material; ``normal`` otherwise. ``fill`` fills holes inside objects (off for pores)."""
     from scipy import ndimage as ndi
     from skimage.measure import find_contours, regionprops
     from skimage.segmentation import watershed
@@ -297,7 +306,9 @@ def particles(a: np.ndarray, *, feature: str = "bright", threshold: str = "mid",
             fg = sm > t if feature == "bright" else sm < t
     if mask is not None:
         fg &= ~mask
-    fg = ndi.binary_fill_holes(ndi.binary_opening(fg, iterations=1))
+    fg = ndi.binary_opening(fg, iterations=1)
+    if fill:
+        fg = ndi.binary_fill_holes(fg)
     comp, ncomp = ndi.label(fg)
     if split and ncomp:
         from skimage.morphology import h_maxima
@@ -307,11 +318,12 @@ def particles(a: np.ndarray, *, feature: str = "bright", threshold: str = "mid",
         markers, _ = ndi.label(peaks)
         lab = watershed(-dist, markers, mask=fg)
         lab[(lab == 0) & fg] = 0
+        lab = _merge_oversplit(lab)
     else:
         lab = comp
     min_area = math.pi * (min_diameter / 2) ** 2
     per_comp: dict[int, int] = {}
-    props = [p for p in regionprops(lab) if p.area >= min_area]
+    props = [p for p in regionprops(lab, intensity_image=a) if p.area >= min_area]
     for p in props:
         c = int(comp[tuple(p.coords[0])])
         per_comp[c] = per_comp.get(c, 0) + 1
@@ -329,22 +341,136 @@ def particles(a: np.ndarray, *, feature: str = "bright", threshold: str = "mid",
         area = float(p.area)
         fmax, fmin, fang = feret(outline) if len(outline) > 2 else (0.0, 0.0, 0.0)
         touching = per_comp.get(int(comp[tuple(p.coords[0])]), 1) > 1
+        solidity, convexity = _hull(outline, area, perim)
         rows_out.append({"x": float(p.centroid[1]), "y": float(p.centroid[0]), "area": area, "eq_diameter": 2 * math.sqrt(area / math.pi),
                          "feret_max": fmax, "feret_min": fmin, "feret_angle": fang, "perimeter": perim,
                          "circularity": float(min(4 * math.pi * area / perim**2, 1.0)) if perim else None,
-                         "aspect_ratio": fmin / fmax if fmax else None, "touching": touching, "outline": outline})  # fmt: skip
+                         "aspect_ratio": fmin / fmax if fmax else None, "solidity": solidity, "convexity": convexity,
+                         "grey": float(p.intensity_mean), "touching": touching, "outline": outline})  # fmt: skip
+    _classify(rows_out, solidity_min, outlier_k)
     d = np.array([r["eq_diameter"] for r in rows_out])
     summary: dict[str, Any] = {"particles": len(rows_out), "at_border": at_border}
     if len(d):
         summary.update(diameter_mean=float(d.mean()), diameter_sd=float(d.std(ddof=1)) if len(d) > 1 else 0.0, **distribution(d),
                        agglomerated=float(np.mean([r["touching"] for r in rows_out])),
                        area_fraction=float(fg.sum() / fg.size))  # fmt: skip
+        for c in CLASSES:
+            summary[f"class_{c}"] = sum(r["class"] == c for r in rows_out)
     warnings = []
     if len(d) and np.median(d) < 10:
         warnings.append(f"颗粒中位直径只有 {np.median(d):.1f} 像素：尺寸误差相对较大，建议提高放大倍数（每个颗粒至少 10 像素宽）")
     if at_border:
         warnings.append(f"{at_border} 个颗粒被区域边界截断，按 ISO 13322-1 不计入统计")
     return {"particles": rows_out, "summary": summary, "warnings": warnings, "threshold": t, "labels": lab}
+
+
+def _merge_oversplit(lab: np.ndarray, neck: float = 1.0, solidity: float = 0.93) -> np.ndarray:
+    """Undo watershed splits that are not between particles. Two touching particles meet at a
+    neck narrower than either of them and together are clearly not convex; a noisy outline
+    can give one round particle two distance maxima, and its pieces then share a boundary
+    wider than the smaller piece and together are convex. Pairs with a shared boundary over
+    ``neck`` × the smaller piece's equivalent diameter and a union solidity over
+    ``solidity`` are merged (on synthetic touching discs the boundary ratio stays below 0.8
+    and the union solidity below 0.9)."""
+    from skimage.measure import regionprops
+
+    pairs = []
+    for a, b in ((lab[:, :-1], lab[:, 1:]), (lab[:-1, :], lab[1:, :])):
+        m = (a != b) & (a > 0) & (b > 0)
+        pairs.append(np.column_stack([np.minimum(a[m], b[m]), np.maximum(a[m], b[m])]))
+    pp = np.concatenate(pairs)
+    if not len(pp):
+        return lab
+    uniq, counts = np.unique(pp, axis=0, return_counts=True)
+    area = np.bincount(lab.ravel())
+    boxes = {p.label: p.bbox for p in regionprops(lab)}
+    parent = np.arange(area.size)
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for (a, b), n in zip(uniq, counts):
+        if n <= neck * 2 * math.sqrt(min(area[a], area[b]) / math.pi):
+            continue
+        r0, c0 = min(boxes[a][0], boxes[b][0]), min(boxes[a][1], boxes[b][1])
+        r1, c1 = max(boxes[a][2], boxes[b][2]), max(boxes[a][3], boxes[b][3])
+        crop = lab[r0:r1, c0:c1]
+        if regionprops(((crop == a) | (crop == b)).astype(np.uint8))[0].solidity > solidity:
+            parent[find(b)] = find(a)
+    roots = np.array([find(i) for i in range(area.size)])
+    return roots[lab]
+
+
+CLASSES = ("normal", "agglomerate", "irregular", "outlier")
+
+
+def _hull(outline: np.ndarray, area: float, perim: float) -> tuple[float | None, float | None]:
+    """Solidity (area / convex-hull area) and convexity (hull perimeter / perimeter), both 0..1."""
+    if len(outline) < 4 or not perim:
+        return None, None
+    from scipy.spatial import ConvexHull, QhullError
+
+    try:
+        h = ConvexHull(outline)
+    except QhullError:
+        return None, None
+    # the outline runs through pixel edges (0.5 contour): its own polygon area is the fair comparison
+    poly_area, _ = _polygon(outline)
+    return float(min(poly_area / h.volume, 1.0)) if h.volume else None, float(min(h.area / perim, 1.0))
+
+
+def _robust_z(v: np.ndarray) -> np.ndarray:
+    med = np.median(v)
+    mad = 1.4826 * np.median(np.abs(v - med))
+    return (v - med) / mad if mad > 0 else np.zeros_like(v)
+
+
+def _classify(rows: list[dict[str, Any]], solidity_min: float, outlier_k: float) -> None:
+    """Rule-based class of each particle (see ``particles``); also the reason, for the table."""
+    if not rows:
+        return
+    zs = _robust_z(np.log([r["eq_diameter"] for r in rows])) if len(rows) >= 8 else np.zeros(len(rows))
+    zg = _robust_z(np.array([r["grey"] for r in rows])) if len(rows) >= 8 else np.zeros(len(rows))
+    for r, a, b in zip(rows, zs, zg):
+        if r["touching"]:
+            r["class"], r["reason"] = "agglomerate", "touching"
+        elif r["solidity"] is not None and r["solidity"] < solidity_min:
+            r["class"], r["reason"] = "irregular", f"solidity {r['solidity']:.2f}"
+        elif abs(a) > outlier_k or abs(b) > outlier_k:
+            r["class"], r["reason"] = "outlier", f"size z {a:+.1f}" if abs(a) >= abs(b) else f"grey z {b:+.1f}"
+        else:
+            r["class"], r["reason"] = "normal", ""
+
+
+def pores(a: np.ndarray, *, feature: str = "dark", threshold: str = "mid", split: bool = False, min_diameter: float = 3.0,
+          smooth: float = 0.5, mask: np.ndarray | None = None) -> dict[str, Any]:  # fmt: skip
+    """Pores: porosity (the pore phase's share of the region, pores cut by the region's edge
+    included) and one row per whole pore (equivalent diameter, Feret, circularity, aspect
+    ratio); pores cut by the edge are left out of the size statistics only."""
+    res = particles(a, feature=feature, threshold=threshold, split=split, min_diameter=min_diameter, smooth=smooth, mask=mask, fill=False,
+                    solidity_min=0.0, outlier_k=1e9)  # fmt: skip
+    from scipy import ndimage as ndi
+
+    sm = ndi.gaussian_filter(np.asarray(a, np.float64), smooth) if smooth else np.asarray(a, np.float64)
+    t = res["threshold"]
+    phase = (sm < t) if feature == "dark" else (sm > t)
+    if threshold == "local":
+        phase = res["labels"] > 0
+    valid = np.ones_like(phase) if mask is None else ~mask
+    porosity = float((phase & valid).sum() / max(valid.sum(), 1))
+    for r in res["particles"]:
+        r.pop("class", None)
+        r.pop("reason", None)
+    sm_ = res["summary"]
+    sm_ = {k: v for k, v in sm_.items() if not k.startswith("class_") and k not in ("agglomerated", "area_fraction")}
+    sm_["porosity"] = porosity
+    warnings = [w.replace("颗粒", "孔") for w in res["warnings"]]
+    if porosity > 0.6:
+        warnings.append(f"孔隙率 {porosity:.0%}：暗相占了大部分区域，检查“孔是”的亮暗设置，或阈值是否把阴影算成了孔")
+    return {"pores": res["particles"], "summary": sm_, "warnings": warnings, "threshold": t, "phase": phase}
 
 
 def distribution(d: np.ndarray) -> dict[str, float]:
@@ -358,4 +484,4 @@ def distribution(d: np.ndarray) -> dict[str, float]:
     return out
 
 
-__all__ = ["distribution", "feret", "holes", "lattice", "particles"]
+__all__ = ["CLASSES", "distribution", "feret", "holes", "lattice", "particles", "pores"]

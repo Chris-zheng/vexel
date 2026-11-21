@@ -141,7 +141,7 @@ def build_server() -> Any:
     @server.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False))
     def sem_analyze(path: str, recipe: str | None = None, region: list[float] | None = None, settings: dict | None = None,
                     apply: bool = False, goal: str = "") -> dict:  # fmt: skip
-        """Measure an SEM image. With `recipe` (lines, holes, particles, layers, profile, tip;
+        """Measure an SEM image. With `recipe` (lines, holes, particles, pores, fibres, layers, profile, tip;
         `region` [x0, y0, x1, y1] pixels; `settings` as in the recipe): that measurement. With
         apply=True and no recipe: the sem_plan plan, added to the image's record (only after the
         user agreed to it). Without either: the measurements already in the record. Values are in

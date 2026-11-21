@@ -549,6 +549,15 @@ class SemWindow(QMainWindow):
         self.auto_table.setMinimumHeight(180)
         self.auto_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         v.addWidget(self.auto_table)
+        from vexel.ui.sem_charts import DistributionChart
+
+        self.auto_chart = DistributionChart()
+        self.auto_chart.hide()
+        v.addWidget(self.auto_chart)
+        self.pool_btn = QPushButton(tr("多张图合并统计…"))
+        self.pool_btn.setToolTip(tr("用所选自动测量的方法和设置（及本图的图像处理）测量其他图片，把所有对象合在一起统计；每张图用自己的标定"))
+        self.pool_btn.clicked.connect(self._pool_dialog)
+        v.addWidget(self.pool_btn)
         self._show_recipe()
 
     def _build_3d(self, v: QVBoxLayout) -> None:
@@ -591,6 +600,13 @@ class SemWindow(QMainWindow):
         self.tilt_conf.setValue(0.3)
         self.tilt_conf.setToolTip(tr("匹配置信度低于此值的像素标为不可靠（缺少纹理的平坦区域），不参与粗糙度和台阶高度"))
         form.addRow(tr("最低置信度"), self.tilt_conf)
+        self.tilt_cutoff = QDoubleSpinBox()
+        self.tilt_cutoff.setRange(0, 1e7)
+        self.tilt_cutoff.setDecimals(1)
+        self.tilt_cutoff.setSpecialValueText(tr("自动（剖面长度的 1/5）"))
+        self.tilt_cutoff.setToolTip(tr("剖面粗糙度（ISO 21920）的截止波长 λc：比它长的起伏算作波纹度，从粗糙度中扣除"))
+        self.tilt_cutoff.valueChanged.connect(self._tilt_cutoff_edited)
+        form.addRow(tr("剖面 λc"), self.tilt_cutoff)
         v.addLayout(form)
         self.tilt_run_btn = QPushButton(tr("重建高度图"))
         self.tilt_run_btn.setObjectName("primary")
@@ -807,12 +823,14 @@ class SemWindow(QMainWindow):
         done = self.tilt_result is not None
         for w in (self.tilt_add_btn, self.tilt_axis, self.tilt_level, self.tilt_smooth, self.tilt_conf):
             w.setEnabled(ready)
+        self.tilt_cutoff.setEnabled(ready and self.ms.tilt3d is not None)
         self.tilt_remove_btn.setEnabled(has_tilt and self.tilt_table.currentRow() > 0)
         self.tilt_run_btn.setEnabled(has_tilt and self._tilt_thread is None)
         for w in (self.tilt_show, self.view3d_btn, self.hprofile_btn, self.step_btn, self.tilt_export_btn):
             w.setEnabled(done)
         self.tilt_clear_btn.setEnabled(ready and self.ms.tilt3d is not None)
         self.rerun_btn.setEnabled(ready and arow >= 0)
+        self.pool_btn.setEnabled(ready and 0 <= arow < len(self.analyses) and self.analyses[arow].spec.recipe in ("particles", "pores", "holes", "fibres"))
         self.auto_delete.setEnabled(ready and arow >= 0)
 
     def switch_language(self, lang: str) -> None:
@@ -1107,7 +1125,7 @@ class SemWindow(QMainWindow):
             return
         stem = self.path.with_suffix("").name + "_measurements"
         path, chosen = QFileDialog.getSaveFileName(self, tr("导出测量"), str(self.path.parent / stem),
-                                                   tr("Excel (*.xlsx);;CSV (*.csv);;标注图 PNG (*.png);;标注图 SVG (*.svg);;测量记录 (*.json)"))  # fmt: skip
+                                                   tr("Excel (*.xlsx);;CSV (*.csv);;报告 HTML (*.html);;标注图 PNG (*.png);;标注图 SVG (*.svg);;测量记录 (*.json)"))  # fmt: skip
         if path:
             self.export(path)
 
@@ -1130,6 +1148,10 @@ class SemWindow(QMainWindow):
             out = [measure_io.export_svg(self.image, self.ms, path, crop_rows=crop, result=res)]
         elif suffix == ".json":
             out = [self.ms.save(path)]
+        elif suffix in (".html", ".htm"):
+            from vexel.packs.sem.report import write_report
+
+            out = [write_report(self.ms, self.image, path, tilt=self.tilt_result, result=res)]
         else:
             raise ValueError(f"unknown export type: {suffix}")
         self.say(tr("已导出：") + tr("、").join(p.name for p in out))
@@ -1379,6 +1401,7 @@ class SemWindow(QMainWindow):
             self.auto_notes.hide()
             self.auto_table.setRowCount(0)
             self.auto_table.setColumnCount(0)
+            self.auto_chart.hide()
             self._set_buttons()
             return
         if unit is None or f is None:
@@ -1400,7 +1423,150 @@ class SemWindow(QMainWindow):
             for j, val in enumerate(r):
                 text = f"{val:.4g}" if isinstance(val, float) else str(val)
                 self.auto_table.setItem(i, j, QTableWidgetItem(text))
+        self._fill_chart(an, unit, f)
         self._set_buttons()
+
+    def _fill_chart(self, an: Any, unit: str, f: float) -> None:
+        import pandas as pd
+
+        from vexel.packs.sem.analysis import objects_table
+        from vexel.packs.sem.population import SIZE
+
+        if an.error:
+            self.auto_chart.hide()
+            return
+        if an.spec.recipe == "fibres" and an.extra.get("samples"):
+            s = an.extra["samples"]
+            d = f"diameter ({unit})"
+            self.auto_chart.set_columns({d: np.asarray(s["diameter"]) / f, "angle (°)": np.asarray(s["angle"])}, d, np.asarray(s["length"]))
+            return
+        df = objects_table([an], unit, f)
+        skip = {"analysis", "recipe", "particle", "pore", "hole", "line", "layer", "segment", "touching", "x (" + unit + ")", "y (" + unit + ")"}
+        cols = {c: df[c].to_numpy(float) for c in df.columns if c not in skip and c.split(" (")[0] not in ("x", "y") and pd.api.types.is_numeric_dtype(df[c]) and not pd.api.types.is_bool_dtype(df[c])}
+        size = SIZE.get(an.spec.recipe, "")
+        prefer = next((c for c in cols if c.split(" (")[0] == size), next(iter(cols), ""))
+        if len(df) < 2 or not cols:
+            self.auto_chart.hide()
+            return
+        self.auto_chart.set_columns(cols, prefer)
+
+    def pool_files(self, paths: list[str | Path], row: int | None = None) -> tuple[Any, list[Any]]:
+        """Measure ``paths`` with the selected automatic measurement's recipe, settings and
+        region (and this image's processing), each with its own calibration; with this
+        image's result, pooled. Returns (pooled table, [(path, Analysis, calibrated)])."""
+        from vexel.packs.sem import calibrate as semcal
+        from vexel.packs.sem import measure_io
+        from vexel.packs.sem.analysis import AnalysisSpec, run
+        from vexel.packs.sem.measure import scale_from
+        from vexel.packs.sem.population import pooled
+
+        row = self.auto_list.currentRow() if row is None else row
+        if self.ms is None or not 0 <= row < len(self.analyses):
+            raise ValueError("select an automatic measurement first")
+        base = self.analyses[row]
+        unit, f = measure_io.display_unit(self.ms)
+        out = [(self.path, base, bool(self.ms.scale.pixel_size))]
+        QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            for p in paths:
+                p = Path(p)
+                if self.path is not None and p.resolve() == self.path.resolve():
+                    continue
+                try:
+                    cal = semcal.for_file(p)
+                    img = semcal.load_image(p)
+                    ms = measure_io.load_record(cal.sha256) or measure_io.new_set(p, cal)
+                    ms.scale = scale_from(cal, ms.scale.tilt)
+                    ms.processing = self.ms.processing.model_copy(deep=True)
+                    res = measure_io.processed(ms, img)
+                    spec = AnalysisSpec(id=1, recipe=base.spec.recipe, region=base.spec.region, params=dict(base.spec.params))
+                    an = run(spec, res.analysis, ms.scale, res.mask, cal.crop_rows)
+                except (ValueError, OSError) as e:
+                    an = type(base)(spec=base.spec, error=f"{type(e).__name__}: {e}")
+                    cal = None
+                out.append((p, an, bool(cal is not None and cal.ok)))
+        finally:
+            QGuiApplication.restoreOverrideCursor()
+        table = pooled([(str(Path(p).parent.name), an, ok) for p, an, ok in out], unit, f)
+        return table, out
+
+    def _pool_dialog(self) -> None:
+        from qtpy.QtWidgets import QDialog, QDialogButtonBox
+
+        from vexel.packs.sem import measure_io
+        from vexel.packs.sem.population import sizes
+        from vexel.ui.sem_charts import DistributionChart
+
+        files, _ = QFileDialog.getOpenFileNames(self, tr("选择要合并统计的其他图片"), str(self.path.parent if self.path else ""),
+                                                tr("图像 (*.tif *.tiff *.png *.jpg *.jpeg *.bmp)"))  # fmt: skip
+        if not files:
+            return
+        try:
+            table, per = self.pool_files(files)
+        except ValueError as e:
+            QMessageBox.warning(self, tr("无法合并"), str(e))
+            return
+        unit, f = measure_io.display_unit(self.ms)
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr("多张图合并统计"))
+        lay = QVBoxLayout(dlg)
+        lines = []
+        for p, an, ok in per:
+            n = len(sizes(an)[0])
+            state = tr(f"错误：{an.error}") if an.error else tr(f"{n} 个对象") + ("" if ok else tr("（未标定，不计入）"))
+            lines.append(f"{Path(p).name}：{state}")
+        info = QLabel("<br>".join(lines))
+        info.setWordWrap(True)
+        lay.addWidget(info)
+        if len(table):
+            r = table.iloc[0]
+            count = r.get("objects", r.get("samples"))
+            lay.addWidget(QLabel(tr(f"合并：{int(r['images'])} 张图，{int(count)} 个；平均 {r['mean']:.4g} {r['unit']}，标准差 {r['sd']:.4g}，"
+                                    f"d10 / d50 / d90 = {r['d10']:.4g} / {r['d50']:.4g} / {r['d90']:.4g} {r['unit']}")))  # fmt: skip
+            vals, wts = [], []
+            for _, an, ok in per:
+                if ok or not any(o for _, _, o in per):
+                    v, w = sizes(an)
+                    vals.append(v)
+                    wts.append(w)
+            chart = DistributionChart()
+            k = f if any(o for _, _, o in per) else 1.0
+            name = f"size ({r['unit']})"
+            chart.set_columns({name: np.concatenate(vals) / k}, name, np.concatenate(wts))
+            lay.addWidget(chart)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        save = buttons.addButton(tr("保存 Excel…"), QDialogButtonBox.ButtonRole.ActionRole)
+        buttons.rejected.connect(dlg.reject)
+
+        def _save() -> None:
+            path, _ = QFileDialog.getSaveFileName(dlg, tr("保存合并统计"), str(self.path.with_name(self.path.stem + "_pooled.xlsx")), "Excel (*.xlsx)")
+            if path:
+                self.save_pool(path, table, per)
+                self.say(tr(f"已导出：{Path(path).name}"))
+
+        save.clicked.connect(_save)
+        lay.addWidget(buttons)
+        dlg.resize(560, 480)
+        dlg.exec()
+
+    def save_pool(self, path: str | Path, table: Any, per: list[Any]) -> Path:
+        import pandas as pd
+
+        from vexel.packs.sem import measure_io
+        from vexel.packs.sem.analysis import objects_table
+
+        unit, f = measure_io.display_unit(self.ms)
+        objs = []
+        for p, an, _ok in per:
+            df = objects_table([an], unit, f)
+            if len(df):
+                df.insert(0, "file", Path(p).name)
+                objs.append(df)
+        with pd.ExcelWriter(path, engine="openpyxl") as xw:
+            (table if len(table) else pd.DataFrame({"": []})).to_excel(xw, sheet_name="合并统计", index=False)
+            pd.DataFrame([{"file": Path(p).name, "error": an.error, "calibrated": ok} for p, an, ok in per]).to_excel(xw, sheet_name="图片", index=False)
+            (pd.concat(objs, ignore_index=True) if objs else pd.DataFrame({"": []})).to_excel(xw, sheet_name="对象", index=False)
+        return Path(path)
 
     # -- tilt 3D ---------------------------------------------------------------------------------
 
@@ -1494,7 +1660,20 @@ class SemWindow(QMainWindow):
             self.tilt_level.blockSignals(True)
             self.tilt_level.setCurrentIndex(self.tilt_level.findData(spec.level))
             self.tilt_level.blockSignals(False)
+        k = 1e-9 if self.ms is not None and self.ms.scale.pixel_size else 1.0
+        self.tilt_cutoff.blockSignals(True)
+        self.tilt_cutoff.setSuffix(" nm" if k != 1.0 else tr(" 像素"))
+        self.tilt_cutoff.setValue((spec.cutoff / k) if spec is not None else 0.0)
+        self.tilt_cutoff.blockSignals(False)
         self._filling_tilt = False
+
+    def _tilt_cutoff_edited(self, value: float) -> None:
+        if self._filling_tilt or self.ms is None or self.ms.tilt3d is None:
+            return
+        k = 1e-9 if self.ms.scale.pixel_size else 1.0
+        self._push_undo()
+        self.ms.tilt3d.cutoff = float(value) * k
+        self._changed()
 
     def _tilt_angle_edited(self, row: int, value: float) -> None:
         if self._filling_tilt or self.ms is None or self.ms.tilt3d is None:
@@ -1634,6 +1813,9 @@ class SemWindow(QMainWindow):
             lines.append(tr(f"台阶 {i}：") + (st["error"] if "error" in st else f"<b>{st['step'] / f:.4g} ± {st['uncertainty'] / f:.2g} {unit}</b>"))
         for i, p in enumerate(res.profiles, start=1):
             lines.append(tr(f"剖面 {i}：高差 {np.ptp(p['height']) / f:.4g} {unit}"))
+            pr = p.get("roughness") or {}
+            if pr:
+                lines.append("&nbsp;&nbsp;" + tr("，").join(f"{q} <b>{pr[q] / f:.4g}</b> {unit}" for q in ("Ra", "Rq", "Rz")) + tr(f"（ISO 21920，λc {pr['cutoff'] / f:.4g} {unit}）"))
         if hm.pairs:
             lines.append(tr("倾角对：") + tr("；").join(tr(f"{p['tilt_reference']:g}° / {p['tilt']:g}°（匹配 {p['match']:.2f}）") for p in hm.pairs))
         if stale:

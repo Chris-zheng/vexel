@@ -11,7 +11,11 @@ lines       line/space: CD (line width), space, pitch, LER and LWR (3σ, with an
 holes       contact holes and vias: diameter, ellipse, roundness, CD uniformity, the
             array's pitch and missing holes (``objects.holes``)
 particles   particles and defects: equivalent and Feret diameters, circularity, aspect
-            ratio, size distribution by number and volume (``objects.particles``)
+            ratio, solidity, convexity, a rule-based class, size distribution by number
+            and volume (``objects.particles``)
+pores       porosity, pore size and shape (``objects.pores``)
+fibres      fibre diameter (along the centre lines, away from crossings), orientation,
+            gaps between fibres (``fibres.fibres``)
 layers      cross-section layer stack: each interface and each layer's thickness and
             uniformity (``metrology.layers``)
 profile     one line or trench in cross-section: height, top/middle/bottom width,
@@ -35,8 +39,11 @@ import numpy as np
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
+from vexel.packs.sem.objects import CLASSES
 from vexel.packs.sem.process import Param
 
+CLASS_NAMES = {"normal": "正常", "agglomerate": "团聚（相互接触）", "irregular": "不规则（可能破碎）", "outlier": "异常（尺寸或灰度，可能是异物）"}
+CLASS_COLOURS = {"normal": "#a3e635", "agglomerate": "#f59e0b", "irregular": "#f472b6", "outlier": "#ef4444"}
 COLOURS = {"edge_l": "#22d3ee", "edge_r": "#f472b6", "object": "#a3e635", "missing": "#ef4444", "fit": "#f59e0b", "region": "#facc15"}
 
 
@@ -210,7 +217,8 @@ def _particles(a: np.ndarray, mask: np.ndarray | None, X0: int, Y0: int, sx: flo
     from vexel.packs.sem.objects import particles
 
     s = math.sqrt(sx * sy)
-    res = particles(a, feature=p["feature"], threshold=p["threshold"], split=p["split"], min_diameter=p["min_diameter"], smooth=p["smooth"], mask=mask)
+    res = particles(a, feature=p["feature"], threshold=p["threshold"], split=p["split"], min_diameter=p["min_diameter"], smooth=p["smooth"], mask=mask,
+                    solidity_min=p["solidity_min"], outlier_k=p["outlier_k"])  # fmt: skip
     an = Analysis(spec=spec, warnings=list(res["warnings"]))
     sm = res["summary"]
     an.summary = [("particles", "颗粒数", sm["particles"], "count"), ("at_border", "被边界截断（未计入）", sm["at_border"], "count")]
@@ -220,15 +228,79 @@ def _particles(a: np.ndarray, mask: np.ndarray | None, X0: int, Y0: int, sx: flo
                        ("d10_n", "d10（数量）", L(sm["d10_n"]), "length"), ("d50_n", "d50（数量）", L(sm["d50_n"]), "length"), ("d90_n", "d90（数量）", L(sm["d90_n"]), "length"),
                        ("d10_v", "d10（体积）", L(sm["d10_v"]), "length"), ("d50_v", "d50（体积）", L(sm["d50_v"]), "length"), ("d90_v", "d90（体积）", L(sm["d90_v"]), "length"),
                        ("agglomerated", "相互接触的比例", sm["agglomerated"], "ratio"), ("area_fraction", "面积分数", sm["area_fraction"], "ratio")]  # fmt: skip
+        an.summary += [(f"class_{c}", f"分类：{CLASS_NAMES[c]}", sm[f"class_{c}"], "count") for c in CLASSES]
     rows = []
     for i, q in enumerate(res["particles"], start=1):
         rows.append({"particle": i, "x": (q["x"] + X0) * sx, "y": (q["y"] + Y0) * sy, "eq_diameter": q["eq_diameter"] * s, "area": q["area"] * sx * sy,
                      "feret_max": q["feret_max"] * s, "feret_min": q["feret_min"] * s, "circularity": q["circularity"],
-                     "aspect_ratio": q["aspect_ratio"], "touching": q["touching"]})  # fmt: skip
+                     "aspect_ratio": q["aspect_ratio"], "solidity": q["solidity"], "convexity": q["convexity"], "grey": q["grey"],
+                     "touching": q["touching"], "class": q["class"], "reason": q["reason"]})  # fmt: skip
         if len(q["outline"]) > 2:
             pts = (np.asarray(q["outline"]) + [X0, Y0])[:: max(1, len(q["outline"]) // 60)].tolist()
-            an.shapes.append(("polygon", pts, COLOURS["object"], (q["x"] + X0, q["y"] + Y0), ""))
+            an.shapes.append(("polygon", pts, CLASS_COLOURS[q["class"]], (q["x"] + X0, q["y"] + Y0), ""))
     an.objects = pd.DataFrame(rows)
+    return an
+
+
+def _pores(a: np.ndarray, mask: np.ndarray | None, X0: int, Y0: int, sx: float, sy: float, p: dict[str, Any], spec: AnalysisSpec) -> Analysis:
+    from vexel.packs.sem.objects import pores
+
+    s = math.sqrt(sx * sy)
+    res = pores(a, feature=p["feature"], threshold=p["threshold"], split=p["split"], min_diameter=p["min_diameter"], smooth=p["smooth"], mask=mask)
+    an = Analysis(spec=spec, warnings=list(res["warnings"]))
+    sm = res["summary"]
+    an.summary = [("porosity", "孔隙率", sm["porosity"], "ratio"), ("pores", "孔数", sm["particles"], "count"),
+                  ("at_border", "被边界截断（只计入孔隙率）", sm["at_border"], "count")]  # fmt: skip
+    if sm.get("diameter_mean") is not None:
+        L = lambda v: v * s  # noqa: E731
+        an.summary += [("diameter_mean", "等效圆直径（平均）", L(sm["diameter_mean"]), "length"), ("diameter_sd", "等效圆直径（标准差）", L(sm["diameter_sd"]), "length"),
+                       ("d10_n", "d10（数量）", L(sm["d10_n"]), "length"), ("d50_n", "d50（数量）", L(sm["d50_n"]), "length"), ("d90_n", "d90（数量）", L(sm["d90_n"]), "length"),
+                       ("d50_v", "d50（面积加权）", L(sm["d50_v"]), "length")]  # fmt: skip
+    rows = []
+    for i, q in enumerate(res["pores"], start=1):
+        rows.append({"pore": i, "x": (q["x"] + X0) * sx, "y": (q["y"] + Y0) * sy, "eq_diameter": q["eq_diameter"] * s, "area": q["area"] * sx * sy,
+                     "feret_max": q["feret_max"] * s, "feret_min": q["feret_min"] * s, "circularity": q["circularity"],
+                     "aspect_ratio": q["aspect_ratio"]})  # fmt: skip
+        if len(q["outline"]) > 2:
+            pts = (np.asarray(q["outline"]) + [X0, Y0])[:: max(1, len(q["outline"]) // 60)].tolist()
+            an.shapes.append(("polygon", pts, COLOURS["edge_l"], (q["x"] + X0, q["y"] + Y0), ""))
+    an.objects = pd.DataFrame(rows)
+    return an
+
+
+def _fibres(a: np.ndarray, mask: np.ndarray | None, X0: int, Y0: int, sx: float, sy: float, p: dict[str, Any], spec: AnalysisSpec) -> Analysis:
+    from vexel.packs.sem.fibres import fibres
+
+    res = fibres(a, feature=p["feature"], threshold=p["threshold"], method=p["method"], smooth=p["smooth"], min_diameter=p["min_diameter"],
+                 mask=mask, sx=sx, sy=sy)  # fmt: skip
+    an = Analysis(spec=spec, warnings=list(res["warnings"]))
+    sm = res["summary"]
+    an.summary = [("segments", "纤维段数", sm["segments"], "count"), ("samples", "测量点数", sm["samples"], "count")]
+    if sm.get("diameter_mean") is not None:
+        an.summary += [("diameter_mean", "直径（平均，按长度）", sm["diameter_mean"], "length"), ("diameter_sd", "直径（标准差）", sm["diameter_sd"], "length"),
+                       ("diameter_median", "直径（中位数）", sm["diameter_median"], "length"), ("d10", "直径 d10", sm["d10"], "length"),
+                       ("d90", "直径 d90", sm["d90"], "length"), ("diameter_min", "直径（最小）", sm["diameter_min"], "length"),
+                       ("diameter_max", "直径（最大）", sm["diameter_max"], "length"), ("orientation", "主方向", sm["orientation"], "angle"),
+                       ("order", "取向度（0 无序，1 平行）", sm["order"], "ratio")]  # fmt: skip
+    an.summary.append(("coverage", "纤维覆盖率", sm["coverage"], "ratio"))
+    if sm.get("gaps"):
+        an.summary += [("gaps", "纤维间缝隙数", sm["gaps"], "count"), ("gap_mean", "缝隙等效直径（平均）", sm["gap_mean"], "length"),
+                       ("gap_d50", "缝隙等效直径（中位数）", sm["gap_d50"], "length"), ("gap_max", "最大缝隙", sm["gap_max"], "length")]  # fmt: skip
+    rows = []
+    for g in res["segments"]:
+        xs_, ys_ = g.pop("_pts")
+        rows.append({"segment": g["segment"], "x": (g["x"] + X0) * sx, "y": (g["y"] + Y0) * sy, "diameter": g["diameter"], "sd": g["diameter_sd"],
+                     "length_along": g["length"], "angle": g["angle"], "samples": g["samples"]})  # fmt: skip
+        if len(rows) <= 400 and len(xs_) > 1:
+            # order the centre-line pixels along the segment's main axis
+            c = np.column_stack([xs_, ys_]).astype(float)
+            u = c - c.mean(0)
+            ax = np.linalg.svd(u, full_matrices=False)[2][0]
+            o = np.argsort(u @ ax)
+            pts = (c[o][:: max(1, len(o) // 40)] + [X0, Y0]).tolist()
+            an.shapes.append(("polyline", pts, COLOURS["object"], tuple(pts[len(pts) // 2]), ""))
+    an.objects = pd.DataFrame(rows)
+    an.extra["samples"] = {k: np.asarray(v).tolist() for k, v in res["samples"].items() if k in ("diameter", "angle", "length")}
     return an
 
 
@@ -334,7 +406,22 @@ RECIPES: dict[str, Recipe] = {
             FEATURE, Param("threshold", "阈值", "choice", "mid", (("mid", "全图（两类灰度的中点）"), ("local", "局部（亮度不均时）"))),
             Param("split", "分开相互接触的颗粒", "bool", True), Param("min_diameter", "最小直径（像素）", "float", 3.0, lo=1, hi=1000, step=1),
             Param("smooth", "平滑（像素）", "float", 0.5, lo=0, hi=10, step=0.5, help="平滑会让小颗粒的轮廓向内收：颗粒小于 15 像素时不要超过 0.5"),
-        ], "等效圆直径、Feret 直径、圆度、长宽比、粒度分布（数量与体积加权）；被区域边界截断的不计入", _particles),  # fmt: skip
+            Param("solidity_min", "不规则：凸度低于", "float", 0.85, lo=0, hi=1, step=0.05, help="面积 / 凸包面积；破碎、有棱角或粘连的颗粒较低"),
+            Param("outlier_k", "异常：偏离超过（稳健标准差）", "float", 4.0, lo=1, hi=100, step=0.5, help="尺寸（对数）或平均灰度偏离总体的程度；至少 8 个颗粒时才判断"),
+        ], "等效圆直径、Feret 直径、圆度、长宽比、凸度、粒度分布（数量与体积加权）；按规则分为正常、团聚、不规则、异常；被区域边界截断的不计入", _particles),  # fmt: skip
+        Recipe("pores", "孔隙", [
+            Param("feature", "孔是", "choice", "dark", (("dark", "暗"), ("bright", "亮"))),
+            Param("threshold", "阈值", "choice", "mid", (("mid", "全图（两类灰度的中点）"), ("local", "局部（亮度不均时）"))),
+            Param("split", "分开相连的孔", "bool", False), Param("min_diameter", "最小直径（像素）", "float", 3.0, lo=1, hi=1000, step=1),
+            Param("smooth", "平滑（像素）", "float", 0.5, lo=0, hi=10, step=0.5),
+        ], "孔隙率（孔所占面积比例，被边界截断的孔也计入）、孔径与形状分布（被截断的孔不计入）", _pores),  # fmt: skip
+        Recipe("fibres", "纤维", [
+            Param("feature", "纤维是", "choice", "bright", (("bright", "亮"), ("dark", "暗"))),
+            Param("threshold", "阈值", "choice", "mid", (("mid", "全图（两类灰度的中点）"), ("local", "局部（亮度不均时）"))),
+            Param("method", "边缘定义", "choice", "gradient", (("gradient", "最大梯度（不受边缘增亮影响）"), ("threshold", "阈值"))),
+            Param("smooth", "平滑（像素）", "float", 1.0, lo=0, hi=10, step=0.5, help="纤维细于 8 像素时用 0.5"),
+            Param("min_diameter", "最小直径（像素）", "float", 2.0, lo=1, hi=1000, step=1),
+        ], "沿每根纤维的中心线测直径（避开交叉、端点和边界）、取向分布、纤维间的缝隙", _fibres),  # fmt: skip
         Recipe("layers", "截面层厚", [
             Param("method", "边缘定义", "choice", "gradient", (("gradient", "最大梯度"), ("threshold", "阈值"))), LEVEL,
             Param("smooth", "平滑（像素）", "float", 1.5, lo=0, hi=10, step=0.5), Param("average", "列平均", "int", 1, lo=1, hi=32),
@@ -389,7 +476,7 @@ def summary_table(analyses: list[Analysis], unit: str, f: float) -> pd.DataFrame
 
 LENGTH_COLUMNS = {"position", "cd", "cd_sd_along", "ler_left_3sigma", "ler_left_3sigma_unbiased", "ler_right_3sigma", "ler_right_3sigma_unbiased",
                   "lwr_3sigma", "lwr_3sigma_unbiased", "x", "y", "diameter", "eq_diameter", "major", "minor", "fit_residual", "feret_max",
-                  "feret_min", "top", "bottom", "thickness", "sd", "min", "max", "roughness_3sigma", "roughness_3sigma_unbiased", "depth",
+                  "feret_min", "top", "bottom", "thickness", "sd", "min", "max", "length_along", "roughness_3sigma", "roughness_3sigma_unbiased", "depth",
                   "width"}  # fmt: skip
 
 
@@ -413,4 +500,4 @@ def objects_table(analyses: list[Analysis], unit: str, f: float) -> pd.DataFrame
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
-__all__ = ["RECIPES", "Analysis", "AnalysisSpec", "Recipe", "objects_table", "region_of", "run", "summary_table"]
+__all__ = ["CLASS_COLOURS", "CLASS_NAMES", "RECIPES", "Analysis", "AnalysisSpec", "Recipe", "objects_table", "region_of", "run", "summary_table"]

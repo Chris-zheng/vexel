@@ -607,7 +607,7 @@ def cmd_sem_analyze(args: argparse.Namespace) -> int:
     if args.recipe:
         typed = RECIPES[args.recipe].resolve(params)
         params = {k: typed[k] for k in params}
-    rows, objects, reports = [], [], []
+    rows, objects, reports, pool_in = [], [], [], []
     for f in args.images:
         path = Path(f)
         cal = semcal.for_file(path, use_ocr=not args.no_ocr)
@@ -653,10 +653,12 @@ def cmd_sem_analyze(args: argparse.Namespace) -> int:
                 df.insert(1, "analysis", an.spec.id)
                 objects.append(df)
             reports.append((path, an, unit, fct, cal))
+            pool_in.append((path.parent.name, an, cal.ok))
     if not rows:
         return 1
     table = pd.DataFrame(rows)
-    numeric = [c for c in table.columns if c not in ("file", "group", "analysis", "recipe", "calibration", "error", "warnings")
+    # axial directions (0..180°) do not average linearly: left out of the spread
+    numeric = [c for c in table.columns if c not in ("file", "group", "analysis", "recipe", "calibration", "error", "warnings", "orientation")
                and pd.api.types.is_numeric_dtype(table[c])]  # fmt: skip
     spread = []
     if len(table) > 1:
@@ -667,8 +669,11 @@ def cmd_sem_analyze(args: argparse.Namespace) -> int:
                     spread.append({"group": grp, "recipe": rec, "quantity": c, "n": len(v), "mean": v.mean(), "sd": v.std(ddof=1), "3sigma": 3 * v.std(ddof=1),
                                    "min": v.min(), "max": v.max()})  # fmt: skip
     spread_df = pd.DataFrame(spread)
+    from vexel.packs.sem.population import pooled
+
+    pooled_df = pooled(pool_in, *(measure_io.display_unit(ms) if rows else ("m", 1.0)))
     if args.json:
-        print(json.dumps({"results": rows, "repeatability": spread}, ensure_ascii=False, indent=2, default=float))
+        print(json.dumps({"results": rows, "repeatability": spread, "pooled": pooled_df.to_dict("records")}, ensure_ascii=False, indent=2, default=float))
     else:
         for path, an, unit, fct, cal in reports:
             print(f"{path.name}  A{an.spec.id} {RECIPES[an.spec.recipe].label}  ({cal.describe()})")
@@ -692,17 +697,25 @@ def cmd_sem_analyze(args: argparse.Namespace) -> int:
             print("\nspread across images (repeatability):")
             with pd.option_context("display.max_rows", 200, "display.width", 200):
                 print(spread_df.to_string(index=False, float_format=lambda x: f"{x:.4g}"))
+        if len(pooled_df) and len(reports) > 1:
+            print("\nall objects of all images together (pooled):")
+            with pd.option_context("display.max_rows", 200, "display.width", 200):
+                print(pooled_df.to_string(index=False, float_format=lambda x: f"{x:.4g}"))
     if args.output:
         out = Path(args.output)
         if out.suffix.lower() == ".xlsx":
             with pd.ExcelWriter(out, engine="openpyxl") as xw:
                 table.assign(warnings=table["warnings"].map("; ".join)).to_excel(xw, sheet_name="结果", index=False)
                 (spread_df if len(spread_df) else pd.DataFrame({"": []})).to_excel(xw, sheet_name="重复性", index=False)
+                if len(pooled_df):
+                    pooled_df.to_excel(xw, sheet_name="合并统计", index=False)
                 (pd.concat(objects, ignore_index=True) if objects else pd.DataFrame({"": []})).to_excel(xw, sheet_name="对象", index=False)
         else:
             table.assign(warnings=table["warnings"].map("; ".join)).to_csv(out, index=False, encoding="utf-8-sig")
             if len(spread_df):
                 spread_df.to_csv(out.with_name(out.stem + "_repeatability.csv"), index=False, encoding="utf-8-sig")
+            if len(pooled_df):
+                pooled_df.to_csv(out.with_name(out.stem + "_pooled.csv"), index=False, encoding="utf-8-sig")
         print(f"wrote {out}")
     return 0
 
@@ -795,7 +808,9 @@ def cmd_sem_tilt3d(args: argparse.Namespace) -> int:
         if any(t is None for t in tilts):
             print("the stage tilt is not in every file's metadata: give --tilts (degrees, one per image)")
             return 2
+    k = 1e-9 if semcal.for_file(files[0], use_ocr=False).ok else 1.0
     spec = T.Tilt3DSpec(reference_tilt=tilts[0], axis=args.axis, level=args.level, smooth=args.smooth, min_confidence=args.min_confidence,
+                        cutoff=args.cutoff * k, short_cutoff=args.short_cutoff * k,
                         views=[T.TiltView(file=str(f.resolve()), sha256=semcal.file_sha256(f), tilt=t) for f, t in zip(files[1:], tilts[1:])],
                         profiles=[[[p[0], p[1]], [p[2], p[3]]] for p in args.profile or []],
                         steps=[{"lower": s[:4], "upper": s[4:]} for s in args.step or []])  # fmt: skip
@@ -807,7 +822,7 @@ def cmd_sem_tilt3d(args: argparse.Namespace) -> int:
               "height_range": float(np.nanpercentile(res.z[hm.valid], 99) - np.nanpercentile(res.z[hm.valid], 1)) if hm.valid.any() else None,
               "reliable_fraction": float(hm.valid.mean()), "median_uncertainty": float(np.median(hm.uncertainty[hm.valid])) if hm.valid.any() else None,
               "roughness": res.roughness, "steps": res.steps, "pairs": hm.pairs, "warnings": res.warnings,
-              "profiles": [{k: v for k, v in p.items() if k in ("from", "to")} | {"height_range": float(np.ptp(p["height"]))} for p in res.profiles]}  # fmt: skip
+              "profiles": [{k: v for k, v in p.items() if k in ("from", "to", "roughness")} | {"height_range": float(np.ptp(p["height"]))} for p in res.profiles]}  # fmt: skip
     if args.output:
         report["output"] = str(T.save_tiff(hm, args.output, res.z, {"tilts": tilts, "axis": args.axis}))
     if args.mesh:
@@ -840,11 +855,39 @@ def cmd_sem_tilt3d(args: argparse.Namespace) -> int:
               + (st["error"] if "error" in st else f"{st['step'] / f:.4g} ± {st['uncertainty'] / f:.2g} {unit} (two-plane fit, ISO 5436-1)"))  # fmt: skip
     for p in report["profiles"]:
         print(f"  profile {p['from']} -> {p['to']}: height range {p['height_range'] / f:.4g} {unit}")
+        r = p.get("roughness") or {}
+        if r:
+            print("    " + ", ".join(f"{q} {r[q] / f:.4g} {unit}" for q in ("Ra", "Rq", "Rz", "Rt")) + f", Rsk {r['Rsk']:.3f}, Rku {r['Rku']:.3f}"
+                  f" (ISO 21920, λc {r['cutoff'] / f:.4g} {unit}, {r['sections']} section(s))")  # fmt: skip
+            for n in r.get("notes", []):
+                print(f"    ! {n}")
     for w in res.warnings:
         print(f"  ! {w}")
     for key in ("output", "mesh", "picture", "view3d", "record"):
         if key in report:
             print(f"wrote {report[key]}")
+    return 0
+
+
+def cmd_sem_report(args: argparse.Namespace) -> int:
+    """An HTML report of one image's record."""
+    from vexel.packs.sem import calibrate as semcal
+    from vexel.packs.sem import measure_io
+    from vexel.packs.sem.report import write_report
+
+    path = Path(args.image)
+    cal = semcal.for_file(path, use_ocr=not args.no_ocr)
+    ms = measure_io.load_record(cal.sha256)
+    if ms is None:
+        print(f"{path.name}: no measurement record yet (measure it in the SEM window, or vexel sem analyze --save)")
+        return 1
+    tilt = None
+    if ms.tilt3d is not None and ms.tilt3d.views and not args.no_3d:
+        from vexel.packs.sem.tilt3d import run_spec
+
+        tilt = run_spec(ms.tilt3d, path, use_ocr=not args.no_ocr)
+    out = write_report(ms, semcal.load_image(path), args.output or path.with_name(path.stem + "_report.html"), tilt=tilt)
+    print(f"wrote {out}")
     return 0
 
 
@@ -1338,15 +1381,15 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--json", action="store_true")
     c.add_argument("--no-ocr", action="store_true")
     c.set_defaults(func=cmd_sem_average)
-    c = ssub.add_parser("analyze", help="automatic measurements: CD/LER/LWR, contact holes, particles, layer thickness, sidewall angle, tips")
+    c = ssub.add_parser("analyze", help="automatic measurements: CD/LER/LWR, contact holes, particles, pores, fibres, layer thickness, sidewall angle, tips")
     c.add_argument("images", nargs="*")
-    c.add_argument("-r", "--recipe", choices=["lines", "holes", "particles", "layers", "profile", "tip"],
+    c.add_argument("-r", "--recipe", choices=["lines", "holes", "particles", "pores", "fibres", "layers", "profile", "tip"],
                    help="what to measure; without it: the automatic measurements saved in each image's record")
     c.add_argument("--region", type=_region, metavar="X0,Y0,X1,Y1", help="pixels (default: the whole micrograph)")
     c.add_argument("-p", "--param", action="append", metavar="KEY=VALUE", help="a recipe setting (repeatable; --list shows them)")
     c.add_argument("-s", "--step", action="append", metavar="OP[:KEY=VALUE,...]", help="processing steps first (default: the record's)")
     c.add_argument("--list", action="store_true", help="list the recipes and their settings")
-    c.add_argument("-o", "--output", help=".xlsx (results, repeatability, objects) or .csv")
+    c.add_argument("-o", "--output", help=".xlsx (results, repeatability, pooled, objects) or .csv")
     c.add_argument("--save", action="store_true", help="add the measurement to each image's record (the SEM window shows it)")
     c.add_argument("--replace", action="store_true", help="with --save: replace the record's automatic measurements")
     c.add_argument("--auto", action="store_true", help="images without automatic measurements: recognise and plan them first (vexel sem plan)")
@@ -1373,6 +1416,8 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--smooth", type=float, default=1.5, help="Gaussian on the heights, pixels (default 1.5)")
     c.add_argument("--min-confidence", type=float, default=0.3, help="pixels below are marked unreliable (default 0.3)")
     c.add_argument("--profile", type=_floats, action="append", metavar="X0,Y0,X1,Y1", help="a height profile (repeatable)")
+    c.add_argument("--cutoff", type=float, default=0.0, help="profile roughness λc in nm (pixels when uncalibrated); default: one fifth of each profile")
+    c.add_argument("--short-cutoff", type=float, default=0.0, help="profile roughness λs in nm; default: none")
     c.add_argument("--step", type=_floats, action="append", metavar="X0,Y0,X1,Y1,X0,Y0,X1,Y1", help="step height: lower box, then upper box (repeatable)")
     c.add_argument("-o", "--output", help="height map TIFF (height, confidence, uncertainty; float32)")
     c.add_argument("--mesh", help="the surface as .stl or .obj")
@@ -1383,6 +1428,12 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--json", action="store_true")
     c.add_argument("--no-ocr", action="store_true")
     c.set_defaults(func=cmd_sem_tilt3d)
+    c = ssub.add_parser("report", help="an HTML report of an image's measurements (calibration, processing, annotated image, results, distributions)")
+    c.add_argument("image")
+    c.add_argument("-o", "--output", help="the report (.html; default: next to the image)")
+    c.add_argument("--no-3d", action="store_true", help="leave out the tilt 3D reconstruction even when the record has one")
+    c.add_argument("--no-ocr", action="store_true")
+    c.set_defaults(func=cmd_sem_report)
     c = ssub.add_parser("info", help="instrument metadata of an SEM image")
     c.add_argument("file")
     c.add_argument("--json", action="store_true")

@@ -207,7 +207,7 @@ choose which recipe fits the user's goal and the image, and propose settings. Yo
 measured values, and the user confirms every plan before it runs.
 
 Recipes: lines (line/space: CD, pitch, LER/LWR), holes (contact holes and vias), particles
-(particles and defects), layers (cross-section layer thickness), profile (one line or trench in
+(particles and defects), pores (porosity, pore sizes), fibres (fibre diameter, orientation), layers (cross-section layer thickness), profile (one line or trench in
 cross-section: height, widths, sidewall angles), tip (apex radius, cone angle). Choose `recipe`
 from the goal; use null when the goal does not say and the image recognition should decide.
 
@@ -219,7 +219,7 @@ draft is fine. Write each note as one short sentence in the user's language."""
 SEM_SCHEMA = {
     "type": "object",
     "properties": {
-        "recipe": {"type": ["string", "null"], "enum": ["lines", "holes", "particles", "layers", "profile", "tip", None]},
+        "recipe": {"type": ["string", "null"], "enum": ["lines", "holes", "particles", "pores", "fibres", "layers", "profile", "tip", None]},
         "settings": SCHEMA["properties"]["settings"],
         "notes": {"type": "array", "items": {"type": "string"}},
     },
@@ -271,7 +271,7 @@ def _parse(text: str, tier: str, model: str) -> Proposal:
         settings = {item["key"]: item["value"] for item in data.get("settings", [])}
         notes = [str(n) for n in data.get("notes", [])] + [f"{item['key']}：{item['reason']}" for item in data.get("settings", [])]
         recipe = data.get("recipe")
-        if recipe is not None and recipe not in ("lines", "holes", "particles", "layers", "profile", "tip"):
+        if recipe is not None and recipe not in ("lines", "holes", "particles", "pores", "fibres", "layers", "profile", "tip"):
             recipe = None
         return Proposal(data.get("cells"), data.get("fluorescence"), settings, notes, tier, model, recipe)
     except (json.JSONDecodeError, KeyError, TypeError, AttributeError) as e:
