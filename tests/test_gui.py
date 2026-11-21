@@ -576,6 +576,11 @@ def test_launcher_routes_files_and_switches_modules(app, droplet_dataset, tmp_pa
     shown = launcher.start(sem)
     assert isinstance(shown, launcher.Launcher) and shown.path == sem
     _dispose(shown)
+    # asking for it by name, or for a module that does not exist: the launcher explains, no error
+    for mid in ("sem", "nothing"):
+        shown = launcher.start(module_id=mid)
+        assert isinstance(shown, launcher.Launcher)
+        _dispose(shown)
 
     # with previews enabled the SEM window opens and recognises the vendor
     monkeypatch.setenv("VEXEL_PREVIEW", "1")

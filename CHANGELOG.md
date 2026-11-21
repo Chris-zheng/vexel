@@ -1,5 +1,10 @@
 # 更新记录
 
+## Unreleased — user manual
+
+- User manual restructured: a feature list for both modules, a new chapter on starting Vexel (opening the interface, choosing a module, opening the SEM preview, command overview, where data and settings are kept, interface language) and a full SEM chapter; droplet chapters renumbered, SEM limits and FAQ added.
+- Launcher: asking for an unknown module, or for the SEM preview without `VEXEL_PREVIEW=1`, now shows the module chooser with an explanation instead of an error.
+
 ## Unreleased — SEM window: review and English interface
 
 - English interface for the SEM window (toolbar switch, or `VEXEL_LANG=en`): `vexel.i18n` translates text where it is shown, including messages built with values; `scripts/i18n_extract.py` lists text without a translation; a test opens every tab in English and fails on any Chinese left.

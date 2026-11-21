@@ -115,6 +115,12 @@ def start(path: str | Path | None = None, module_id: str | None = None) -> Any:
     belongs to; else the last module (when the person asked to skip the launcher); else
     the launcher."""
     if module_id:
+        try:
+            m = get(module_id)
+        except KeyError:
+            return show_launcher(path, f"没有名为“{module_id}”的模块，请选择。")
+        if not can_open(m):
+            return show_launcher(path, f"“{m.name}”模块还在开发中：设置环境变量 VEXEL_PREVIEW=1 后再启动即可打开预览版。")
         return open_module(module_id, path)
     if path is not None:
         m, _scores = for_path(path)
