@@ -175,9 +175,16 @@ def draft(fp: SemFingerprint, goal: str = "", memory: Any = None) -> SemPlan:
         if pol == "dark":
             p["feature"] = "dark"
         d = fp.objects.get("diameter")
-        if d and d > 60:  # only for large particles: keep the default (3 px) so a broad distribution keeps its small ones
+        da = fp.objects.get("area_diameter")
+        if d and da and da >= 4 * d and da >= 20:
+            # most objects are tiny (noise, stain or debris) but the area is on much larger particles
+            p["min_diameter"] = round(0.2 * da, 1)
+            p["smooth"] = round(min(max(0.05 * da, 0.5), 10.0) * 2) / 2
+            plan.reasons.append(f"大多数目标很小（中位约 {d:.0f} 像素，多半是噪点、染色颗粒或碎屑），面积却主要在约 {da:.0f} 像素的颗粒上："
+                                f"最小直径设为 {p['min_diameter']:g} 像素、平滑 {p['smooth']:g} 像素；小颗粒也要计入时把最小直径改回 3")  # fmt: skip
+        elif d and d > 60:  # only for large particles: keep the default (3 px) so a broad distribution keeps its small ones
             p["min_diameter"] = round(0.05 * d, 1)
-        if d and d < 15:
+        if d and d < 15 and "smooth" not in p:
             plan.reasons.append(f"颗粒较小（约 {d:.0f} 像素）：保持 0.5 像素的轻度平滑")
     elif recipe in ("profile", "tip", "fibres"):
         if pol == "dark":

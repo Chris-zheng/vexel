@@ -175,6 +175,9 @@ def _period(peaks: list[tuple[float, float, float]], direction: float) -> float 
     return 1 / min(on) if on else None
 
 
+_LENGTHS = ("diameter", "area_diameter", "nn_distance")  # object statistics in pixels: scaled back to the full image
+
+
 def objects(a: np.ndarray, polarity: str | None = None) -> dict[str, Any]:
     """Objects against the background, at the grey level halfway between the two classes:
     the minority class is the objects (their polarity), unless ``polarity`` is given.
@@ -217,6 +220,10 @@ def objects(a: np.ndarray, polarity: str | None = None) -> dict[str, Any]:
     contact = {"top": int(mm[0].sum()), "bottom": int(mm[-1].sum()), "left": int(mm[:, 0].sum()), "right": int(mm[:, -1].sum())}
     out["main_base"] = max(contact, key=contact.__getitem__) if any(contact.values()) else None
     sides = {"top": r0 == 0, "bottom": r1 == rows, "left": c0 == 0, "right": c1 == cols}
+    if len(d):  # area-weighted median diameter: the size that holds most of the objects' area
+        o = np.argsort(d)
+        cum = np.cumsum(d[o] ** 2) / np.sum(d**2)
+        out["area_diameter"] = float(d[o][np.searchsorted(cum, 0.5)])
     out.update(inner=len(inner), diameter=float(np.median(d)) if len(d) else None, size_cv=float(d.std() / d.mean()) if len(d) > 1 else None,
                circularity=float(np.median(circ)) if circ else None, main_share=float(main.area / areas.sum()),
                main_box=[int(c0), int(r0), int(c1), int(r1)], main_sides=[k for k, v in sides.items() if v],
@@ -396,12 +403,12 @@ def probe(image: np.ndarray, *, raw: np.ndarray | None = None, cal: Any = None) 
     fp = SemFingerprint(kind=kind, confidence=float(s1), scores={k: round(v, 3) for k, v in scores.items()}, evidence={k: v for k, v in ev.items() if v},
                         shape=tuple(a0.shape), coherence=float(coh), orientation=orientation, period_px=period * f if period else None,
                         lattice=lattice, polarity=ob.get("polarity"),
-                        objects={k: (v * f if k == "diameter" and v else v) for k, v in ob.items() if k not in ("main_box", "widths_along")},
+                        objects={k: (v * f if k in _LENGTHS and v else v) for k, v in ob.items() if k not in ("main_box", "widths_along")},
                         noise=st["noise"], snr=st["snr"], stripes=st["stripes"], gradient=st["gradient"], saturated=st["saturated"])  # fmt: skip
     chosen = {"tip": locals().get("tip_obj"), "profile": locals().get("profile_obj")}.get(kind)
     if chosen is not None:  # the object the kind was recognised on (and its polarity)
         fp.polarity = chosen.get("polarity")
-        fp.objects = {k: (v * f if k == "diameter" and v else v) for k, v in chosen.items() if k not in ("main_box", "widths_along")}
+        fp.objects = {k: (v * f if k in _LENGTHS and v else v) for k, v in chosen.items() if k not in ("main_box", "widths_along")}
         ob = chosen
     if ob.get("main_box"):
         fp.objects["main_box"] = [v * f for v in ob["main_box"]]

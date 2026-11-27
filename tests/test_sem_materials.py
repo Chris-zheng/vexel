@@ -226,3 +226,23 @@ def test_goals_plan_pores_and_fibres():
     plan = make_plan(img, goal="纤维直径", scale=Scale(pixel_size=2e-9), models=False)
     assert plan.recipe == "fibres" and plan.status != "needs_user" and plan.best is not None and not plan.problems
 
+
+
+def test_plan_sets_debris_aside_when_large_particles_hold_the_area():
+    """Negative-stain images: hundreds of tiny stain specks outnumber the particles; the plan
+    raises the minimum size and smoothing to the particles that hold the area (and says so).
+    The probe's sizes are measured on a reduced image and must be scaled back."""
+    from vexel.packs.sem.plan import make_plan
+
+    rng = np.random.default_rng(1)
+    rows, cols = 900, 1400  # larger than the probe's side, so it works on a reduced copy
+    big = [(float(x), float(y), 60.0) for x, y in [(200, 200), (450, 220), (700, 260), (950, 200), (1200, 250), (300, 600), (650, 650), (1000, 620)]]
+    specks = [(float(rng.uniform(0, cols)), float(rng.uniform(0, rows)), float(rng.uniform(4.0, 6.0))) for _ in range(500)]  # specks big enough for the reduced probe to see
+    cov = np.clip(S._disks(rows, cols, big) + S._disks(rows, cols, specks), 0, 1)
+    img = ndi.gaussian_filter(0.25 + 0.55 * cov, 1.0) + rng.normal(0, 0.03, cov.shape)
+    plan = make_plan(img, goal="颗粒粒径", scale=Scale(pixel_size=1e-9), models=False)
+    assert plan.recipe == "particles" and plan.params.get("min_diameter", 0) >= 15 and any("碎屑" in r for r in plan.reasons)
+    an = run(AnalysisSpec(id=1, recipe="particles", params=plan.params), img, Scale(pixel_size=1e-9))
+    assert an.value("particles") == 8 and an.value("d50_n") == pytest.approx(120e-9, rel=0.03)
+    # without the plan's settings the specks dominate the count
+    assert run(AnalysisSpec(id=1, recipe="particles"), img, Scale(pixel_size=1e-9)).value("d50_n") < 20e-9

@@ -15,7 +15,9 @@ Requirements:
   every image whose data bar shows one;
 - recognition never names a wrong kind with confidence (``other`` / ``unknown`` is allowed;
   how many of the images with a kind it names is recorded);
-- under 3 s per image.
+- under 3 s per image;
+- particle sizes (second round) within 10 % of the literature (apoferritin, proteasome) and
+  within 5 % of a measurement by eye (rotavirus), through the plan a goal gives.
 """
 
 from __future__ import annotations
@@ -107,6 +109,42 @@ def gallery(folder: Path) -> list[str]:
     return notes + slow
 
 
+# particle sizes with an outside truth: (truth nm, tolerance, where the truth comes from)
+PARTICLES = {
+    "STEM-Apoferritin-02.jpg": (12.5, 0.10, "apoferritin shell, outer diameter 12-13 nm (literature)"),
+    "STEM-Proteasome-04.jpg": (14.5, 0.10, "20S proteasome 11 x 15 nm side views: equivalent diameter 14.5 nm (literature)"),
+    "STEM-Rotavirus-06.jpg": (58.0, 0.05, "rotavirus discs 116-120 px across, measured by eye (literature 60-75 nm by particle form)"),
+}
+
+
+def measurements(folder: Path) -> list[str]:
+    """Second round: measured sizes against an outside truth, through the automatic plan with
+    a goal (as a person would ask), median equivalent diameter by number."""
+    import numpy as np
+
+    from vexel.packs.sem import calibrate as C
+    from vexel.packs.sem import measure_io
+    from vexel.packs.sem.measure import scale_from
+    from vexel.packs.sem.plan import make_plan
+
+    notes = []
+    for name, (nm, tol, why) in PARTICLES.items():
+        f = folder / name
+        if not f.is_file():
+            continue
+        cal = C.calibrate(f)
+        img = C.load_image(f)
+        ms = measure_io.new_set(f, cal)
+        ms.scale = scale_from(cal, 0.0)
+        plan = make_plan(img, cal=cal, goal="颗粒粒径", scale=ms.scale, crop_rows=cal.crop_rows, models=False)
+        plan.apply(ms)
+        an = measure_io.analyses_of(ms, img)[-1]
+        d50 = float(np.median(an.objects["eq_diameter"])) / 1e-9 if len(an.objects) else float("nan")
+        check("particles", f"{name[:-4]}: median diameter error (truth {nm:g} nm)", abs(d50 / nm - 1) * 100, tol * 100, "%")
+        notes.append(f"{name}: {d50:.1f} nm, {len(an.objects)} particles, settings {plan.params}; truth: {why}")
+    return notes
+
+
 def stacks(folder: Path) -> list[str]:
     from vexel.packs.sem import calibrate as C
 
@@ -138,7 +176,7 @@ def main() -> int:
     args = parser.parse_args()
     os.environ.setdefault("VEXEL_HOME", tempfile.mkdtemp(prefix="vexel-real-"))  # no records left behind
     os.environ.setdefault("VEXEL_OFFLINE", "1")
-    notes = gallery(args.data) + stacks(args.data)
+    notes = gallery(args.data) + measurements(args.data) + stacks(args.data)
     out = ["| 项目 | 检查 | 结果 | 要求 | |", "| :-- | :-- | --: | --: | :-- |"]
     for r in ROWS:
         lim = "（记录）" if r["limit"] is None else f"{'≤' if r['lower'] else '≥'} {r['limit']:g} {r['unit']}"

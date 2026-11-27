@@ -1,5 +1,12 @@
 # 更新记录
 
+## Unreleased — SEM: real images, second round (measurement accuracy)
+
+- Particle sizes on real STEM images against an outside truth, through the automatic plan: apoferritin +6.3 % and 20S proteasome −2.4 % from the literature, rotavirus +0.1 % from a measurement by eye; added to `tests/benchmarks/sem_real_eval.py`.
+- The plan sets stain specks and debris aside when they outnumber the particles but the area is on particles at least four times larger (minimum size and smoothing from the area-weighted size, with the reason; the manual default is unchanged).
+- The probe's object sizes are scaled back to the full image before the plan uses them (they were taken from a reduced copy).
+- Known limit: dense ring-shaped particles in negative stain (encapsulin) cannot be measured with thresholds.
+
 ## Unreleased — SEM: first acceptance on real images
 
 - Acceptance on 52 Phenom gallery images (data bars read by eye) and three FIB-SEM stacks: `tests/benchmarks/sem_real_eval.py --data <folder>` with the truth in `tests/benchmarks/real/` (images not in the repository).
