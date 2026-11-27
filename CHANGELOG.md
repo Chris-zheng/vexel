@@ -9,6 +9,15 @@
 - Images over 100 MP are refused before their pixels are read, with a message (stitched maps used gigabytes of memory).
 - Result: 51 of 52 pixel sizes within 1 % of the field width, the other flagged; recognition names no wrong kind (it names few: 4 of 21).
 
+## Unreleased — SEM in the recipe engine (remote development of 2026-11-27, fixed)
+
+- SEM processing steps, the saturation mask and every SEM measurement run as operators in the recipe engine (`vexel.packs.sem.ops`), with eight built-in recipes (`sem_lines` … `sem_tip`), SEM batch metrics, geometries in `geometries.json`, and an in-memory path for single frames (same result digest as the Zarr path).
+- The operators' parameters are generated from the SEM window's own definitions, so names, ranges and defaults match; a test checks that the engine and the window give identical numbers.
+- Fixes to the delivered code: the data kinds it used (mask, geometry, height map, ROI) were missing, so no operator module could load; the saturation mask was inverted (measurements used only the saturated pixels); preprocessing steps were called with parameters that do not exist; saturation on 16-bit images used 255 as the limit; the PNG/JPEG reader could not open any file; the API's run endpoint rejected every request.
+- `vexel serve` (extra `web`): the engine's HTTP API, local only (127.0.0.1, browsers only from localhost pages, `VEXEL_SERVE_ROOT` limits which files can be run).
+- Local model training with hold-out metrics and model cards; tiled inference (`vexel.runtime`). PNG, JPEG, BMP and WebP open as single frames.
+- The SEM module stays a preview until the acceptance on real images.
+
 ## Unreleased — SEM window: result first
 
 - Opening an image without automatic measurements recognises, plans and tries it at once (switch "打开图片时自动规划", remembered): the trial is drawn on the image and summarised on a card in the panel (image type, method, key numbers, checks, the first reasons) with three choices: accept, adjust (method, settings and region into the panel), do it myself. The plan no longer opens a dialog.

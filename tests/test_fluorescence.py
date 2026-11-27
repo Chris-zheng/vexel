@@ -69,7 +69,7 @@ def test_executor_reads_each_channel_and_rejects_missing_ones(tmp_path):
 
 def test_builtin_recipes_share_their_common_steps():
     """The four droplet recipes must not drift apart: a step present in several of them is identical."""
-    recipes = {name: json.loads(text) for name, text in builtin_recipes().items()}
+    recipes = {name: json.loads(text) for name, text in builtin_recipes().items() if name.startswith("droplet_")}
     assert set(recipes) == {"droplet_basic", "droplet_encapsulation", "droplet_fluorescence", "droplet_fluorescence_encapsulation"}
     by_id: dict[str, list] = {}
     for r in recipes.values():

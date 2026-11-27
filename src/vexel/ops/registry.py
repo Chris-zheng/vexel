@@ -37,6 +37,10 @@ class Kind(str, Enum):
     LABELS = "labels"  # integer instance labels, 0 = background
     TABLE = "table"  # pandas DataFrame; per-frame tables carry a ``frame`` column
     SUMMARY = "summary"  # flat dict of JSON scalars
+    MASK = "mask"  # boolean array, True = marked (e.g. saturated pixels, left out of measurements)
+    HEIGHTMAP = "heightmap"  # float heights per pixel
+    GEOMETRY = "geometry"  # JSON-able shapes (outlines, edges, labels) to draw
+    ROI = "roi"  # regions of interest
 
 
 class Params(BaseModel):
@@ -160,3 +164,34 @@ def get_op(name: str) -> OpSpec:
 def list_ops() -> list[OpSpec]:
     load_builtin_ops()
     return [_REGISTRY[k] for k in sorted(_REGISTRY)]
+
+
+def allowed_params_from_schema(step_id: str, spec: OpSpec) -> dict[str, tuple[Any, ...]]:
+    """Derive agent allowlist rules ``{"<step_id>.<field>": ("enum", [...]) | ("float", lo, hi)}``
+    directly from an operator's Pydantic ``Params`` JSON schema."""
+    schema = spec.params.model_json_schema()
+    out: dict[str, tuple[Any, ...]] = {}
+    for field_name, meta in schema.get("properties", {}).items():
+        key = f"{step_id}.{field_name}"
+        if "enum" in meta:
+            out[key] = ("enum", list(meta["enum"]))
+            continue
+        t = meta.get("type")
+        if t == "boolean":
+            out[key] = ("enum", [True, False])
+        elif t in ("number", "integer"):
+            lo = meta.get("minimum", meta.get("exclusiveMinimum", -1e12))
+            hi = meta.get("maximum", meta.get("exclusiveMaximum", 1e12))
+            out[key] = ("float", float(lo), float(hi))
+        elif "anyOf" in meta:
+            for branch in meta["anyOf"]:
+                if "enum" in branch:
+                    out[key] = ("enum", list(branch["enum"]))
+                    break
+                if branch.get("type") in ("number", "integer"):
+                    lo = branch.get("minimum", branch.get("exclusiveMinimum", -1e12))
+                    hi = branch.get("maximum", branch.get("exclusiveMaximum", 1e12))
+                    out[key] = ("float", float(lo), float(hi))
+                    break
+    return out
+

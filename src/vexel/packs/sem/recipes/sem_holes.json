@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "name": "sem_holes",
+  "description": "SEM contact-hole diameter, roundness, array pitch, and missing-hole detection. Settings default to the SEM window's.",
+  "seed": 0,
+  "input": {
+    "channel": 0,
+    "z": 0,
+    "channels": {}
+  },
+  "steps": [
+    {
+      "id": "sat",
+      "op": "sem.saturation_mask",
+      "inputs": {
+        "image": "source"
+      },
+      "params": {}
+    },
+    {
+      "id": "measure",
+      "op": "sem.holes",
+      "inputs": {
+        "image": "source",
+        "mask": "sat.mask"
+      },
+      "params": {}
+    }
+  ]
+}

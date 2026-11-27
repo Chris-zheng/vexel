@@ -869,6 +869,22 @@ def cmd_sem_tilt3d(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    try:
+        import fastapi  # noqa: F401
+        import uvicorn  # noqa: F401
+    except ImportError:
+        print("the API needs the 'web' extra: uv sync --extra web (or pip install 'vexel[web]')")
+        return 2
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        print(f"warning: listening on {args.host}: other computers can reach the API and read files it can open "
+              "(set VEXEL_SERVE_ROOT to limit them to one folder)", file=sys.stderr)  # fmt: skip
+    from vexel.server.api import serve
+
+    serve(args.host, args.port)
+    return 0
+
+
 def cmd_sem_report(args: argparse.Namespace) -> int:
     """An HTML report of one image's record."""
     from vexel.packs.sem import calibrate as semcal
@@ -1188,6 +1204,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("mcp", help="serve the operator registry and recipe engine to AI assistants (MCP, stdio)")
     p.set_defaults(func=lambda _a: __import__("vexel.agent.mcp_server", fromlist=["main"]).main())
+
+    p = sub.add_parser("serve", help="HTTP API of the engine for the web workbench (needs the 'web' extra; local only by default)")
+    p.add_argument("--host", default="127.0.0.1", help="address to listen on (default 127.0.0.1: this computer only)")
+    p.add_argument("--port", type=int, default=8765)
+    p.set_defaults(func=cmd_serve)
 
     p = sub.add_parser("brush", help="train a pixel classifier by painting strokes; writes a recipe that uses it")
     p.add_argument("input", help="data to paint on")
