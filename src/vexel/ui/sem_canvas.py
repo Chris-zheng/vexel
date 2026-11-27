@@ -53,6 +53,7 @@ TOOL_HINTS = {
     "point": tr("点击每个要计数的目标；回车结束这一组"),
     "calibrate": tr("依次点击比例尺的两端"),
     "region": tr("点击自动测量区域的两个对角"),
+    "example": tr("左键点应该测到的对象（这个），右键或 Shift+左键点不该测到的（不是这个）；然后点“按例子调整”"),
     "hprofile": tr("点击高度剖面线的起点和终点"),
     "box_lower": tr("框选台阶的下平面：点击两个对角"),
     "box_upper": tr("框选台阶的上平面：点击两个对角"),
@@ -130,6 +131,7 @@ class ImageView(QGraphicsView):
         self._auto_shapes: list[Any] = []
         self.show_auto = True
         self._region_item: Any = None
+        self._examples: list[Any] = []  # "this one" / "not this" markers
         self.shapes: list[tuple[int, str, Any, str, tuple[float, float], str]] = []
         self._freehand = False
         self.selected: int | None = None
@@ -141,7 +143,7 @@ class ImageView(QGraphicsView):
         self.scene().clear()
         self.overlay, self._preview, self._handles, self._drawn, self.points = [], [], [], {}, []
         self._before = self._divider = self._mask_item = self._original = None
-        self._auto, self._region_item = [], None
+        self._auto, self._region_item, self._examples = [], None, []
         self.split = None
         self._pix = self.scene().addPixmap(QPixmap.fromImage(to_qimage(img)))
         self._pix.setZValue(-10)
@@ -355,6 +357,23 @@ class ImageView(QGraphicsView):
         for it in self._auto:
             it.setZValue(-5)
 
+    def show_examples(self, positives: list[list[float]], negatives: list[list[float]]) -> None:
+        """Markers of the clicked examples: a green ring for "this one", a red cross for "not this"."""
+        for it in self._examples:
+            self.scene().removeItem(it)
+        self._examples = []
+        for x, y in positives:
+            pen = _pen("#16a34a", 2.5)
+            pen.setCosmetic(True)
+            self._examples.append(self.scene().addEllipse(QRectF(x - 7, y - 7, 14, 14), pen))
+        for x, y in negatives:
+            pen = _pen("#dc2626", 2.5)
+            pen.setCosmetic(True)
+            self._examples.append(self.scene().addLine(x - 6, y - 6, x + 6, y + 6, pen))
+            self._examples.append(self.scene().addLine(x - 6, y + 6, x + 6, y - 6, pen))
+        for it in self._examples:
+            it.setZValue(5)
+
     def set_show_auto(self, on: bool) -> None:
         self.show_auto = on
         self.show_analysis(self._auto_shapes)
@@ -395,6 +414,11 @@ class ImageView(QGraphicsView):
         return self.mapToScene(event.position().toPoint())
 
     def mousePressEvent(self, event: Any) -> None:  # noqa: N802 - Qt
+        if self.tool == "example" and event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
+            p = self._scene_pos(event)
+            negative = event.button() == Qt.MouseButton.RightButton or bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self.shape_done.emit("example_no" if negative else "example_yes", [[p.x(), p.y()]])
+            return
         if event.button() != Qt.MouseButton.LeftButton:
             return super().mousePressEvent(event)
         p = self._scene_pos(event)

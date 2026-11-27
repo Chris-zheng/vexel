@@ -246,3 +246,75 @@ def test_plan_sets_debris_aside_when_large_particles_hold_the_area():
     assert an.value("particles") == 8 and an.value("d50_n") == pytest.approx(120e-9, rel=0.03)
     # without the plan's settings the specks dominate the count
     assert run(AnalysisSpec(id=1, recipe="particles"), img, Scale(pixel_size=1e-9)).value("d50_n") < 20e-9
+
+
+# -- correcting by example, saved methods, batches ------------------------------------------------
+
+
+def _specks_and_particles(seed: int = 1):
+    rng = np.random.default_rng(seed)
+    rows, cols = 500, 700
+    big = [(float(x), float(y), 30.0) for x, y in [(100, 100), (250, 120), (420, 100), (580, 140), (150, 330), (380, 350), (560, 360)]]
+    specks = [(float(rng.uniform(0, cols)), float(rng.uniform(0, rows)), float(rng.uniform(2.0, 3.5))) for _ in range(250)]
+    cov = np.clip(S._disks(rows, cols, big) + S._disks(rows, cols, specks), 0, 1)
+    img = ndi.gaussian_filter(0.25 + 0.55 * cov, 1.0) + rng.normal(0, 0.03, cov.shape)
+    return img, big, specks
+
+
+def test_correct_by_example_finds_settings_that_agree_with_the_clicks():
+    from vexel.packs.sem.examples import inside, tune
+
+    img, big, specks = _specks_and_particles()
+    spec = AnalysisSpec(id=1, recipe="particles")
+    before = run(spec, img, Scale(pixel_size=1e-9))
+    neg = []  # three specks the default settings count as particles
+    for x, y, _r in specks:
+        if inside(before, [(x, y)])[0] and all(np.hypot(x - bx, y - by) > 40 for bx, by, _ in big):
+            neg.append((x, y))
+        if len(neg) == 3:
+            break
+    assert len(neg) == 3
+    pos = [(big[0][0], big[0][1]), (big[4][0], big[4][1])]
+    cands = tune(img, spec, Scale(pixel_size=1e-9), pos, neg)
+    best = cands[0]
+    assert best.agrees and best.satisfied == 5 and best.changes
+    assert 7 <= len(best.analysis.objects) <= 9 and best.analysis.value("d50_n") == pytest.approx(60e-9, rel=0.03)
+    with pytest.raises(ValueError):
+        tune(img, AnalysisSpec(id=1, recipe="lines"), Scale(pixel_size=1e-9), pos, neg)
+
+
+def test_saved_methods_and_batch_triage(tmp_path, monkeypatch):
+    import tifffile
+
+    from vexel.packs.sem import calibrate as C
+    from vexel.packs.sem import measure_io, methods
+
+    monkeypatch.setenv("VEXEL_HOME", str(tmp_path / "home"))
+    files = []
+    for k in range(6):
+        img, _ = S.particle_field(rows=250, cols=300, n=20, seed=k, touching=0.0)
+        if k == 5:
+            img = 0.5 + 0.0 * img  # a blank frame: nothing to measure
+        p = tmp_path / f"p{k}.tif"
+        tifffile.imwrite(p, (np.clip(img, 0, 1) * 65535).astype(np.uint16))
+        if k != 4:  # one image without a calibration
+            C.save(C.manual(p, pixel_size=2e-9).confirm())
+        files.append(p)
+    ms = measure_io.new_set(files[0], C.for_file(files[0], use_ocr=False))
+    spec = ms.add_analysis("particles", None, min_diameter=4.0)
+    m = methods.save(methods.from_record(ms, spec, "颗粒 A"))
+    assert methods.get("颗粒 A").params == {"min_diameter": 4.0} and methods.auto() is None
+    methods.set_auto("颗粒 A")
+    assert methods.auto().name == "颗粒 A"
+    with pytest.raises(KeyError):
+        methods.set_auto("nothing")
+    res = methods.run_files(m, files, use_ocr=False)
+    by = {r.path.name: r for r in res}
+    assert by["p4.tif"].status == "check" and any("未标定" in x for x in by["p4.tif"].reasons)
+    assert by["p5.tif"].status in ("check", "error")
+    assert res[0].status != "ok" and res[-1].status == "ok"  # exceptions first
+    assert sum(r.status == "ok" for r in res) == 4
+    t = methods.table(res, "nm", 1e-9)
+    assert list(t["file"]) == [r.path.name for r in res] and "d50_n" in t
+    methods.delete("颗粒 A")
+    assert methods.list_methods() == [] and methods.auto() is None

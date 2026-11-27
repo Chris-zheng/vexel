@@ -619,6 +619,47 @@ class SemWindow(QMainWindow):
         drow.addWidget(self.auto_delete, 1)
         drow.addWidget(self.auto_show)
         v.addLayout(drow)
+        # correct by example
+        xrow = QHBoxLayout()
+        self.example_btn = QPushButton(tr("点选纠错"))
+        self.example_btn.setCheckable(True)
+        self.example_btn.setToolTip(tr("在图上点例子：左键点应该测到的对象，右键（或 Shift+左键）点不该测到的；Vexel 据此换设置重测，给出几个候选"))
+        self.example_btn.toggled.connect(lambda on: self.set_tool("example" if on else "pan"))
+        self.tune_btn = QPushButton(tr("按例子调整"))
+        self.tune_btn.setObjectName("primary")
+        self.tune_btn.clicked.connect(lambda: self.tune_examples())
+        self.clear_examples_btn = QPushButton(tr("清除例子"))
+        self.clear_examples_btn.clicked.connect(self.clear_examples)
+        xrow.addWidget(self.example_btn)
+        xrow.addWidget(self.tune_btn)
+        xrow.addWidget(self.clear_examples_btn)
+        v.addLayout(xrow)
+        self.example_info = muted("")
+        v.addWidget(self.example_info)
+        self._examples: dict[str, list[list[float]]] = {"yes": [], "no": []}
+        # saved methods
+        mrow = QHBoxLayout()
+        self.method_box = QComboBox()
+        self.method_box.setToolTip(tr("保存过的方案：方法、设置、区域与图像处理"))
+        self.method_box.currentIndexChanged.connect(lambda _i: self._method_selected())
+        self.method_apply_btn = QPushButton(tr("应用方案"))
+        self.method_apply_btn.clicked.connect(lambda: self.apply_method())
+        self.method_save_btn = QPushButton(tr("存为方案…"))
+        self.method_save_btn.setToolTip(tr("把所选自动测量（连同本图的图像处理）存为方案，以后可以一键用在别的图上"))
+        self.method_save_btn.clicked.connect(self._save_method_dialog)
+        mrow.addWidget(self.method_box, 1)
+        mrow.addWidget(self.method_apply_btn)
+        mrow.addWidget(self.method_save_btn)
+        v.addLayout(mrow)
+        self.method_auto = QCheckBox(tr("打开图片时自动套用这个方案"))
+        self.method_auto.setToolTip(tr("还没有测量的图片打开后直接按这个方案测量（不再自动规划）"))
+        self.method_auto.toggled.connect(self._method_auto_toggled)
+        v.addWidget(self.method_auto)
+        self.batch_btn = QPushButton(tr("批量测量…"))
+        self.batch_btn.setToolTip(tr("用所选方案测量一批图片：每张用自己的标定；只把需要看的（出错、未确认标定、有提示、与其余相差很大）排在前面"))
+        self.batch_btn.clicked.connect(self._batch_dialog)
+        v.addWidget(self.batch_btn)
+        self._fill_methods()
         self.auto_summary = QLabel("")
         self.auto_summary.setWordWrap(True)
         self.auto_summary.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -754,6 +795,10 @@ class SemWindow(QMainWindow):
 
         self._plan_on_open = plan
         self.plan_card.hide()
+        self._examples = {"yes": [], "no": []}
+        self.example_info.setText("")
+        if self.example_btn.isChecked():
+            self.example_btn.setChecked(False)
 
         path = Path(path)
         try:
@@ -786,7 +831,7 @@ class SemWindow(QMainWindow):
         self._job.moveToThread(self._thread)
         self._thread.started.connect(self._job.run)
         self._job.done.connect(self._show)
-        self._job.failed.connect(lambda msg: self.state.setText(tr(f"标定失败：{msg}")))
+        self._job.failed.connect(self._calibration_failed)  # a method: runs on the window's thread, not the worker's
         self._job.done.connect(self._thread.quit)
         self._job.failed.connect(self._thread.quit)
         self._thread.start()
@@ -874,7 +919,14 @@ class SemWindow(QMainWindow):
         if want is None:
             want = self.autoplan_on.isChecked() and not self._sync
         self._plan_on_open = False
-        if want and not self.ms.analyses and not self.ms.items and self.ms.tilt3d is None:
+        empty = not self.ms.analyses and not self.ms.items and self.ms.tilt3d is None
+        from vexel.packs.sem import methods
+
+        m = methods.auto() if empty else None
+        if m is not None:
+            self.apply_method(m.name, record=False)
+            self.say(tr(f"已按方案“{m.name}”测量"))
+        elif want and empty:
             self.auto_plan()
 
     _plan_on_open: bool | None = None
@@ -951,6 +1003,18 @@ class SemWindow(QMainWindow):
         self.rerun_btn.setEnabled(ready and arow >= 0)
         self.pool_btn.setEnabled(ready and 0 <= arow < len(self.analyses) and self.analyses[arow].spec.recipe in ("particles", "pores", "holes", "fibres"))
         self.auto_delete.setEnabled(ready and arow >= 0)
+        from vexel.packs.sem.examples import OBJECT_RECIPES
+
+        objects_ok = ready and 0 <= arow < len(self.analyses) and self.analyses[arow].spec.recipe in OBJECT_RECIPES
+        self.example_btn.setEnabled(objects_ok or self.example_btn.isChecked())
+        n_ex = len(self._examples["yes"]) + len(self._examples["no"])
+        self.tune_btn.setEnabled(objects_ok and n_ex > 0)
+        self.clear_examples_btn.setEnabled(n_ex > 0)
+        has_method = self.method_box.currentData() is not None
+        self.method_apply_btn.setEnabled(ready and has_method)
+        self.method_save_btn.setEnabled(ready and arow >= 0)
+        self.method_auto.setEnabled(has_method)
+        self.batch_btn.setEnabled(has_method)
 
     def switch_language(self, lang: str) -> None:
         """Remember the interface language; it applies when the window is opened again."""
@@ -1011,7 +1075,7 @@ class SemWindow(QMainWindow):
     def set_tool(self, tool: str) -> None:
         if tool == "calibrate":
             self.tabs.setCurrentIndex(TAB_CALIBRATION)
-        elif tool == "region":
+        elif tool in ("region", "example"):
             self.tabs.setCurrentIndex(TAB_AUTO)
         elif tool in ("hprofile", "box_lower", "box_upper"):
             self.tabs.setCurrentIndex(TAB_3D)
@@ -1032,6 +1096,9 @@ class SemWindow(QMainWindow):
     def _shape_done(self, tool: str, points: list[list[float]]) -> None:
         if tool in ("hprofile", "box_lower", "box_upper"):
             self._tilt_shape(tool, points)
+            return
+        if tool in ("example_yes", "example_no"):
+            self.add_example(points[0], tool == "example_yes")
             return
         if tool == "region":
             self.set_tool("pan")
@@ -1484,11 +1551,21 @@ class SemWindow(QMainWindow):
         self._plan_job.moveToThread(self._plan_thread)
         self._plan_thread.started.connect(self._plan_job.run)
         self._plan_job.done.connect(self._plan_ready)
-        self._plan_job.failed.connect(lambda msg: (self._end_plan(), self.plan_card.set_plan(f"<b>{tr('自动规划')}</b>", "needs_user", [],
-                                                                                          [("✗", tr(f"规划失败：{msg}"))], [], False)))  # fmt: skip
+        self._plan_job.failed.connect(self._plan_failed)  # a method: queued to the window's thread
         self._plan_thread.start()
         self._set_buttons()
         return None
+
+    def _plan_failed(self, msg: str) -> None:
+        self._end_plan()
+        self.plan_card.set_plan(f"<b>{tr('自动规划')}</b>", "needs_user", [], [("✗", tr(f"规划失败：{msg}"))], [], False)
+
+    def _calibration_failed(self, msg: str) -> None:
+        self.state.setText(tr(f"标定失败：{msg}"))
+
+    def _tilt_failed(self, msg: str, _key: str) -> None:
+        self._end_tilt()
+        self.tilt_info.setText(tr(f"无法重建：{msg}"))
 
     def _end_plan(self) -> None:
         if self._plan_thread is not None:
@@ -1569,6 +1646,274 @@ class SemWindow(QMainWindow):
             remember(memory_store(), plan, False)
         self.view.show_analysis([sh for an in self.analyses if not an.error for sh in an.shapes])
         return plan
+
+    # -- correct by example ----------------------------------------------------------------
+
+    def add_example(self, point: list[float], positive: bool) -> None:
+        self._examples["yes" if positive else "no"].append([float(point[0]), float(point[1])])
+        self.view.show_examples(self._examples["yes"], self._examples["no"])
+        self.example_info.setText(tr(f"例子：这个 {len(self._examples['yes'])} 个，不是这个 {len(self._examples['no'])} 个"))
+        self._set_buttons()
+
+    def clear_examples(self) -> None:
+        self._examples = {"yes": [], "no": []}
+        self.view.show_examples([], [])
+        self.example_info.setText("")
+        self._set_buttons()
+
+    def tune_examples(self, choose: int | None = None) -> list[Any]:
+        """Search the selected measurement's settings for the clicked examples; show the best
+        candidates side by side (``choose``: take that one without asking)."""
+        from vexel.packs.sem.examples import tune
+
+        row = self.auto_list.currentRow()
+        if self.ms is None or not 0 <= row < len(self.ms.analyses):
+            return []
+        spec = self.ms.analyses[row]
+        res = self._processed(block=True)
+        QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            cands = tune(res.analysis, spec, self.ms.scale, [tuple(p) for p in self._examples["yes"]], [tuple(p) for p in self._examples["no"]],
+                         mask=res.mask, crop_rows=self.ms.image.get("crop_rows"))  # fmt: skip
+        except ValueError as e:
+            QMessageBox.warning(self, tr("无法调整"), str(e))
+            return []
+        finally:
+            QGuiApplication.restoreOverrideCursor()
+        if choose is not None:
+            if 0 <= choose < len(cands):
+                self.choose_candidate(cands[choose])
+            return cands
+        self._candidates_dialog(cands, res)
+        return cands
+
+    def choose_candidate(self, cand: Any) -> None:
+        from vexel.packs.sem.analysis import RECIPES
+
+        row = self.auto_list.currentRow()
+        spec = self.ms.analyses[row]
+        defaults = {p.name: p.default for p in RECIPES[spec.recipe].params}
+        self._push_undo()
+        spec.params = {k: v for k, v in cand.params.items() if defaults.get(k) != v}
+        self._shown_spec = None  # the panel shows the new settings
+        self._auto_select = spec.id
+        self.clear_examples()
+        if self.example_btn.isChecked():
+            self.example_btn.setChecked(False)
+        self._changed()
+
+    def _thumbnail(self, cand: Any, res: Any, width: int = 300) -> Any:
+        from PIL import Image, ImageDraw
+        from qtpy.QtGui import QImage, QPixmap
+
+        img = Image.fromarray(res.display).convert("RGB")
+        x0, y0, x1, y1 = cand.analysis.extra.get("region") or [0, 0, img.width, img.height]
+        dr = ImageDraw.Draw(img)
+        lw = max(1, img.width // 400)
+        for kind, geom, colour, _a, label in cand.analysis.shapes:
+            if kind in ("polygon", "polyline") and len(geom) >= 2 and not str(label).startswith("A"):
+                dr.line([tuple(p) for p in geom] + ([tuple(geom[0])] if kind == "polygon" else []), fill=colour, width=lw)
+        for x, y in self._examples["yes"]:
+            dr.ellipse([x - 8, y - 8, x + 8, y + 8], outline="#16a34a", width=lw + 1)
+        for x, y in self._examples["no"]:
+            dr.line([x - 7, y - 7, x + 7, y + 7], fill="#dc2626", width=lw + 1)
+            dr.line([x - 7, y + 7, x + 7, y - 7], fill="#dc2626", width=lw + 1)
+        img = img.crop((int(x0), int(y0), int(x1), int(y1)))
+        img.thumbnail((width, width))
+        data = img.tobytes()
+        q = QImage(data, img.width, img.height, img.width * 3, QImage.Format.Format_RGB888).copy()
+        return QPixmap.fromImage(q)
+
+    def _candidates_dialog(self, cands: list[Any], res: Any) -> None:
+        from qtpy.QtWidgets import QDialog, QDialogButtonBox
+
+        from vexel.packs.sem import measure_io
+        from vexel.packs.sem.analysis import RECIPES
+
+        if not cands:
+            QMessageBox.information(self, tr("按例子调整"), tr("没有找到符合例子的设置：再多点几个例子，或换一种方法"))
+            return
+        unit, f = measure_io.display_unit(self.ms)
+        n_ex = len(self._examples["yes"]) + len(self._examples["no"])
+        labels = {p.name: tr(p.label) for p in RECIPES[cands[0].analysis.spec.recipe].params}
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr("按例子调整：选一个"))
+        lay = QHBoxLayout(dlg)
+        for i, c in enumerate(cands):
+            col = QVBoxLayout()
+            pic = QLabel()
+            pic.setPixmap(self._thumbnail(c, res))
+            col.addWidget(pic)
+            main = next(((lab, v, kind) for _k, lab, v, kind in c.analysis.summary if kind in ("length", "ratio") and v is not None), None)
+            lines = [tr(f"<b>符合 {c.satisfied}/{n_ex} 个例子</b>"), tr(f"对象 {len(c.analysis.objects)} 个")]
+            if main:
+                lines.append(f"{tr(main[0])}：{self._fmt(main[1], main[2], unit, f)}")
+            changes = [f"{labels.get(k, k)} = {tr(str(c.params[k]))}" for k in c.changes]
+            lines.append(tr("改动：") + ("，".join(changes) if changes else tr("无")))
+            text = QLabel("<br>".join(lines))
+            text.setWordWrap(True)
+            col.addWidget(text)
+            pick = QPushButton(tr("用这个"))
+            if i == 0:
+                pick.setObjectName("primary")
+            pick.clicked.connect(lambda _c=False, cand=c: (self.choose_candidate(cand), dlg.accept()))
+            col.addWidget(pick)
+            lay.addLayout(col)
+        close = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        close.rejected.connect(dlg.reject)
+        lay.addWidget(close)
+        self._candidates = dlg
+        dlg.exec()
+
+    # -- saved methods and batches -----------------------------------------------------------
+
+    def _fill_methods(self, select: str | None = None) -> None:
+        from vexel.packs.sem import methods
+
+        auto = methods.auto()
+        keep = select or self.method_box.currentData()
+        self.method_box.blockSignals(True)
+        self.method_box.clear()
+        self.method_box.addItem(tr("（方案）"), None)
+        for m in methods.list_methods():
+            self.method_box.addItem(m.name + (tr("（自动套用）") if auto and auto.name == m.name else ""), m.name)
+        i = self.method_box.findData(keep)
+        self.method_box.setCurrentIndex(max(i, 0))
+        self.method_box.blockSignals(False)
+        self._method_selected()
+
+    def _method_selected(self) -> None:
+        from vexel.packs.sem import methods
+
+        name = self.method_box.currentData()
+        auto = methods.auto()
+        self.method_auto.blockSignals(True)
+        self.method_auto.setChecked(bool(name and auto and auto.name == name))
+        self.method_auto.blockSignals(False)
+        if hasattr(self, "tilt_cutoff"):  # the window is built (the 3D tab comes last)
+            self._set_buttons()
+
+    def _method_auto_toggled(self, on: bool) -> None:
+        from vexel.packs.sem import methods
+
+        name = self.method_box.currentData()
+        if name is None:
+            return
+        methods.set_auto(name if on else None)
+        self._fill_methods(name)
+
+    def save_method(self, name: str, row: int | None = None) -> Any:
+        from vexel.packs.sem import methods
+
+        row = self.auto_list.currentRow() if row is None else row
+        if self.ms is None or not 0 <= row < len(self.ms.analyses):
+            return None
+        m = methods.save(methods.from_record(self.ms, self.ms.analyses[row], name))
+        self._fill_methods(m.name)
+        self.say(tr(f"已存为方案“{m.name}”"))
+        return m
+
+    def _save_method_dialog(self) -> None:
+        from vexel.packs.sem.analysis import RECIPES
+
+        row = self.auto_list.currentRow()
+        if self.ms is None or not 0 <= row < len(self.ms.analyses):
+            return
+        spec = self.ms.analyses[row]
+        default = spec.name if spec.name and spec.name != "自动规划" else tr(RECIPES[spec.recipe].label)
+        name, ok = QInputDialog.getText(self, tr("存为方案"), tr("方案名称（例如“M1 线宽”）："), text=default)
+        if ok and name.strip():
+            self.save_method(name)
+
+    def apply_method(self, name: str | None = None, record: bool = True) -> Any:
+        from vexel.packs.sem import methods
+
+        name = name or self.method_box.currentData()
+        m = methods.get(name) if name else None
+        if self.ms is None or m is None:
+            return None
+        if record:
+            self._push_undo()
+        spec = methods.apply(m, self.ms)
+        self.tabs.setCurrentIndex(TAB_AUTO)
+        self._auto_select = spec.id
+        self._changed()
+        return spec
+
+    def batch_files(self, paths: list[str | Path], name: str | None = None) -> list[Any]:
+        from vexel.packs.sem import methods
+
+        name = name or self.method_box.currentData()
+        m = methods.get(name) if name else None
+        if m is None:
+            raise ValueError("choose a saved method first")
+        QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            return methods.run_files(m, paths)
+        finally:
+            QGuiApplication.restoreOverrideCursor()
+
+    def _batch_dialog(self) -> None:
+        from qtpy.QtWidgets import QDialog, QDialogButtonBox
+
+        from vexel.packs.sem import measure_io, methods
+
+        files, _ = QFileDialog.getOpenFileNames(self, tr("选择要批量测量的图片"), str(self.path.parent if self.path else ""),
+                                                tr("图像 (*.tif *.tiff *.png *.jpg *.jpeg *.bmp)"))  # fmt: skip
+        if not files:
+            return
+        try:
+            results = self.batch_files(files)
+        except ValueError as e:
+            QMessageBox.warning(self, tr("无法批量测量"), str(e))
+            return
+        unit, f = measure_io.display_unit(self.ms) if self.ms is not None else ("px", 1.0)
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr(f"批量测量：{self.method_box.currentData()}"))
+        lay = QVBoxLayout(dlg)
+        n_check = sum(r.status != "ok" for r in results)
+        lay.addWidget(QLabel(tr(f"共 {len(results)} 张：需要看 {n_check} 张（出错 {sum(r.status == 'error' for r in results)}），正常 {len(results) - n_check} 张。双击一行打开那张图。")))
+        only = QCheckBox(tr("只显示需要看的"))
+        only.setChecked(n_check > 0)
+        lay.addWidget(only)
+        tbl = QTableWidget(0, 4)
+        tbl.setHorizontalHeaderLabels([tr("状态"), tr("文件"), tr("结果"), tr("原因")])
+        tbl.verticalHeader().setVisible(False)
+        tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        tbl.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        names = {"ok": tr("正常"), "check": tr("需要看"), "error": tr("出错")}
+
+        def fill() -> None:
+            shown = [r for r in results if r.status != "ok" or not only.isChecked()]
+            tbl.setRowCount(len(shown))
+            for i, r in enumerate(shown):
+                label, v, kind = r.main
+                val = f"{tr(label)} {self._fmt(v, kind, unit, f)}" if v is not None else "–"
+                for j, text in enumerate([names[r.status], r.path.name, val, "；".join(tr(x) for x in r.reasons)]):
+                    cell = QTableWidgetItem(text)
+                    cell.setData(Qt.ItemDataRole.UserRole, str(r.path))
+                    tbl.setItem(i, j, cell)
+            tbl.resizeColumnsToContents()
+
+        only.toggled.connect(lambda _on: fill())
+        tbl.cellDoubleClicked.connect(lambda row, _col: (self.open_path(tbl.item(row, 0).data(Qt.ItemDataRole.UserRole)), dlg.accept()))
+        fill()
+        lay.addWidget(tbl)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        save = buttons.addButton(tr("导出 Excel…"), QDialogButtonBox.ButtonRole.ActionRole)
+        buttons.rejected.connect(dlg.reject)
+
+        def _save() -> None:
+            path, _ = QFileDialog.getSaveFileName(dlg, tr("导出批量结果"), str(Path(files[0]).with_name("batch.xlsx")), "Excel (*.xlsx)")
+            if path:
+                methods.table(results, unit, f).to_excel(path, index=False)
+                self.say(tr(f"已导出：{Path(path).name}"))
+
+        save.clicked.connect(_save)
+        lay.addWidget(buttons)
+        dlg.resize(820, 520)
+        self._batch = dlg
+        dlg.exec()
 
     def _rerun_selected(self) -> None:
         row = self.auto_list.currentRow()
@@ -1985,7 +2330,7 @@ class SemWindow(QMainWindow):
         self._tilt_job.moveToThread(self._tilt_thread)
         self._tilt_thread.started.connect(self._tilt_job.run)
         self._tilt_job.done.connect(self._tilt_done)
-        self._tilt_job.failed.connect(lambda msg, _k: (self._end_tilt(), self.tilt_info.setText(tr(f"无法重建：{msg}"))))
+        self._tilt_job.failed.connect(self._tilt_failed)  # a method: queued to the window's thread
         self._tilt_thread.start()
         self._set_buttons()
         return None

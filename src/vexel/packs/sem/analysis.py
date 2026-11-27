@@ -440,6 +440,25 @@ RECIPES: dict[str, Recipe] = {
 }
 
 
+MIN_CONTRAST = 1.5  # contrast to noise below which a region is taken for noise (pure noise: 0.5-1.1; real images: 4.5 and up)
+
+
+def contrast_to_noise(a: np.ndarray, mask: np.ndarray | None = None) -> float:
+    """Separation of the two grey classes (lightly smoothed) over the pixel noise (from
+    neighbouring-pixel differences): how clearly anything stands out of the noise."""
+    from scipy import ndimage as ndi
+
+    from vexel.packs.sem.objects import _mid_threshold
+
+    a = np.asarray(a, np.float64)
+    d = np.diff(a, axis=1)
+    noise = 1.4826 * float(np.median(np.abs(d - np.median(d)))) / math.sqrt(2)
+    sm = ndi.gaussian_filter(a, 1.0)
+    vals = sm[~mask] if mask is not None and mask.any() and (~mask).sum() > 16 else sm.ravel()
+    _, lo, hi = _mid_threshold(vals)
+    return (hi - lo) / noise if noise > 0 else float("inf")
+
+
 def run(spec: AnalysisSpec, image: np.ndarray, scale: Any, mask: np.ndarray | None = None, crop_rows: int | None = None) -> Analysis:
     """Recompute one analysis on the (corrected) image with the record's scale."""
     if spec.recipe not in RECIPES:
@@ -450,6 +469,9 @@ def run(spec: AnalysisSpec, image: np.ndarray, scale: Any, mask: np.ndarray | No
         X0, Y0, X1, Y1 = region_of(spec, image.shape, crop_rows)
         a = np.asarray(image[Y0:Y1, X0:X1], np.float64)
         m = None if mask is None else mask[Y0:Y1, X0:X1]
+        cnr = contrast_to_noise(a, m)
+        if cnr < MIN_CONTRAST:
+            raise ValueError(f"区域内看不出结构：灰度差只有噪声的 {cnr:.1f} 倍，测出的数值只会是噪声（空白、失焦或噪声过大的图像）")
         an = rec.run(a, m, X0, Y0, scale.sx, scale.sy, p, spec)
     except ValueError as e:
         return Analysis(spec=spec, error=str(e))

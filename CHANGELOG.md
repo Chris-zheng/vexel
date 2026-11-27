@@ -1,5 +1,12 @@
 # 更新记录
 
+## Unreleased — SEM window P1: correct by example, methods, batches
+
+- Correct by example (particles, pores, holes): click objects that should be found and ones that should not; Vexel re-measures with other settings of the same method (in parallel, a few seconds) and shows the three best side by side - clicks agreed with, then objects like the examples, then fewest changes - to pick from (undoable).
+- Saved methods (`~/.vexel/sem/methods.json`): an automatic measurement with its processing, applied in one click; one method can be applied to every image opened without measurements.
+- Batch with a saved method: each image with its own calibration; errors, missing or unconfirmed calibration, warnings and values far from the batch come first; Excel export.
+- Measurements refuse regions where nothing stands out of the noise (contrast under 1.5 times the noise: pure noise measures 0.5-1.1, real images 4.5 and up) and blank frames, instead of returning numbers; a blank frame used to crash particle measurement.
+
 ## 0.7.0b1 — SEM module closed testing (M7)
 
 - Version 0.7.0b1: the build for the first SEM tester (semiconductor). Tester documents in `docs/closed_testing/sem/`: guide (install with the `[sem]` extra, first use, calibration check, line width and roughness against the CD-SEM with the same edge definition, repeatability), data request, feedback form, known issues; an SEM section in the organizer checklist.

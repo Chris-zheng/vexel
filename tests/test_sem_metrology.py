@@ -203,10 +203,15 @@ def test_regions_and_errors():
     img = np.random.default_rng(0).normal(0.5, 0.01, (100, 100))
     spec = AnalysisSpec(id=1, recipe="lines", region=[10, 10, 14, 90])
     assert "too small" in run(spec, img, Scale()).error
+    lines = S.rough_lines(rows=100, cols=100)[0]
     spec = AnalysisSpec(id=2, recipe="lines", region=[90, 95, 10, 5])  # corners in any order; clipped to the micrograph
-    an = run(spec, img, Scale(), crop_rows=80)
+    an = run(spec, lines, Scale(), crop_rows=80)
     assert an.extra["region"] == [10, 5, 90, 80]
     assert run(AnalysisSpec(id=3, recipe="nope"), img, Scale()).error
+    # noise or a blank frame: refused, never measured
+    for name in RECIPES:
+        assert "看不出结构" in run(AnalysisSpec(id=4, recipe=name), img, Scale()).error
+        assert "no contrast" in run(AnalysisSpec(id=5, recipe=name), np.full((100, 100), 0.5), Scale()).error
 
 
 def test_every_recipe_runs_with_its_defaults():

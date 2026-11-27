@@ -30,6 +30,10 @@ def _mid_threshold(v: np.ndarray) -> tuple[float, float, float]:
     """Threshold halfway between the two grey classes (Otsu, then iterated means)."""
     from skimage.filters import threshold_otsu
 
+    v = np.asarray(v, np.float64).ravel()
+    v = v[np.isfinite(v)]
+    if v.size < 2 or not np.ptp(v) > 0:
+        raise ValueError("the region has no contrast: nothing to measure")
     t = float(threshold_otsu(v))
     for _ in range(20):
         lo, hi = float(v[v < t].mean()), float(v[v >= t].mean())

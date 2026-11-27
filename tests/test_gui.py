@@ -985,6 +985,72 @@ def test_sem_window_writes_a_diagnostics_bundle(app, tmp_path, monkeypatch):
     _dispose(w)
 
 
+def test_sem_window_examples_methods_and_batch(app, tmp_path, monkeypatch):
+    import tifffile
+    from scipy import ndimage as ndi
+
+    from vexel.packs.sem import calibrate as C
+    from vexel.packs.sem import methods
+    from vexel.synthetic import sem as S
+    from vexel.ui.sem_window import TAB_AUTO, SemWindow
+
+    monkeypatch.setenv("VEXEL_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("VEXEL_OFFLINE", "1")
+    rng = np.random.default_rng(1)
+    big = [(float(x), float(y), 30.0) for x, y in [(100, 100), (250, 120), (420, 100), (580, 140), (150, 330), (380, 350), (560, 360)]]
+    paths = []
+    for k in range(3):
+        specks = [(float(rng.uniform(0, 700)), float(rng.uniform(0, 500)), float(rng.uniform(2.0, 3.5))) for _ in range(250)]
+        cov = np.clip(S._disks(500, 700, big) + S._disks(500, 700, specks), 0, 1)
+        img = ndi.gaussian_filter(0.25 + 0.55 * cov, 1.0) + rng.normal(0, 0.03, cov.shape)
+        p = tmp_path / f"m{k}.tif"
+        tifffile.imwrite(p, (np.clip(img, 0, 1) * 65535).astype(np.uint16))
+        C.save(C.manual(p, pixel_size=1e-9).confirm())
+        paths.append(p)
+    w = SemWindow()
+    w.open_path(paths[0], wait=True)
+    an = w.run_analysis("particles")
+    assert an.value("particles") > 20 and w.example_btn.isEnabled() and not w.tune_btn.isEnabled()
+    # examples: two particles, three specks the default settings count
+    from vexel.packs.sem.examples import inside
+
+    w.example_btn.setChecked(True)
+    assert w.tabs.currentIndex() == TAB_AUTO and w.view.tool == "example"
+    w._shape_done("example_yes", [[100, 100]])
+    w._shape_done("example_yes", [[150, 330]])
+    specks_in = [(x, y) for x, y in zip(an.objects["x"] / 1e-9, an.objects["y"] / 1e-9) if all(np.hypot(x - bx, y - by) > 40 for bx, by, _ in big)][:3]
+    assert all(inside(an, specks_in))
+    for x, y in specks_in:
+        w._shape_done("example_no", [[x, y]])
+    assert "这个 2" in w.example_info.text() and "不是这个 3" in w.example_info.text() and w.tune_btn.isEnabled()
+    cands = w.tune_examples(choose=0)
+    assert cands and cands[0].agrees
+    best = w.analyses[0]
+    assert best.value("d50_n") == pytest.approx(60e-9, rel=0.03) and w.ms.analyses[0].params and not w.example_btn.isChecked()
+    assert w.example_info.text() == ""
+    w.undo()
+    assert w.ms.analyses[0].params == {}
+    w.redo()
+    # the candidates dialog draws thumbnails without error
+    w._shape_done("example_yes", [[100, 100]])
+    res = w._processed(block=True)
+    assert not w._thumbnail(cands[0], res).isNull()
+    w.clear_examples()
+    # a saved method, applied automatically to the next image, and a batch
+    m = w.save_method("大颗粒")
+    assert m.params == w.ms.analyses[0].params and w.method_box.currentData() == "大颗粒"
+    w.method_auto.setChecked(True)
+    assert methods.auto().name == "大颗粒" and "自动套用" in w.method_box.currentText()
+    w.open_path(paths[1], wait=True, plan=True)
+    assert [a.name for a in w.ms.analyses] == ["大颗粒"] and not w.plan_card.isVisibleTo(w)
+    assert w.analyses[0].value("d50_n") == pytest.approx(60e-9, rel=0.03)
+    results = w.batch_files(paths)
+    assert len(results) == 3 and all(r.status == "ok" for r in results)
+    w.method_auto.setChecked(False)
+    assert methods.auto() is None
+    _dispose(w)
+
+
 def test_sem_window_plan_card_banner_and_panel(app, tmp_path, monkeypatch):
     import tifffile
     from qtpy.QtWidgets import QScrollArea

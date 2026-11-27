@@ -189,7 +189,10 @@ def objects(a: np.ndarray, polarity: str | None = None) -> dict[str, Any]:
     from vexel.packs.sem.objects import _mid_threshold
 
     sm = ndi.gaussian_filter(a, 1.0)
-    t, lo, hi = _mid_threshold(sm.ravel())
+    try:
+        t, lo, hi = _mid_threshold(sm.ravel())
+    except ValueError:  # a flat image: no objects
+        return {"polarity": polarity or "bright", "fraction": 0.0, "contrast": 0.0, "threshold": float(sm.mean()), "count": 0, "valley": 1.0}
     bright = sm > t
     polarity = polarity or ("bright" if bright.mean() <= 0.5 else "dark")
     valley = float(np.mean(np.abs(ndi.gaussian_filter(a, 1.5) - t) < 0.2 * (hi - lo)))
