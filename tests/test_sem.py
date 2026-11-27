@@ -316,3 +316,26 @@ def test_cli_confirm_records_a_databar_calibration(sem_set, capsys):
     main(["sem", "calibrate", path, "--json"])
     assert json.loads(capsys.readouterr().out)[0]["confirmed"] is True
     assert Path(semcal.store_dir()).is_dir()
+
+
+def test_bugreport_carries_sem_records_without_pixels_or_bar_text(sem_set, tmp_path):
+    import zipfile
+
+    from vexel.bugreport import write_bundle
+    from vexel.packs.sem import measure_io
+
+    path, _ = sem_set["thermo"]
+    cal = semcal.for_file(path)
+    ms = measure_io.new_set(path, cal)
+    ms.add_analysis("lines", None)
+    measure_io.autosave(ms)
+    out = write_bundle(tmp_path / "b.zip", note="CD looks wrong", sem_images=[path])
+    with zipfile.ZipFile(out) as zf:
+        names = zf.namelist()
+        assert "note.txt" in names and any(n.endswith("/calibration.json") for n in names) and any(n.endswith("/measurements.json") for n in names)
+        calj = json.loads(zf.read(next(n for n in names if n.endswith("/calibration.json"))))
+        assert "texts" not in calj and calj["pixel_size"] == pytest.approx(cal.pixel_size)
+        assert not any(n.lower().endswith((".tif", ".png", ".jpg", ".html")) for n in names)
+        assert "text read from SEM data bars" in zf.read("README.txt").decode()
+    with pytest.raises(FileNotFoundError):
+        write_bundle(tmp_path / "c.zip", sem_images=[tmp_path / "missing.tif"])

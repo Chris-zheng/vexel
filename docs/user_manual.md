@@ -1,6 +1,6 @@
 # Vexel 用户手册
 
-适用版本：0.6.0b1 内测版。微流控液滴模块为内测版（Phase 1–6 完成）；SEM 扫描电镜模块为**预览版**（开发中：读取与标定、手动测量、图像处理、半导体计量与分割、识别与自动规划、倾转 2.5D 已完成，待用真实图片验收）。
+适用版本：0.7.0b1 内测版。微流控液滴模块为内测版（Phase 1–6 完成）；SEM 扫描电镜模块为**预览版**（读取与标定、手动测量、图像处理、半导体计量与分割、材料测量、识别与自动规划、倾转 2.5D 已完成；标定与颗粒测量已在真实图片上验收两轮，半导体计量待第一位用户的真实图片验收）。
 
 Vexel 是一个科学图像分析平台，由彼此独立的**模块**组成：
 
@@ -76,16 +76,16 @@ Vexel 是一个科学图像分析平台，由彼此独立的**模块**组成：
 
 装完重新打开终端。然后二选一：
 
-**从安装文件**（内测时收到的 `.whl`，连同 `vexel-0.6.0b1-constraints.txt`）：
+**从安装文件**（内测时收到的 `.whl`，连同 `vexel-0.7.0b1-constraints.txt`）：
 
 ```bash
-uv tool install ./vexel-0.6.0b1-py3-none-any.whl -c ./vexel-0.6.0b1-constraints.txt
+uv tool install ./vexel-0.7.0b1-py3-none-any.whl -c ./vexel-0.7.0b1-constraints.txt
 vexel gui
 ```
 
 `-c` 让依赖装成我们测试过的确切版本。在中国大陆网络下，先按 [内测说明](closed_testing/README.md) 1B 节设置国内镜像。
 
-这样装好后命令直接写 `vexel ...`；卸载用 `uv tool uninstall vexel`。要用 SEM 模块的文字识别（读取信息栏上的比例尺），把文件名写成 `"./vexel-0.6.0b1-py3-none-any.whl[agent,sem]"`（带引号）。
+这样装好后命令直接写 `vexel ...`；卸载用 `uv tool uninstall vexel`。要用 SEM 模块的文字识别（读取信息栏上的比例尺），把文件名写成 `"./vexel-0.7.0b1-py3-none-any.whl[agent,sem]"`（带引号）。
 
 **从源码**：
 
@@ -151,10 +151,11 @@ vexel modules my_file.tif      # 各模块对这个文件的判断（0–1 打�
 
 ### 2.3 打开 SEM 模块（预览版）
 
-SEM 模块还在开发中，选择窗口里显示为“开发中”，按钮不可用。要使用预览版，启动前设置环境变量 `VEXEL_PREVIEW=1`：
+SEM 模块还在开发中，选择窗口里显示为“开发中”，按钮不可用。要使用预览版，用 `--preview` 启动，或启动前设置环境变量 `VEXEL_PREVIEW=1`：
 
 | 系统 | 命令 |
 | :--- | :--- |
+| 所有系统 | `vexel gui --preview`（只打开 SEM：`vexel gui --module sem --preview`） |
 | macOS、Linux | `VEXEL_PREVIEW=1 vexel gui` |
 | Windows PowerShell | `$env:VEXEL_PREVIEW=1; vexel gui` |
 | Windows 命令提示符（cmd） | `set VEXEL_PREVIEW=1 && vexel gui` |

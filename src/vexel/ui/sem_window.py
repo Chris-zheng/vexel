@@ -333,6 +333,8 @@ class SemWindow(QMainWindow):
         bar.addSeparator()
         self.export_act = bar.addAction(tr("导出…"), self._export)
         self.load_act = bar.addAction(tr("载入测量记录…"), self._load_record_file)
+        self.bug_act = bar.addAction(tr("诊断包…"), self._bugreport)
+        self.bug_act.setToolTip(tr("报告问题用：版本、系统、这张图的标定与测量记录；不含图像，也不含信息栏上的文字"))
         bar.addSeparator()
         from vexel.i18n import language
 
@@ -920,6 +922,7 @@ class SemWindow(QMainWindow):
         self.redo_act.setEnabled(bool(self._redo))
         self.export_act.setEnabled(bool(self.ms and self.ms.items))
         self.load_act.setEnabled(self.ms is not None)
+        self.bug_act.setEnabled(self.path is not None)
         self.delete_btn.setEnabled(self.view.selected is not None)
         ready = self.ms is not None and self.processor is not None
         row = self.steps.currentRow()
@@ -1272,6 +1275,28 @@ class SemWindow(QMainWindow):
             raise ValueError(f"unknown export type: {suffix}")
         self.say(tr("已导出：") + tr("、").join(p.name for p in out))
         return out
+
+    def _bugreport(self) -> None:
+        from qtpy.QtWidgets import QInputDialog
+
+        if self.path is None:
+            return
+        note, ok = QInputDialog.getMultiLineText(self, tr("诊断包"), tr("发生了什么？（可以不填）"))
+        if not ok:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, tr("保存诊断包"), str(self.path.with_name(self.path.stem + tr("_诊断包.zip"))), "Zip (*.zip)")
+        if path:
+            out = self.bugreport(path, note)
+            self.say(tr(f"已保存诊断包：{out.name}（发送前可以解压查看）"))
+
+    def bugreport(self, path: str | Path, note: str = "") -> Path:
+        from vexel.bugreport import write_bundle
+
+        if self.ms is not None:
+            from vexel.packs.sem import measure_io
+
+            measure_io.autosave(self.ms)
+        return write_bundle(path, note=note, sem_images=[self.path] if self.path else [])
 
     def _load_record_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, tr("载入测量记录"), str(self.path.parent if self.path else ""), tr("测量记录 (*.json)"))

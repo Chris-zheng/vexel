@@ -286,7 +286,7 @@ def cmd_plugins(args: argparse.Namespace) -> int:
 def cmd_bugreport(args: argparse.Namespace) -> int:
     from vexel.bugreport import write_bundle
 
-    out = write_bundle(args.output, args.runs, note=args.note or "", tables=args.tables, keep_paths=args.keep_paths)
+    out = write_bundle(args.output, args.runs, note=args.note or "", tables=args.tables, keep_paths=args.keep_paths, sem_images=args.sem or [])
     print(f"wrote {out}")
     print("contains versions, settings, recipes and summaries; no images, no API keys. Look inside before sending it.")
     return 0
@@ -327,7 +327,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 def cmd_gui(args: argparse.Namespace) -> int:
     from vexel.ui.app import main as gui_main
 
-    return gui_main(([args.input] if args.input else []) + (["--module", args.module] if args.module else []))
+    return gui_main(([args.input] if args.input else []) + (["--module", args.module] if args.module else []) + (["--preview"] if args.preview else []))
 
 
 def cmd_policy(args: argparse.Namespace) -> int:
@@ -1180,6 +1180,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("gui", help="open the desktop interface")
     p.add_argument("input", nargs="?", help="data to open on start")
     p.add_argument("--module", help="open this module directly (see `vexel modules`)")
+    p.add_argument("--preview", action="store_true", help="also open modules still in preview (SEM); same as VEXEL_PREVIEW=1")
     p.set_defaults(func=cmd_gui)
 
     p = sub.add_parser("probe", help="fingerprint a dataset: statistics, motion, objects, channel roles")
@@ -1477,6 +1478,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--note", help="what happened, in your words")
     p.add_argument("--tables", action="store_true", help="also include the per-droplet tables (CSV)")
     p.add_argument("--keep-paths", action="store_true", help="keep full file paths (default: file names only)")
+    p.add_argument("--sem", action="append", metavar="IMAGE", help="an SEM image whose calibration and measurement record to include (repeatable; never its pixels)")
     p.set_defaults(func=cmd_bugreport)
 
     p = sub.add_parser("licenses", help="license inventory of installed dependencies")

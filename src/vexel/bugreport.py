@@ -7,6 +7,9 @@
   the key), and whether offline mode is on;
 - for each run folder: ``provenance.json``, ``recipe.json``, ``summary.json``, the plan
   and corrections when present, the table of flagged droplets and stream alarms;
+- for each SEM image given: its calibration (without the text read from the data bar, which
+  may name products or lots) and its measurement record (measurements, processing,
+  automatic measurements, tilt 3D settings: coordinates and settings, no pixels);
 - ``README.txt`` listing what is in the bundle and what is not.
 
 Never included: images, videos, review pictures, the HTML report (it embeds pictures),
@@ -105,7 +108,26 @@ def _json_text(path: Path, keep_paths: bool) -> str:
     return json.dumps(_redact(data, keep_paths), indent=2, ensure_ascii=False)
 
 
-def write_bundle(out: str | Path, runs: list[str | Path] = (), *, note: str = "", tables: bool = False, keep_paths: bool = False) -> Path:
+def _sem_entries(image: Path, keep_paths: bool) -> dict[str, str]:
+    """The SEM records of one image, as JSON texts (no pixels, no data-bar text)."""
+    from vexel.packs.sem import calibrate as semcal
+    from vexel.packs.sem import measure_io
+
+    sha = semcal.file_sha256(image)
+    out: dict[str, str] = {}
+    cal = semcal.load(sha) or semcal.calibrate(image, use_ocr=False)
+    d = cal.to_dict()
+    d.pop("texts", None)  # what OCR read from the data bar: may carry product or lot names
+    d["label"] = d.get("label", "")
+    out["calibration.json"] = json.dumps(_redact(d, keep_paths), indent=2, ensure_ascii=False)
+    rec = measure_io.record_path(sha)
+    if rec.is_file():
+        out["measurements.json"] = _json_text(rec, keep_paths)
+    return out
+
+
+def write_bundle(out: str | Path, runs: list[str | Path] = (), *, note: str = "", tables: bool = False, keep_paths: bool = False,
+                 sem_images: list[str | Path] = ()) -> Path:  # fmt: skip
     out = Path(out)
     if out.suffix != ".zip":
         out = out.with_suffix(".zip")
@@ -136,6 +158,14 @@ def write_bundle(out: str | Path, runs: list[str | Path] = (), *, note: str = ""
                 text = _json_text(src, keep_paths) if src.suffix == ".json" else src.read_text(encoding="utf-8", errors="replace")
                 zf.writestr(prefix + name, text)
                 listing.append(prefix + name)
+        for i, image in enumerate(sem_images):
+            image = Path(image)
+            if not image.is_file():
+                raise FileNotFoundError(f"image not found: {image}")
+            prefix = f"sem{i + 1}_{image.name if keep_paths else image.stem[:40]}/"
+            for name, text in _sem_entries(image, keep_paths).items():
+                zf.writestr(prefix + name, text)
+                listing.append(prefix + name)
         readme = [
             "Vexel diagnostics bundle",
             f"created: {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
@@ -143,7 +173,7 @@ def write_bundle(out: str | Path, runs: list[str | Path] = (), *, note: str = ""
             "Included:",
             *[f"  {n}" for n in listing],
             "",
-            "Not included: images, videos, review pictures, HTML reports, API keys.",
+            "Not included: images, videos, review pictures, HTML reports, API keys, text read from SEM data bars.",
             "Per-droplet tables: " + ("included" if tables else "not included (only the table of flagged droplets)") + ".",
             "Absolute paths: " + ("kept" if keep_paths else "shortened to file names") + ".",
         ]

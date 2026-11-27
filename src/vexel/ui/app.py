@@ -30,7 +30,7 @@ QProgressBar::chunk { border-radius: 3px; background: #2563eb; }
 
 
 def main(argv: list[str] | None = None) -> int:
-    """``vexel gui [file] [--module ID]``: the module named, else the one the file belongs
+    """``vexel gui [file] [--module ID] [--preview]``: the module named, else the one the file belongs
     to, else the module launcher (see :mod:`vexel.ui.launcher`)."""
     import argparse
 
@@ -41,7 +41,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="vexel-gui")
     parser.add_argument("input", nargs="?")
     parser.add_argument("--module", help="open this module directly (see `vexel modules`)")
+    parser.add_argument("--preview", action="store_true", help="also open modules still in preview (SEM); same as VEXEL_PREVIEW=1")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    if args.preview:
+        import os
+
+        os.environ["VEXEL_PREVIEW"] = "1"
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName("Vexel")
     app.setOrganizationName("Vexel")

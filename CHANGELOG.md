@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.7.0b1 — SEM module closed testing (M7)
+
+- Version 0.7.0b1: the build for the first SEM tester (semiconductor). Tester documents in `docs/closed_testing/sem/`: guide (install with the `[sem]` extra, first use, calibration check, line width and roughness against the CD-SEM with the same edge definition, repeatability), data request, feedback form, known issues; an SEM section in the organizer checklist.
+- `vexel gui --preview` (and `vexel-gui --preview`) opens modules still in preview without setting an environment variable; the launcher says so.
+- Diagnostics for SEM: `vexel bugreport --sem IMAGE` and a "诊断包…" button in the SEM window add the image's calibration and measurement record - never its pixels, and without the text read from the data bar (product and lot names are often written there).
+
 ## Unreleased — SEM: real images, second round (measurement accuracy)
 
 - Particle sizes on real STEM images against an outside truth, through the automatic plan: apoferritin +6.3 % and 20S proteasome −2.4 % from the literature, rotavirus +0.1 % from a measurement by eye; added to `tests/benchmarks/sem_real_eval.py`.

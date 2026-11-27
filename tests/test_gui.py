@@ -953,6 +953,38 @@ def test_sem_window_auto_plan(app, tmp_path, monkeypatch):
     _dispose(w)
 
 
+def test_gui_preview_flag_opens_preview_modules(app, monkeypatch):
+    from vexel.ui import app as gui_app
+    from vexel.ui import launcher
+
+    monkeypatch.delenv("VEXEL_PREVIEW", raising=False)
+    seen = {}
+    monkeypatch.setattr(launcher, "start", lambda path, module: seen.update(path=path, module=module, preview=launcher.preview_enabled()))
+    monkeypatch.setattr(type(app), "exec", lambda self: 0)
+    assert gui_app.main(["--module", "sem", "--preview"]) == 0
+    assert seen == {"path": None, "module": "sem", "preview": True}
+
+
+def test_sem_window_writes_a_diagnostics_bundle(app, tmp_path, monkeypatch):
+    import zipfile
+
+    from vexel.synthetic.sem import write_sem
+    from vexel.ui.sem_window import SemWindow
+
+    monkeypatch.setenv("VEXEL_HOME", str(tmp_path / "home"))
+    path = tmp_path / "s.tif"
+    write_sem(path, "thermo", pixel_size=2.5e-9, rows=300, cols=400)
+    w = SemWindow()
+    assert not w.bug_act.isEnabled()
+    w.open_path(path, wait=True)
+    assert w.bug_act.isEnabled()
+    w.add_measurement("line", [[20, 20], [200, 40]])
+    out = w.bugreport(tmp_path / "d.zip", "test")
+    with zipfile.ZipFile(out) as zf:
+        assert any(n.endswith("measurements.json") for n in zf.namelist()) and not any(n.endswith(".tif") for n in zf.namelist())
+    _dispose(w)
+
+
 def test_sem_window_plan_card_banner_and_panel(app, tmp_path, monkeypatch):
     import tifffile
     from qtpy.QtWidgets import QScrollArea

@@ -1378,7 +1378,7 @@ wheels = [
 
 [[package]]
 name = "vexel"
-version = "0.6.0b1"
+version = "0.7.0b1"
 source = { editable = "." }
 dependencies = [
     { name = "dask", extra = ["array"] },
