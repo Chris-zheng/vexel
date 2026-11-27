@@ -248,6 +248,19 @@ def sem_allowed() -> dict[str, tuple]:
     return out
 
 
+def allowed_for_recipe(recipe: Any) -> dict[str, tuple]:
+    """Dynamically derive the agent allowlist from every step's Pydantic ``Params`` schema
+    in ``vexel.ops.registry``. Works automatically for droplet, SEM, custom workflows, and
+    trained-model plugins without hardcoded parameter tables."""
+    from vexel.ops.registry import allowed_params_from_schema, get_op
+
+    out: dict[str, tuple] = {}
+    for step in recipe.steps:
+        spec = get_op(step.op)
+        out.update(allowed_params_from_schema(step.id, spec))
+    return out
+
+
 def task_of(context: dict[str, Any]) -> tuple[str, dict[str, Any], dict[str, tuple]]:
     """System prompt, answer schema and allowlist of the planning task (droplet by default)."""
     if context.get("task") == "sem":

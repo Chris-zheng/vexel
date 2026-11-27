@@ -39,8 +39,9 @@ from vexel.ops.registry import Context, Kind, OpResult, OpSpec, Scope, get_op
 from vexel.plugins import model_record
 
 _CHUNK_BYTES = 16 * 1024**2
+_IN_MEMORY_LIMIT_BYTES = 64 * 1024**2
 _RUN_MARKERS = ("provenance.json", "recipe.json")
-_ARRAY_KINDS = (Kind.IMAGE, Kind.LABELS)
+_ARRAY_KINDS = (Kind.IMAGE, Kind.LABELS, Kind.MASK, Kind.HEIGHTMAP)
 _MAX_BLOCK_FRAMES = 128  # keeps progress reporting and cancellation responsive
 Progress = Callable[[str], None]
 # (step_id, step_number starting at 1, n_steps, done, total). Raising from it aborts the run.
@@ -100,6 +101,34 @@ class _ArrayWriter:
         return da.from_zarr(str(self.path))
 
 
+class _MemoryArrayWriter:
+    """In-memory fast-path writer for single-frame (e.g. SEM) or small acquisitions.
+    Produces the exact same ``(T, ...)`` lazy dask array interface without Zarr disk I/O."""
+
+    def __init__(self, n_frames: int) -> None:
+        self.n_frames = n_frames
+        self._array: np.ndarray | None = None
+
+    def write(self, start: int, block: np.ndarray) -> None:
+        if self._array is None:
+            self._array = np.empty((self.n_frames, *block.shape[1:]), dtype=block.dtype)
+        self._array[start : start + len(block)] = block
+
+    def lazy(self) -> da.Array:
+        if self._array is None:
+            raise RuntimeError("nothing was written to memory array")
+        return da.from_array(self._array, chunks=(min(self.n_frames, 16), *self._array.shape[1:]))
+
+
+def _should_use_memory(n_frames: int, frame_shape: tuple[int, ...], in_memory: bool | None) -> bool:
+    if in_memory is not None:
+        return in_memory
+    if n_frames == 1:
+        return True
+    est_bytes = n_frames * int(np.prod(frame_shape)) * 4
+    return est_bytes <= _IN_MEMORY_LIMIT_BYTES
+
+
 def _block_frames(frame_shape: tuple[int, ...], n_arrays: int) -> int:
     frame_nbytes = int(np.prod(frame_shape)) * 4  # sized for float32 working copies
     multiple = _ArrayWriter.chunk_frames(frame_nbytes)
@@ -125,14 +154,20 @@ def _run_frame_step(
     tick: Callable[[int, int], None],
     label_edits: dict[str, dict[int, list[Any]]] | None = None,
     edit_log: list[dict[str, Any]] | None = None,
+    use_memory: bool = False,
 ) -> tuple[dict[str, Any], dict[str, float]]:
     names = list(inputs)
     n = ctx.n_frames
-    writers = {o: _ArrayWriter(scratch / f"{step_id}.{o}.zarr", n) for o, k in spec.outputs.items() if k in _ARRAY_KINDS}
+    writers: dict[str, Any] = {
+        o: (_MemoryArrayWriter(n) if use_memory else _ArrayWriter(scratch / f"{step_id}.{o}.zarr", n))
+        for o, k in spec.outputs.items()
+        if k in _ARRAY_KINDS
+    }
     table_parts: dict[str, list[pd.DataFrame]] = {o: [] for o, k in spec.outputs.items() if k is Kind.TABLE}
-    unsupported = [o for o, k in spec.outputs.items() if k is Kind.SUMMARY]
-    if unsupported:
-        raise ValueError(f"{spec.name}: frame-scope operators cannot output summaries ({unsupported})")
+    geom_parts: dict[str, list[Any]] = {o: [] for o, k in spec.outputs.items() if k in (Kind.GEOMETRY, Kind.ROI)}
+    summary_parts: dict[str, list[dict[str, Any]]] = {o: [] for o, k in spec.outputs.items() if k is Kind.SUMMARY}
+    if summary_parts and n > 1:
+        raise ValueError(f"{spec.name}: frame-scope operators cannot output summaries on multi-frame inputs ({list(summary_parts)})")
     qc_rows: list[dict[str, float]] = []
     block = _block_frames(ctx.frame_shape, len(inputs) + len(spec.outputs) + 4)
 
@@ -166,6 +201,12 @@ def _run_frame_step(
                     empty = t.copy()
                     empty.insert(0, "frame", pd.Series(dtype=np.int64))
                     parts.append(empty)
+        for o, parts in geom_parts.items():
+            for i, r in enumerate(results):
+                parts.append({"frame": start + i, "data": r.outputs[o]})
+        for o, parts in summary_parts.items():
+            for r in results:
+                parts.append(r.outputs[o])
         qc_rows.extend(r.qc for r in results)
         tick(stop, n)
 
@@ -173,6 +214,10 @@ def _run_frame_step(
     for o, parts in table_parts.items():
         non_empty = [p for p in parts if len(p)]
         outputs[o] = pd.concat(non_empty, ignore_index=True) if non_empty else parts[0]
+    for o, parts in geom_parts.items():
+        outputs[o] = parts[0]["data"] if n == 1 and parts else parts
+    for o, parts in summary_parts.items():
+        outputs[o] = parts[0] if parts else {}
     return outputs, aggregate_frames(qc_rows)
 
 
@@ -184,6 +229,7 @@ def _run_window_step(
     scratch: Path,
     step_id: str,
     tick: Callable[[int, int], None],
+    use_memory: bool = False,
 ) -> tuple[dict[str, Any], dict[str, float]]:
     result = spec.fn(params, ctx, **inputs)
     _check_outputs(spec, result)
@@ -194,7 +240,7 @@ def _run_window_step(
             lazy = value if isinstance(value, da.Array) else da.from_array(np.asarray(value), chunks=(1, -1, -1))
             if lazy.shape[0] != ctx.n_frames:
                 raise ValueError(f"{spec.name}: output {o!r} has {lazy.shape[0]} frames, expected {ctx.n_frames}")
-            writer = _ArrayWriter(scratch / f"{step_id}.{o}.zarr", ctx.n_frames)
+            writer: Any = _MemoryArrayWriter(ctx.n_frames) if use_memory else _ArrayWriter(scratch / f"{step_id}.{o}.zarr", ctx.n_frames)
             block = _block_frames(lazy.shape[1:], 4)
             for start in range(0, ctx.n_frames, block):
                 writer.write(start, np.asarray(lazy[start : start + block].compute()))
@@ -274,6 +320,7 @@ def run_recipe(
     tick: Tick | None = None,
     report: bool = True,
     corrections: Corrections | None = None,
+    in_memory: bool | None = None,
 ) -> RunResult:
     """Resolve and execute ``recipe`` on ``volume``; write tables, summary, review overlays
     and provenance into ``out_dir``."""
@@ -334,6 +381,7 @@ def run_recipe(
         if unknown:
             raise ValueError(f"corrections refer to values this recipe does not produce: {unknown}")
 
+    use_memory = _should_use_memory(ctx.n_frames, ctx.frame_shape, in_memory) and not keep_intermediates
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for i, step in enumerate(resolved.steps, 1):
             spec = specs[step.id]
@@ -348,9 +396,9 @@ def run_recipe(
 
             step_tick(0, 1)
             if spec.scope is Scope.FRAME:
-                outputs, metrics = _run_frame_step(spec, params, inputs, ctx, scratch, step.id, pool, step_tick, label_edits, edit_log)
+                outputs, metrics = _run_frame_step(spec, params, inputs, ctx, scratch, step.id, pool, step_tick, label_edits, edit_log, use_memory=use_memory)
             else:
-                outputs, metrics = _run_window_step(spec, params, inputs, ctx, scratch, step.id, step_tick)
+                outputs, metrics = _run_window_step(spec, params, inputs, ctx, scratch, step.id, step_tick, use_memory=use_memory)
             step_tick(1, 1)
             for name, value in outputs.items():
                 ref = f"{step.id}.{name}"
@@ -384,6 +432,7 @@ def run_recipe(
     # -- deliverables ----------------------------------------------------------------
     tables = {ref: v for ref, v in values.items() if kinds.get(ref) is Kind.TABLE}
     summary = {ref: v for ref, v in values.items() if kinds.get(ref) is Kind.SUMMARY}
+    geometries = {ref: v for ref, v in values.items() if kinds.get(ref) is Kind.GEOMETRY}
     files: dict[str, Path] = {}
     (out_dir / "tables").mkdir()
     for ref, table in tables.items():
@@ -392,6 +441,9 @@ def run_recipe(
         files[f"tables/{ref}.csv"] = path
     prov.write_json(out_dir / "summary.json", _json_safe(summary))
     files["summary.json"] = out_dir / "summary.json"
+    if geometries:
+        prov.write_json(out_dir / "geometries.json", _json_safe(geometries))
+        files["geometries.json"] = out_dir / "geometries.json"
 
     review_files: list[Path] = []
     flag_files: list[Path] = []

@@ -68,8 +68,9 @@ MODULES: tuple[Module, ...] = (
         description="自动标定与信息栏裁剪、手动测量、图像处理、尺寸计量与分割、倾转 2.5D 重建。",
         packs=("sem",),
         window="vexel.ui.sem_window:SemWindow",
-        status="preview",
+        status="preview",  # until the acceptance on real images (plan M7)
         detect="vexel.packs.sem.detect:score",
+        batch_metrics="vexel.batch.stats:SEM_METRICS",
         op_prefixes=("sem.",),
     ),
 )

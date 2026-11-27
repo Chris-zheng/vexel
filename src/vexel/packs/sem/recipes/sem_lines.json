@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "name": "sem_lines",
+  "description": "SEM line/space metrology: CD, pitch, and unbiased LER/LWR. Settings default to the SEM window's.",
+  "seed": 0,
+  "input": {
+    "channel": 0,
+    "z": 0,
+    "channels": {}
+  },
+  "steps": [
+    {
+      "id": "sat",
+      "op": "sem.saturation_mask",
+      "inputs": {
+        "image": "source"
+      },
+      "params": {}
+    },
+    {
+      "id": "measure",
+      "op": "sem.lines",
+      "inputs": {
+        "image": "source",
+        "mask": "sat.mask"
+      },
+      "params": {}
+    }
+  ]
+}

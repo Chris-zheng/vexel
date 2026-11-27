@@ -62,6 +62,22 @@ DROPLET_METRICS = [
     Metric("droplets.n_droplets", "液滴数", "Droplets counted", test=False, digits=0),
     Metric("flags.flagged_fraction", "可疑液滴比例", "Fraction flagged for review", test=False),
 ]
+SEM_METRICS = [
+    Metric("measure.cd_mean", "线宽 CD（平均）", "Line CD mean", unit_key="measure.length_unit"),
+    Metric("measure.pitch", "周期", "Pitch", unit_key="measure.length_unit"),
+    Metric("measure.ler_3sigma_unbiased", "LER 3σ（去噪）", "LER 3σ (unbiased)", unit_key="measure.length_unit"),
+    Metric("measure.lwr_3sigma_unbiased", "LWR 3σ（去噪）", "LWR 3σ (unbiased)", unit_key="measure.length_unit"),
+    Metric("measure.diameter_mean", "平均直径/孔径", "Mean diameter", unit_key="measure.length_unit"),
+    Metric("measure.diameter_3sigma", "孔径均匀性 3σ", "Diameter uniformity 3σ", unit_key="measure.length_unit"),
+    Metric("measure.d50_n", "中位径 d50（数量）", "Median d50 (number)", unit_key="measure.length_unit"),
+    Metric("measure.porosity", "孔隙率", "Porosity"),
+    Metric("measure.thickness_mean", "平均层厚", "Mean layer thickness", unit_key="measure.length_unit"),
+    Metric("measure.sidewall_left", "左侧壁角", "Left sidewall angle", unit="°"),
+    Metric("measure.sidewall_right", "右侧壁角", "Right sidewall angle", unit="°"),
+    Metric("measure.radius", "尖端曲率半径", "Tip apex radius", unit_key="measure.length_unit"),
+    Metric("measure.missing", "缺失孔数", "Missing holes", test=False, digits=0),
+    Metric("measure.particles", "颗粒数", "Particle count", test=False, digits=0),
+]
 METRICS = DROPLET_METRICS  # earlier name
 
 

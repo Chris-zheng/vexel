@@ -28,10 +28,11 @@ def test_droplet_recipes_and_operators_come_through_the_registry():
     from vexel.ops import list_ops
     from vexel.packs import builtin_recipes
 
-    assert set(builtin_recipes()) == {"droplet_basic", "droplet_encapsulation", "droplet_fluorescence", "droplet_fluorescence_encapsulation"}
+    droplet = {n for n in builtin_recipes() if n.startswith("droplet_")}
+    assert droplet == {"droplet_basic", "droplet_encapsulation", "droplet_fluorescence", "droplet_fluorescence_encapsulation"}
     assert any(o.name == "droplet.summary" for o in list_ops())
     for name in builtin_recipes():
-        assert modules.for_recipe(Recipe.load(name)).id == "droplet"
+        assert modules.for_recipe(Recipe.load(name)).id == ("droplet" if name in droplet else "sem")
     assert [m.key for m in modules.batch_metrics(Recipe.load("droplet_basic"))][0] == "droplets.diameter_mean"
 
 
