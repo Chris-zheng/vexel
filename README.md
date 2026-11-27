@@ -130,3 +130,5 @@ src/vexel/
 - 流式执行器只接受逐帧算子、静态背景、一个追踪步骤和只读表格的算子；数据源有回放和监视文件夹，相机接入推迟到硬件对接阶段。
 - `vexel validate` 的默认容差是占位值，待与客户约定后替换。
 - 合成生成器放在包内（`vexel.synthetic`）以便 `vexel synth` 使用，而非路线图中的 `tests/synthetic/`。
+
+**Web 工作台**（`web/`，React + TypeScript，预览）：浏览器端的交互式工作台，含 3D 实验室、少样本训练、批量分析与工作流编排。计量结果未经验收，正式数字以本仓库的 Python 引擎为准。启动：`cd web && npm install && npm run dev`，见 [web/README.md](web/README.md)。

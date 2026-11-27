@@ -1,4 +1,4 @@
-"""SEM materials measurement acceptance: fibres, pores, particle classes, profile roughness.
+"""SEM materials measurement acceptance: fibres, pores, particle classes, profile roughness, nested regions (cells and nuclei).
 
     uv run python tests/benchmarks/sem_materials_eval.py [--out table.md]
 
@@ -131,11 +131,63 @@ def profile_rough() -> None:
     check("roughness", "Ra, Rq, Rz of sines with waviness and tilt (worst)", worst, 3.0)
 
 
+def _nested_errors(kw: dict, mk: dict) -> tuple[int, int, np.ndarray, np.ndarray, np.ndarray]:
+    """Cells found / in the truth, and per matched cell the area error, nucleus area error (%)
+    and nucleus/cell ratio error (percentage points)."""
+    from scipy.spatial import cKDTree
+
+    img, tr = S.nested_cells(**kw)
+    r = O.nested(img, **mk)
+    found, truth = r["parents"], tr["cells"]
+    if not found:
+        return 0, len(truth), np.array([np.inf]), np.array([np.inf]), np.array([np.inf])
+    dist, idx = cKDTree([[c["x"], c["y"]] for c in found]).query([[c["x"], c["y"]] for c in truth])
+    ea, en, er, n = [], [], [], 0
+    for c, dd, i in zip(truth, dist, idx):
+        if dd > 5:
+            continue
+        f = found[i]
+        n += 1
+        ea.append(abs(f["area"] / c["area"] - 1) * 100)
+        if f["child_area"]:
+            en.append(abs(f["child_area"] / c["nucleus_area"] - 1) * 100)
+            er.append(abs(f["ratio"] - c["ratio"]) * 100)
+        else:
+            en.append(np.inf)
+            er.append(np.inf)
+    return n, len(truth), np.array(ea), np.array(en), np.array(er)
+
+
+def nested_cells() -> None:
+    """Cells and nuclei: tissue (touching cells sharing membranes), cells with a membrane on a
+    slide, cells without a membrane (plain dark objects); 3 images each, normal and high noise."""
+    cases = (("tissue", {"layout": "tissue", "rows": 600, "cols": 700, "n": 30}, {}, 1.0),
+             ("tissue, membrane 5 px", {"layout": "tissue", "rows": 600, "cols": 700, "n": 30, "membrane": 5.0}, {"membrane": 5.0}, 1.0),
+             ("cells with membrane on bright slide", {"layout": "isolated"}, {}, 2.0),
+             ("cells without membrane (dark objects)", {"layout": "isolated", "membrane": 0.0}, {"parent": "dark"}, 2.0))  # fmt: skip
+    for label, kw, mk, area_lim in cases:
+        for noise in (0.03, 0.08):
+            found = total = 0
+            ea, en, er = [], [], []
+            for seed in (1, 2, 3):
+                n, t, a, b, c = _nested_errors({**kw, "noise": noise, "seed": seed}, mk)
+                found, total = found + n, total + t
+                ea.append(a)
+                en.append(b)
+                er.append(c)
+            ea, en, er = np.concatenate(ea), np.concatenate(en), np.concatenate(er)
+            name = f"{label}, noise {noise}"
+            check("nested", f"{name}: cells found", total - found, 0, "")
+            check("nested", f"{name}: cell area error (mean |e|)", float(np.mean(ea)), area_lim)
+            check("nested", f"{name}: nucleus area error (mean |e|)", float(np.mean(en)), 2.5)
+            check("nested", f"{name}: nucleus/cell ratio error (worst)", float(np.max(er)), 1.0, "pp")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
-    for f in (fibre_diameters, fibre_orientation, pores, particle_classes, profile_rough):
+    for f in (fibre_diameters, fibre_orientation, pores, particle_classes, profile_rough, nested_cells):
         f()
     out = ["| 项目 | 检查 | 结果 | 要求 | |", "| :-- | :-- | --: | --: | :-- |"]
     for r in ROWS:

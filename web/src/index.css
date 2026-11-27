@@ -1,0 +1,79 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-display: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-sans: "DM Sans", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+:root {
+  --vx-bg: #F8FAFC;
+  --vx-surface: #FFFFFF;
+  --vx-surface-alt: #F1F5F9;
+  --vx-border: #E2E8F0;
+  --vx-text: #0F172A;
+  --vx-muted: #64748B;
+  --vx-accent: #2563EB;
+  --vx-cyan: #0891B2;
+}
+
+.dark {
+  --vx-bg: #0B0E17;
+  --vx-surface: #111827;
+  --vx-surface-alt: #0F172A;
+  --vx-border: #1E293B;
+  --vx-text: #F1F5F9;
+  --vx-muted: #94A3B8;
+  --vx-accent: #06B6D4;
+  --vx-cyan: #06B6D4;
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+  }
+  .dark body {
+    letter-spacing: 0.008em;
+  }
+  h1, h2, h3, .font-display {
+    font-family: var(--font-display);
+    text-wrap: balance;
+  }
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+  button:not(:disabled),
+  select:not(:disabled),
+  [role="button"] {
+    transition-property: background-color, border-color, color, box-shadow, transform;
+    transition-duration: 150ms;
+    transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  button:not(:disabled):active {
+    transform: translateY(0.5px);
+  }
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    outline: 2px solid var(--vx-accent);
+    outline-offset: 1px;
+  }
+}
+
+/* Precision thin scrollbars for dense laboratory panels */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.25);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.45);
+}

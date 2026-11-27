@@ -77,16 +77,27 @@ def _skew(a: np.ndarray, bands: int = 8) -> float:
     return float(np.polyfit(ys, xs, 1)[0])
 
 
-def _weak_edges(m: np.ndarray, smooth: float, min_distance: float, floor: float = 0.05) -> list[tuple[float, int]]:
+def _weak_edges(m: np.ndarray, smooth: float, min_distance: float, floor: float = 0.05,
+                mean_noise: float | None = None) -> list[tuple[float, int]]:  # fmt: skip
     """Edges on a (low-noise) mean profile down to a few times its own noise, and at least
-    ``floor`` of the strongest: a weak interface next to a strong one is still found."""
+    ``floor`` of the strongest: a weak interface next to a strong one is still found.
+
+    The noise of the profile's slope is estimated from its curvature (right for profiles with
+    plateaus); a profile without plateaus (fine, blurred layers: nearly a sinusoid) has
+    curvature everywhere, so ``mean_noise`` - the noise of the mean profile itself, from the
+    lines it averages - is used instead when it is lower."""
     from scipy import ndimage as ndi
     from scipy.signal import find_peaks
 
-    v = ndi.gaussian_filter1d(np.asarray(m, float), max(smooth, 0.7))
+    sig = max(smooth, 0.7)
+    v = ndi.gaussian_filter1d(np.asarray(m, float), sig)
     g = np.gradient(v)
     mag = np.abs(g)
     noise = 1.4826 * float(np.median(np.abs(np.diff(g) - np.median(np.diff(g))))) + 1e-12
+    if mean_noise is not None and mean_noise > 0:
+        white = np.random.default_rng(0).normal(0, 1, max(len(m), 256))
+        gain = float(np.std(np.gradient(ndi.gaussian_filter1d(white, sig))))  # slope noise per unit profile noise
+        noise = min(noise, 2 * mean_noise * gain)  # x2: neighbouring lines' noise is not fully independent
     thr = max(6 * noise, floor * float(mag.max()))
     idx, _ = find_peaks(mag, height=thr, prominence=thr, distance=max(2, int(min_distance)))
     out = []
@@ -98,11 +109,12 @@ def _weak_edges(m: np.ndarray, smooth: float, min_distance: float, floor: float 
     return out
 
 
-def _find_on_mean(m: np.ndarray, method: str, level: float, smooth: float, min_distance: float, weak: bool = False) -> list[tuple[float, int]]:
+def _find_on_mean(m: np.ndarray, method: str, level: float, smooth: float, min_distance: float, weak: bool = False,
+                  mean_noise: float | None = None) -> list[tuple[float, int]]:  # fmt: skip
     from vexel.packs.sem.measure import profile_edges
 
     if weak:
-        return [(p, s) for p, s in _weak_edges(m, smooth, min_distance) if 2 <= p <= len(m) - 3]
+        return [(p, s) for p, s in _weak_edges(m, smooth, min_distance, mean_noise=mean_noise) if 2 <= p <= len(m) - 3]
     if method == "peak":  # each bright edge peak is an edge
         edges = profile_edges(m, "peak", level, max(smooth, 0.7), max(2, int(min_distance)))
         return [(p, s) for p, s in edges if 2 <= p <= len(m) - 3]
@@ -141,7 +153,12 @@ def track_edges(a: np.ndarray, *, method: str = "threshold", level: float = 0.5,
     mean = straight.mean(0)
     med = np.median(straight, axis=1)
     row_offset = med - np.median(med)  # each line's brightness against the others (charging stripes, drift along the lines)
-    found = _find_on_mean(mean, method, level, 0.0, 3, weak=weak)
+    mean_noise = None
+    if weak and rows >= 8:  # neighbouring lines differ by their noise (and a little roughness): the pixel noise
+        d = np.diff(straight, axis=0)
+        pix = 1.4826 * float(np.median(np.abs(d - np.median(d)))) / math.sqrt(2)
+        mean_noise = pix / math.sqrt(rows)
+    found = _find_on_mean(mean, method, level, 0.0, 3, weak=weak, mean_noise=mean_noise)
     info: dict[str, Any] = {"slant_px_per_line": slope, "mean_profile": mean, "lines": rows}
     if not found:
         return [], info
@@ -449,6 +466,235 @@ def layers(a: np.ndarray, *, method: str = "gradient", level: float = 0.5, smoot
     if abs(math.degrees(math.atan(info["slant_px_per_line"]))) > 2:
         warnings.append(f"层面倾斜 {math.degrees(math.atan(info['slant_px_per_line'])):.1f}°：厚度按垂直方向测量，倾斜大时偏大")
     return {"interfaces": interfaces, "layers": thick, "warnings": warnings, "slant_deg": math.degrees(math.atan(info["slant_px_per_line"]))}
+
+
+def stack_orientation(a: np.ndarray, smooth: float = 2.0) -> str:
+    """``horizontal`` when the layers run along x (the grey changes mostly down the image),
+    ``vertical`` when they run along y; from the structure tensor of the whole region."""
+    from scipy import ndimage as ndi
+
+    sm = ndi.gaussian_filter(np.nan_to_num(np.asarray(a, np.float64), nan=float(np.nanmean(a))), smooth)
+    gy, gx = np.gradient(sm)
+    return "horizontal" if float(np.mean(gy * gy)) >= float(np.mean(gx * gx)) else "vertical"
+
+
+def _xcorr_shift(p: np.ndarray, q: np.ndarray, maxlag: int, around: float = 0.0) -> float:
+    """Sub-pixel lag d with q(y) ~ p(y - d): how far q's pattern lies below p's, searched
+    within ``maxlag`` of ``around``."""
+    p = p - p.mean()
+    q = q - q.mean()
+    n = len(p)
+    c0 = round(around)
+    lags = np.arange(c0 - maxlag, c0 + maxlag + 1)
+    lags = lags[np.abs(lags) < n // 2]
+    c = np.array([float(np.dot(p[max(0, -d) : n - max(0, d)], q[max(0, d) : n - max(0, -d)])) for d in lags])
+    k = int(np.argmax(c))
+    if 0 < k < len(c) - 1:
+        den = c[k - 1] - 2 * c[k] + c[k + 1]
+        return float(lags[k] + (0.5 * (c[k - 1] - c[k + 1]) / den if den else 0.0))
+    return float(lags[k])
+
+
+def stack_shift(a: np.ndarray, *, band: int = 16, smooth: float = 1.5, max_step: int = 12) -> np.ndarray:
+    """How far down each column the stack lies, relative to the region's middle column (px):
+    the vertical-gradient profiles of neighbouring column bands are cross-correlated, outwards
+    from the middle, and the steps are summed. Assumes conformal layers (all interfaces share
+    the shape), which holds for deposited films; non-conformal interfaces keep their own
+    residual shape, which edge tracking then follows."""
+    from scipy import ndimage as ndi
+
+    a = np.asarray(a, np.float64)
+    rows, cols = a.shape
+    filled = np.where(np.isfinite(a), a, float(np.nanmean(a)))
+    g = ndi.gaussian_filter1d(ndi.gaussian_filter(filled, smooth), 1.0, axis=0, order=1)
+    nb = max(3, cols // max(4, band))
+    cuts = np.linspace(0, cols, nb + 1).astype(int)
+    prof = [g[:, cuts[i] : cuts[i + 1]].mean(1) for i in range(nb)]
+    centres = (cuts[:-1] + cuts[1:]) / 2 - 0.5
+    lag = max(2, min(max_step, rows // 4))
+    # a stack bends smoothly: each step is searched close to the one before (a fine periodic
+    # stack would otherwise let the correlation jump a whole period)
+    near = max(2, lag // 3)
+    rel = np.zeros(nb)
+    mid = nb // 2
+    first = _xcorr_shift(prof[mid], prof[mid + 1], lag) if mid + 1 < nb else 0.0
+    step = first
+    for i in range(mid + 1, nb):
+        step = _xcorr_shift(prof[i - 1], prof[i], near, step)
+        rel[i] = rel[i - 1] + step
+    step = first
+    for i in range(mid - 1, -1, -1):
+        step = _xcorr_shift(prof[i], prof[i + 1], near, step)
+        rel[i] = rel[i + 1] - step
+    if nb >= 5:  # each step carries the noise of one correlation; a local quadratic keeps ramps and bends
+        from scipy.signal import savgol_filter
+
+        rel = savgol_filter(rel, 5, 2, mode="interp")
+    x = np.arange(cols, dtype=float)
+    shift = np.interp(x, centres, rel)
+    # beyond the outer band centres: continue the end slopes (holding the value would bend a ramp)
+    lo, hi = x < centres[0], x > centres[-1]
+    shift[lo] = rel[0] + (x[lo] - centres[0]) * (rel[1] - rel[0]) / (centres[1] - centres[0])
+    shift[hi] = rel[-1] + (x[hi] - centres[-1]) * (rel[-1] - rel[-2]) / (centres[-1] - centres[-2])
+    return shift
+
+
+def stack_field(a: np.ndarray, *, smooth: float = 1.5, slab: int | None = None) -> np.ndarray:
+    """How far down the stack lies at every pixel (rows x cols), relative to the middle column.
+    Conformal films keep their thickness along the normal, so in a bent stack the shift
+    changes with depth; one shift per column (``stack_shift``) is refined in overlapping
+    horizontal slabs of the once-flattened image, and the slabs' residual shifts are
+    interpolated down each column. Slabs without structure take their neighbours' shift."""
+    a = np.asarray(a, np.float64)
+    rows, cols = a.shape
+    s0 = stack_shift(a, smooth=smooth)
+    flat0, _ = flatten(a, s0)
+    slab = slab or max(40, rows // 8)
+    if rows < 2 * slab:
+        return np.broadcast_to(s0[None, :], a.shape).copy()
+    from scipy import ndimage as ndi
+
+    g = ndi.gaussian_filter1d(ndi.gaussian_filter(flat0, smooth), 1.0, axis=0, order=1)
+    starts = list(range(0, rows - slab + 1, slab // 2))
+    centres, res, energy = [], [], []
+    for y0 in starts:
+        part = flat0[y0 : y0 + slab]
+        res.append(stack_shift(part, smooth=smooth, max_step=4))
+        energy.append(float(np.mean(g[y0 : y0 + slab] ** 2)))
+        centres.append(y0 + slab / 2 - 0.5)
+    energy = np.array(energy)
+    good = energy >= 0.15 * float(np.max(energy))
+    if good.sum() == 0:
+        return np.broadcast_to(s0[None, :], a.shape).copy()
+    centres_g = np.array(centres)[good]
+    r = np.array(res)[good]  # slabs x cols
+    yy = np.arange(rows, dtype=float)
+    field = np.empty((rows, cols))
+    for x in range(cols):
+        field[:, x] = np.interp(yy, centres_g, r[:, x])
+    if len(centres_g) >= 2:
+        # above the first and below the last slab centre the shift keeps changing with depth: continued
+        # for half a slab (the outer interfaces lie there), then held (vacuum or substrate, nothing to align)
+        reach = slab / 2
+        for sel, (i0, i1) in ((yy < centres_g[0], (0, 1)), (yy > centres_g[-1], (-2, -1))):
+            rate = (r[i1] - r[i0]) / (centres_g[i1] - centres_g[i0])
+            ref = 0 if i0 == 0 else -1
+            dy = np.clip(yy[sel] - centres_g[ref], -reach, reach)
+            field[sel] = r[ref][None, :] + dy[:, None] * rate[None, :]
+    return field + s0[None, :]
+
+
+def flatten(a: np.ndarray, shift: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Each column moved up by its ``shift`` (``flat[y, x] = a[y + shift[x], x]``, or a shift
+    for every pixel, ``flat[y, x] = a[y + shift[y, x], x]``; linear
+    interpolation); rows that fall outside the image repeat the nearest row and are returned
+    as a mask."""
+    from scipy import ndimage as ndi
+
+    a = np.asarray(a, np.float64)
+    rows, cols = a.shape
+    sh = np.asarray(shift, float)
+    yy = np.arange(rows, dtype=float)[:, None] + (sh if sh.ndim == 2 else sh[None, :])
+    xx = np.broadcast_to(np.arange(cols, dtype=float)[None, :], yy.shape)
+    flat = ndi.map_coordinates(np.nan_to_num(a, nan=float(np.nanmean(a))), [yy, xx], order=1, mode="nearest")
+    outside = (yy < 0) | (yy > rows - 1)
+    if not np.isfinite(a).all():
+        outside |= ndi.map_coordinates((~np.isfinite(a)).astype(float), [yy, xx], order=1, mode="nearest") > 0
+    return flat, outside
+
+
+def stack_layers(a: np.ndarray, *, geometry: str = "auto", orientation: str = "horizontal", method: str = "gradient",
+                 level: float = 0.5, smooth: float = 1.5, average: int = 1, mask: np.ndarray | None = None) -> dict[str, Any]:  # fmt: skip
+    """A layer stack in any direction, flat, tilted or bent: the layers are turned to run along x
+    (``orientation`` ``vertical`` or ``auto``), straightened (``geometry`` ``curved``, or
+    ``auto`` when the stack moves by more than a pixel across the region), measured with
+    ``layers``, and each thickness is taken along the local normal of its two interfaces
+    (vertical thickness x cos of the local slope). Interface positions are returned in the
+    region's own coordinates: ``position`` is y for every x (or x for every y when vertical).
+
+    ``geometry`` ``straight`` is ``layers`` unchanged (thickness measured straight down)."""
+    a = np.asarray(a, np.float64)
+    if orientation == "auto":
+        orientation = stack_orientation(a)
+    vertical = orientation == "vertical"
+    if vertical:
+        a = a.T
+        mask = None if mask is None else mask.T
+    rows, cols = a.shape
+    shift = np.zeros((rows, cols))
+    # auto: straightened only when the stack moves by a pixel or more across the region (a level,
+    # merely rough stack is measured exactly as before)
+    if geometry == "curved" or (geometry == "auto" and float(np.ptp(stack_shift(a, smooth=max(smooth, 1.0)))) >= 1.0):
+        shift = stack_field(a, smooth=max(smooth, 1.0))
+    bent = bool(np.any(shift))
+    work, outside = flatten(a, shift) if bent else (a, None)
+    if not bent:
+        m = mask
+    elif mask is None:
+        m = outside
+    else:
+        moved = flatten(mask.astype(float), shift)[0]
+        m = outside | (np.nan_to_num(moved) >= 0.5)
+    res = layers(work, method=method, level=level, smooth=smooth, average=average, mask=m)
+    if bent:  # the layers' own slope came out with the shift: the slant warning of the flat image does not apply
+        res["warnings"] = [w for w in res["warnings"] if not w.startswith("层面倾斜")]
+    from scipy.signal import savgol_filter
+
+    cols_f = np.arange(cols, dtype=float)
+    span = max(5.0, cols / 12)
+    slopes = []
+    from scipy import ndimage as ndi
+
+    for it in res["interfaces"]:
+        yf = it["position"]
+        if bent:  # back in the region's coordinates: y = y_flat + shift(y_flat, x)
+            ok_ = np.isfinite(yf)
+            back = np.full(cols, np.nan)
+            back[ok_] = ndi.map_coordinates(shift, [yf[ok_], cols_f[ok_]], order=1, mode="nearest")
+            y = yf + back
+        else:
+            y = yf.copy()
+        it["position"] = y
+        it["y"] = float(np.nanmean(y)) if np.isfinite(y).any() else it["y"]
+        ok = np.isfinite(y)
+        if ok.sum() >= 3:
+            yf = np.interp(cols_f, cols_f[ok], y[ok])
+            win = min(cols - (1 - cols % 2), 2 * int(span) + 1)
+            sl = savgol_filter(yf, win, 2, deriv=1, mode="interp") if win >= 5 else np.gradient(yf)
+            sl[~ok] = np.nan
+        else:
+            sl = np.full(cols, np.nan)
+        slopes.append(sl)
+    tilt = []
+    for ly, s1, s2 in zip(res["layers"], slopes, slopes[1:]):
+        # vertical thickness in the region's coordinates (after a depth-dependent straightening the
+        # flattened image's thickness is no longer the vertical one)
+        t = res["interfaces"][ly["layer"]]["position"] - res["interfaces"][ly["layer"] - 1]["position"]
+        ok_t = np.isfinite(t)
+        ly["thickness"] = float(np.nanmean(t)) if ok_t.any() else None
+        if not bent:  # level: measured straight down, exactly as ``layers``
+            tn = t
+        else:
+            tn = t * np.cos(np.arctan(0.5 * (s1 + s2)))
+        ok = np.isfinite(tn)
+        ly["thickness_vertical"] = ly["thickness"]
+        if ok.any():
+            ly.update(thickness=float(np.nanmean(tn)), sd=float(np.nanstd(tn)), min=float(np.nanmin(tn)), max=float(np.nanmax(tn)))
+        ly["series"] = tn
+        ly["top"] = res["interfaces"][ly["layer"] - 1]["y"]
+        ly["bottom"] = res["interfaces"][ly["layer"]]["y"]
+        tilt.append(float(np.nanmean(np.degrees(np.arctan(0.5 * (s1 + s2))))) if np.isfinite(s1 + s2).any() else 0.0)
+    if slopes and np.isfinite(slopes[0]).any():
+        all_sl = np.nanmean(np.vstack(slopes), axis=0)
+        res["slant_deg"] = float(np.degrees(np.arctan(np.nanmean(all_sl))))
+        bend = np.degrees(np.arctan(all_sl))
+        res["bend_deg"] = float(np.nanmax(bend) - np.nanmin(bend)) if np.isfinite(bend).any() else 0.0
+    else:
+        res["bend_deg"] = 0.0
+    res.update(orientation=orientation, flattened=bent, shift_ptp=float(np.ptp(shift)))
+    if bent and res["bend_deg"] > 60:
+        res["warnings"].append(f"层面弯曲 {res['bend_deg']:.0f}°：厚度沿局部法向测量，曲率大时（层厚接近曲率半径）误差变大")
+    return res
 
 
 def feature_profile(a: np.ndarray, *, feature: str = "bright", level: float = 0.5, smooth: float = 1.0, fit_range: tuple[float, float] = (0.1, 0.9),

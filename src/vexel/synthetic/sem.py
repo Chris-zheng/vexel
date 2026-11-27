@@ -388,6 +388,144 @@ def layer_stack(rows: int = 300, cols: int = 500, *, thicknesses: tuple[float, .
     return img, {"interfaces": series, "thicknesses": thicknesses}
 
 
+def bent_layer_stack(rows: int = 360, cols: int = 520, *, thicknesses: tuple[float, ...] = (40.3, 23.6, 61.2), top: float = 70.5,
+                     tilt: float = 0.0, bow: float = 0.0, levels: tuple[float, ...] = (0.15, 0.7, 0.35, 0.85, 0.5), roughness: float = 0.6,
+                     blur: float = 1.2, noise: float = 0.03, seed: int = 0) -> tuple[np.ndarray, dict]:  # fmt: skip
+    """A conformal cross-section, tilted by ``tilt`` degrees and bent by ``bow`` px (the top
+    interface sags by ``bow`` at the sides relative to the middle, a parabola): every layer
+    keeps its thickness along the normal, as deposited films do, so the interfaces are exact
+    offset curves of the top one. ``thicknesses`` are those normal thicknesses (px); the
+    vertical extent of a layer is larger where the stack slopes. Grey ``levels`` repeat when
+    there are more layers than levels. Returns the image and the interface series (y for
+    every column) with the normal thicknesses."""
+    from scipy import ndimage as ndi
+
+    rng = np.random.default_rng(seed)
+    x = np.arange(cols, dtype=float)
+    c = (cols - 1) / 2
+    fine = np.linspace(-0.25 * cols, 1.25 * cols, 6 * cols)  # the top curve, beyond the image so offsets cover it
+    f = top + math.tan(math.radians(tilt)) * (fine - c) + bow * ((fine - c) / c) ** 2
+    theta = np.arctan(np.gradient(f, fine))
+    series, depth = [], 0.0
+    for d in [0.0, *np.cumsum(thicknesses)]:
+        px = fine - d * np.sin(theta)  # the point at normal distance d below the top curve
+        py = f + d * np.cos(theta)
+        series.append(np.interp(x, px, py) + rough_edge(cols, roughness, 15, rng))
+        depth = d
+    yy = np.arange(rows, dtype=float)[:, None]
+    img = np.full((rows, cols), levels[0])
+    lv = [levels[0]] + [levels[1 + (i % (len(levels) - 1))] for i in range(len(series))]
+    for i, s_ in enumerate(series):
+        frac = np.clip(yy + 1 - s_[None, :], 0, 1)
+        img = img + (lv[i + 1] - lv[i]) * frac
+    if blur:
+        img = ndi.gaussian_filter(img, blur)
+    img += rng.normal(0, noise, img.shape)
+    return img, {"interfaces": series, "thicknesses": tuple(thicknesses), "depth": depth}
+
+
+def nested_cells(rows: int = 420, cols: int = 520, *, layout: str = "tissue", n: int = 18, membrane: float = 3.0,
+                 nucleus: tuple[float, float] = (0.35, 0.6), levels: tuple[float, float, float, float] = (0.85, 0.62, 0.22, 0.3),
+                 blur: float = 1.2, noise: float = 0.03, seed: int = 0) -> tuple[np.ndarray, dict]:  # fmt: skip
+    """Cells bounded by dark membranes, each with one darker nucleus (a tissue section or
+    cells on a slide). ``layout`` ``tissue``: a mosaic of touching cells (Voronoi cells of
+    well-spaced seeds), every cell's boundary is the middle of the membrane it shares;
+    ``isolated``: separate elliptical cells on a bright background, the membrane centred on
+    the cell's outline. ``membrane`` px wide; nuclei are ellipses of ``nucleus`` (min, max)
+    of the cell's inscribed radius. ``levels``: background, cytoplasm, membrane, nucleus.
+
+    Returns the image and, per cell fully inside the image, its area and its nucleus's area
+    (px, exact to the pixel coverage the image was drawn with: 4 x 4 subsamples)."""
+    from scipy import ndimage as ndi
+    from scipy.spatial import cKDTree
+
+    rng = np.random.default_rng(seed)
+    ss = 4
+    yy, xx = np.mgrid[0:rows * ss, 0:cols * ss].astype(np.float32)
+    yy = (yy + 0.5) / ss
+    xx = (xx + 0.5) / ss
+    bg, cyto, mem, nuc = levels
+    spacing = math.sqrt(rows * cols / max(n, 1))
+    seeds: list[tuple[float, float]] = []
+    tries = 0
+    while len(seeds) < n and tries < 20000:  # well-spaced seeds (dart throwing)
+        tries += 1
+        c = (rng.uniform(0, cols), rng.uniform(0, rows))
+        if all(math.hypot(c[0] - q[0], c[1] - q[1]) > 0.75 * spacing for q in seeds):
+            seeds.append(c)
+    pts = np.array(seeds)
+    cell_of = np.full(yy.shape, -1, np.int32)
+    if layout == "tissue":
+        tree = cKDTree(pts)
+        d, idx = tree.query(np.column_stack([xx.ravel(), yy.ravel()]), k=2)
+        cell_of = idx[:, 0].reshape(yy.shape).astype(np.int32)
+        p1, p2 = pts[idx[:, 0]], pts[idx[:, 1]]
+        sep = np.linalg.norm(p2 - p1, axis=1)
+        to_bisector = ((d[:, 1] ** 2 - d[:, 0] ** 2) / (2 * sep)).reshape(yy.shape)  # distance to the shared boundary
+        on_membrane = to_bisector < membrane / 2
+        inscribed = np.array([np.sort(np.linalg.norm(pts - q, axis=1))[1] / 2 for q in pts])
+        outlines = None
+    elif layout == "isolated":
+        axes, angles = [], []
+        on_membrane = np.zeros(yy.shape, bool)
+        inscribed = []
+        for k, (cx, cy) in enumerate(pts):
+            a_ = rng.uniform(0.28, 0.36) * spacing
+            b_ = a_ * rng.uniform(0.75, 1.0)
+            th = rng.uniform(0, math.pi)
+            u = ((xx - cx) * math.cos(th) + (yy - cy) * math.sin(th)) / a_
+            v = (-(xx - cx) * math.sin(th) + (yy - cy) * math.cos(th)) / b_
+            r = np.sqrt(u * u + v * v)
+            cell_of[r <= 1] = k
+            # distance to the outline, approximately (r - 1) times the local radius
+            on_membrane |= np.abs(r - 1) * np.sqrt(((xx - cx) ** 2 + (yy - cy) ** 2) / np.maximum(r * r, 1e-9)) < membrane / 2
+            axes.append((a_, b_))
+            angles.append(th)
+            inscribed.append(b_)
+        inscribed = np.array(inscribed)
+        outlines = list(zip(axes, angles))
+    else:
+        raise ValueError("layout must be 'tissue' or 'isolated'")
+    hi = np.where(cell_of >= 0, cyto, bg).astype(np.float32)
+    # each cell's cytoplasm a little different
+    shade = rng.normal(0, 0.03, len(pts))
+    inside = cell_of >= 0
+    hi[inside] += shade[cell_of[inside]]
+    nuc_of = np.full(yy.shape, -1, np.int32)
+    for k, (cx, cy) in enumerate(pts):
+        r_in = inscribed[k]
+        ra = rng.uniform(*nucleus) * r_in
+        rb = ra * rng.uniform(0.7, 1.0)
+        th = rng.uniform(0, math.pi)
+        off = rng.uniform(0, 0.25) * r_in
+        phi = rng.uniform(0, 2 * math.pi)
+        nx, ny = cx + off * math.cos(phi), cy + off * math.sin(phi)
+        u = ((xx - nx) * math.cos(th) + (yy - ny) * math.sin(th)) / ra
+        v = (-(xx - nx) * math.sin(th) + (yy - ny) * math.cos(th)) / rb
+        sel = (u * u + v * v <= 1) & (cell_of == k)
+        nuc_of[sel] = k
+    hi[nuc_of >= 0] = nuc
+    hi[on_membrane] = mem
+    img = hi.reshape(rows, ss, cols, ss).mean(axis=(1, 3))
+    # truth: cells entirely inside the image (not cut by its border)
+    cut = set(np.unique(np.concatenate([cell_of[0], cell_of[-1], cell_of[:, 0], cell_of[:, -1]])).tolist())
+    cells = []
+    area = np.bincount(cell_of[inside].ravel(), minlength=len(pts)) / ss**2
+    narea = np.bincount(nuc_of[nuc_of >= 0].ravel(), minlength=len(pts)) / ss**2
+    sx_ = np.bincount(cell_of[inside].ravel(), weights=xx[inside].ravel(), minlength=len(pts))
+    sy_ = np.bincount(cell_of[inside].ravel(), weights=yy[inside].ravel(), minlength=len(pts))
+    for k in range(len(pts)):
+        if k in cut or area[k] == 0:
+            continue
+        n_ = area[k] * ss**2
+        cells.append({"x": float(sx_[k] / n_ - 0.5), "y": float(sy_[k] / n_ - 0.5), "area": float(area[k]), "nucleus_area": float(narea[k]),
+                      "ratio": float(narea[k] / area[k])})  # fmt: skip
+    if blur:
+        img = ndi.gaussian_filter(img, blur)
+    img = img + rng.normal(0, noise, img.shape)
+    return img, {"cells": cells, "layout": layout, "membrane": membrane}
+
+
 def xsection_feature(rows: int = 260, cols: int = 300, *, top: float = 60.3, height: float = 140.0, width_top: float = 60.0,
                      angle: float = 84.0, feature: str = "bright", blur: float = 1.2, noise: float = 0.03,
                      seed: int = 0) -> tuple[np.ndarray, dict]:  # fmt: skip

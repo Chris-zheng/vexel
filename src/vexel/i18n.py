@@ -56,7 +56,7 @@ def set_language(lang: str) -> None:
     p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     language.cache_clear()
     _table.cache_clear()
-    tr.cache_clear()
+    tr_in.cache_clear()
 
 
 @functools.lru_cache(maxsize=4)
@@ -76,12 +76,17 @@ def _table(lang: str) -> tuple[dict[str, str], list[tuple[re.Pattern[str], str, 
     return exact, patterns
 
 
-@functools.lru_cache(maxsize=20000)
 def tr(text: str) -> str:
     """``text`` in the interface language."""
-    if not text or language() == "zh" or not CJK.search(text):
+    return tr_in(text, language())
+
+
+@functools.lru_cache(maxsize=20000)
+def tr_in(text: str, lang: str) -> str:
+    """``text`` in ``lang`` ("zh" or "en"), whatever the interface language is (for the HTTP API)."""
+    if not text or lang == "zh" or not CJK.search(text):
         return text
-    exact, patterns = _table(language())
+    exact, patterns = _table(lang)
     if text in exact:
         return _finish(exact[text])
     for rx, target, _ in patterns:
@@ -90,7 +95,7 @@ def tr(text: str) -> str:
             parts = target.split("{}")
             out = parts[0]
             for g, rest in zip(m.groups(), parts[1:]):
-                out += tr(g) + rest
+                out += tr_in(g, lang) + rest
             return _finish(out)
     # several messages joined: translate each
     for sep in ("\n", "<br>", "；", "。"):
@@ -98,10 +103,10 @@ def tr(text: str) -> str:
             pieces = text.split(sep)
             if len(pieces) > 1:
                 joined = {"；": "; ", "。": ". "}.get(sep, sep)
-                return joined.join(tr(p) for p in pieces).replace(". . ", ". ").rstrip()
+                return joined.join(tr_in(p, lang) for p in pieces).replace(". . ", ". ").rstrip()
     stripped = text.strip()
     if stripped != text:
-        return text.replace(stripped, tr(stripped))
+        return text.replace(stripped, tr_in(stripped, lang))
     if not HAN.search(text):  # only full-width punctuation left: its English forms
         return _punctuation(text)
     _missing.add(text)

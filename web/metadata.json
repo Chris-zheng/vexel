@@ -1,0 +1,8 @@
+{
+  "name": "Vexel — Scientific Image Analysis Workbench",
+  "description": "Unified scientific image analysis platform for microfluidic droplets and SEM metrology with deterministic workflows, trained vision models, and reproducible batch reporting.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

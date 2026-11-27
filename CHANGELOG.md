@@ -1,5 +1,27 @@
 # 更新记录
 
+## Unreleased — web workbench on the Python engine; layer stacks tilted, bent or vertical (steps 1–2)
+
+- `vexel serve` measures SEM images for the web workbench: `GET /api/v1/sem/recipes` (every measurement with its settings, Chinese or English) and `POST /api/v1/sem/measure` (grey pixels or the original file, the person's pixel size or the file's calibration; numbers, units, calibration, warnings, outlines, the rows measured). The same numbers as the SEM window (tested).
+- Web workbench: a "Python 引擎（已验证）" card in the results of the SEM lines, holes, particles, fibres, multilayer and curved-multilayer workflows; the browser preview is compared only where both measure the same quantity (line CD, hole diameter, particle d50, fibre diameter, stack total), highlighted above 2 %. A warning when the workflow does not fit the image (built-in samples by their kind, uploads by their scene only). The 2.5D view's roughness is labelled as grey-level relief, not height.
+- Web workbench calibration: an upload's default pixel size (2 nm/px for SEM without a bar) or a scale bar with an assumed label is recorded as source "none", not "databar"; only measured calibrations (metadata, drawn by the person, a data bar read and confirmed) are sent to the Python engine, which otherwise reports pixels and the card says why.
+- SEM layer thickness: stacks that are tilted or bent are straightened first (column bands aligned by correlation, refined in depth slabs because conformal films keep their thickness along the normal) and each thickness is taken along the local normal; vertical stacks (direction "auto" or "vertical"). New settings "层面形状" (auto / straight / curved) and "层的走向"; level stacks are measured exactly as before. Synthetic: tilt 6–12° and bends of 30–60 px within 0.19 px (vertical measurement was 1.3–2.9 px off or lost interfaces); 40 bent layers of 6/8 px all found, mean error about 0.2 px.
+- Interfaces on profiles without plateaus (fine, blurred layers) are no longer dropped: the edge threshold uses the noise of the mean profile from line-to-line differences when the curvature-based estimate is too high.
+- Benchmarks: `bent_layer_stack` in the synthetic SEM generator; tilted, bent, vertical and fine-layer cases in `sem_metrology_eval.py`; `tests/benchmarks/web_layer_parity.py` runs the browser engine on the same stacks (its curved method gets the layer count or thickness wrong on all four).
+
+## Unreleased — nested regions (cells and nuclei) in Python
+
+- New SEM recipe `nested` (嵌套区域): regions enclosed by dark membranes (tissue, split along the middle of shared membranes) or plain bright/dark objects, the sub-region (nucleus) inside each; areas, sub-region/region ratio and N/C. Synthetic (`nested_cells`, in `sem_materials_eval.py`): tissue cell area within 0.1 %, nucleus within 0.5 %, ratio within 0.2 percentage points; cells on a bright slide read about 1 % small. Texture that breaks into fragments at the minimum size is refused instead of measured.
+- Web workbench: `nested_cell_nucleus` measured by Python; the card also compares object counts. The kidney sample is relabelled: its round objects are nuclei and the dark blobs nucleoli, so its ratio is nucleolus/nucleus; Python refuses that TEM image (texture), which needs a closed-contour method.
+
+## Unreleased — web workbench under version control (step 0)
+
+- The web workbench (React + TypeScript, developed remotely) is now in `web/`, with its dependencies, builds, local database and `.env` ignored; a CI job type-checks, tests and builds it.
+- Install: the conflicting esbuild pin is gone; npm with `package-lock.json` is the one package manager (bun lock removed); `.env.example` added; the GPU worker `Dockerfile` the tests and docs expected is added, and its README says the encoders are not pretrained.
+- Model cards without weight files are shown as such ("无权重，不可用", no checksum, no metrics) and cannot be bound or offered to the planner; the threshold fallback is labelled as a threshold, not as model inference.
+- Server defaults: listens on 127.0.0.1 (`VEXEL_WEB_HOST` to open it); requests from other computers must sign in for AI, training and data endpoints; rate limits use the connection address (X-Forwarded-For only with `VEXEL_TRUST_PROXY=1`); sign-up only by an administrator (`VEXEL_OPEN_SIGNUP=1` to open it); user-supplied engine URLs only on this computer or public hosts; images go to cloud models only with `VEXEL_ALLOW_IMAGE_UPLOAD=1`; `VEXEL_OFFLINE=1` makes planning use the offline rules.
+- Corrections to the web edition's own gap audit are at the top of `web/docs/GAP_AUDIT_AND_ROADMAP.md`.
+
 ## 0.7.0b2 — SEM window P1: correct by example, methods, batches (second SEM tester build)
 
 - Correct by example (particles, pores, holes): click objects that should be found and ones that should not; Vexel re-measures with other settings of the same method (in parallel, a few seconds) and shows the three best side by side - clicks agreed with, then objects like the examples, then fewest changes - to pick from (undoable).

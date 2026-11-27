@@ -101,6 +101,9 @@ def create_app() -> Any:
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"{type(e).__name__}: {e}") from e
 
+    from vexel.server.sem_api import register as register_sem
+
+    register_sem(app)
     return app
 
 

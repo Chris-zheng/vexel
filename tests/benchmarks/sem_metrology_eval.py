@@ -137,6 +137,28 @@ def cross_sections() -> None:
     r = M.layers(img)
     for ly, t in zip(r["layers"], tr["thicknesses"]):
         check("cross-section", f"layer {ly['layer']} thickness error", abs(ly["thickness"] - t), 0.5)
+    # tilted and bent conformal stacks (thickness along the normal), straightened before measuring
+    for name, kw in (("tilt 6°", {"tilt": 6}), ("tilt 12°", {"tilt": 12}), ("bow 30 px", {"bow": 30}),
+                     ("bow 60 px + tilt 4°", {"bow": 60, "tilt": 4})):  # fmt: skip
+        img, tr = S.bent_layer_stack(seed=3, **kw)
+        r = M.stack_layers(img)
+        check("cross-section", f"{name}: layers found", abs(len(r["layers"]) - len(tr["thicknesses"])), 0, "")
+        for ly, t in zip(r["layers"], tr["thicknesses"]):
+            check("cross-section", f"{name}: layer {ly['layer']} normal thickness error", abs(ly["thickness"] - t), 0.5)
+    img, tr = S.bent_layer_stack(seed=3, bow=30, tilt=5)
+    r = M.stack_layers(img.T, orientation="auto")
+    check("cross-section", "vertical stack (bow 30 px): worst thickness error",
+          max(abs(ly["thickness"] - t) for ly, t in zip(r["layers"], tr["thicknesses"])) if len(r["layers"]) == 3 else 99, 0.5)  # fmt: skip
+    # a fine alternating stack (40 layers of 6 and 8 px, like a 3D NAND word-line stack), bent; each
+    # thickness carries the error of two interfaces only a few pixels apart
+    for noise in (0.03, 0.08):
+        img, tr = S.bent_layer_stack(rows=420, thicknesses=(6.0, 8.0) * 20, levels=(0.2, 0.8, 0.45), top=40.5, bow=25, tilt=3,
+                                     noise=noise, seed=3)  # fmt: skip
+        r = M.stack_layers(img)
+        check("cross-section", f"40 thin layers, noise {noise}: layers found", abs(len(r["layers"]) - 40), 0, "")
+        err = np.array([abs(ly["thickness"] - t) for ly, t in zip(r["layers"], tr["thicknesses"])])
+        check("cross-section", f"40 thin layers, noise {noise}: mean thickness error", float(err.mean()), 0.25)
+        check("cross-section", f"40 thin layers, noise {noise}: worst thickness error", float(err.max()), 0.75)
     for feat in ("bright", "dark"):
         for ang in (80.0, 88.0, 95.0):
             img, tr = S.xsection_feature(angle=ang, feature=feat, seed=2)

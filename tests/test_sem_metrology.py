@@ -150,6 +150,41 @@ def test_layer_thickness():
             assert abs(ly["thickness"] - t) < 0.5
 
 
+@pytest.mark.parametrize("kw", [{"tilt": 10}, {"bow": 40}, {"bow": 50, "tilt": 4}])
+def test_bent_stack_thickness_along_the_normal(kw):
+    img, tr = S.bent_layer_stack(seed=3, **kw)
+    r = M.stack_layers(img)
+    assert r["flattened"] and len(r["layers"]) == len(tr["thicknesses"])
+    for ly, t in zip(r["layers"], tr["thicknesses"]):
+        assert abs(ly["thickness"] - t) < 0.5
+    # measured straight down, the old way, a bent stack reads thick (or loses its interfaces)
+    old = M.layers(img)["layers"]
+    assert len(old) != len(tr["thicknesses"]) or max(abs(ly["thickness"] - t) for ly, t in zip(old, tr["thicknesses"])) > 0.5
+
+
+def test_flat_stack_is_measured_as_before():
+    img, _ = S.layer_stack(seed=1)
+    new, old = M.stack_layers(img), M.layers(img)
+    assert not new["flattened"]
+    assert [ly["thickness"] for ly in new["layers"]] == pytest.approx([ly["thickness"] for ly in old["layers"]], abs=1e-9)
+
+
+def test_vertical_stack():
+    img, tr = S.bent_layer_stack(seed=3, bow=30)
+    r = M.stack_layers(img.T, orientation="auto")
+    assert r["orientation"] == "vertical" and len(r["layers"]) == 3
+    for ly, t in zip(r["layers"], tr["thicknesses"]):
+        assert abs(ly["thickness"] - t) < 0.5
+
+
+def test_fine_bent_stack_keeps_every_interface():
+    img, tr = S.bent_layer_stack(rows=420, thicknesses=(6.0, 8.0) * 20, levels=(0.2, 0.8, 0.45), top=40.5, bow=25, tilt=3, seed=3)
+    r = M.stack_layers(img)
+    assert len(r["layers"]) == 40
+    err = np.array([abs(ly["thickness"] - t) for ly, t in zip(r["layers"], tr["thicknesses"])])
+    assert err.mean() < 0.25 and err.max() < 0.75
+
+
 @pytest.mark.parametrize("feature", ["bright", "dark"])
 @pytest.mark.parametrize("angle", [80.0, 90.0, 95.0])
 def test_sidewall_profile(feature, angle):

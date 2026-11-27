@@ -477,6 +477,206 @@ def pores(a: np.ndarray, *, feature: str = "dark", threshold: str = "mid", split
     return {"pores": res["particles"], "summary": sm_, "warnings": warnings, "threshold": t, "phase": phase}
 
 
+def _mask_outline(region: np.ndarray, step: int = 1) -> np.ndarray | None:
+    """Outline of a binary region (``[x, y]``, the 0.5 contour of its mask)."""
+    from skimage.measure import find_contours
+
+    padded = np.pad(region.astype(float), 1)
+    cs = find_contours(padded, 0.5)
+    if not cs:
+        return None
+    c = max(cs, key=len)
+    return np.stack([c[:, 1] - 1, c[:, 0] - 1], 1)[::step]
+
+
+def nested(a: np.ndarray, *, parent: str = "membrane", child: str = "dark", membrane: float = 3.0, smooth: float = 1.0,
+           min_diameter: float = 12.0, child_min: float = 0.005, child_max: float = 0.8, max_children: int = 1,
+           mask: np.ndarray | None = None) -> dict[str, Any]:  # fmt: skip
+    """Regions inside regions - cells and their nuclei, grains and their cores: each parent
+    region, the child regions inside it, their areas and the ratio.
+
+    Parents (``parent``): ``membrane`` - regions enclosed by dark boundary lines about
+    ``membrane`` px wide (tissue, where neighbouring cells share a membrane, or cells with a
+    dark outline on a slide): the lines are found as dark features narrower than the
+    regions (black top-hat), the enclosed areas are seeds, and each region grows to the
+    middle of its boundary line (watershed on the line strength); ``bright`` or ``dark`` -
+    objects brighter or darker than the background (threshold halfway between the two
+    greys). Parents cut by the region's border are left out and counted.
+
+    Children (``child`` ``dark`` or ``bright``): inside each parent, away from its boundary
+    line, the pixels darker (brighter) than halfway between the parent's two greys; the
+    largest ``max_children`` pieces, holes filled. A parent where the two greys differ by
+    less than twice the pixel noise, or where the child would cover less than
+    ``child_min`` or more than ``child_max`` of the parent, has no child.
+
+    Areas are pixel counts (the boundary of a parent is the middle of its line; a child's at
+    half its contrast). Ratios: child / parent area, and child / (parent - child) - for a
+    cell, nucleus to cytoplasm (N/C)."""
+    from scipy import ndimage as ndi
+    from skimage.morphology import disk
+    from skimage.segmentation import watershed
+
+    a = np.asarray(a, np.float64)
+    rows, cols = a.shape
+    d = np.diff(a, axis=1)
+    noise = 1.4826 * float(np.median(np.abs(d - np.median(d)))) / math.sqrt(2)
+    sm = ndi.gaussian_filter(a, smooth) if smooth else a
+    min_area = math.pi * (min_diameter / 2) ** 2
+    warnings: list[str] = []
+    if parent == "membrane":
+        r = max(2, int(math.ceil(1.5 * membrane)))
+        line = ndi.grey_closing(sm, footprint=disk(r)) - sm  # dark lines narrower than 2r+1
+        t, lo_l, _ = _mid_threshold(line if mask is None else line[~mask])
+        # boundary lines are long: faint stretches are kept where they connect to strong ones
+        # (hysteresis), and short dark pieces - specks and texture inside the regions - are dropped
+        from skimage.filters import apply_hysteresis_threshold
+
+        lines = apply_hysteresis_threshold(line, lo_l + 0.5 * (t - lo_l), t)
+        ll, nl = ndi.label(lines, structure=np.ones((3, 3)))
+        if nl:
+            ext = np.zeros(nl + 1)
+            for j, sl in enumerate(ndi.find_objects(ll), start=1):
+                if sl is not None:
+                    ext[j] = max(sl[0].stop - sl[0].start, sl[1].stop - sl[1].start)
+            short = ext < min_diameter / 2
+            short[0] = False
+            lines &= ~short[ll]
+        lab, n = ndi.label(~lines)
+        sizes = np.bincount(lab.ravel(), minlength=n + 1)
+        small = sizes < min_area / 4
+        small[0] = True
+        lab[small[lab]] = 0
+        # each region grows to the middle of its boundary line: the ridge of the line's curvature (the
+        # Hessian's larger eigenvalue at the line's scale), which a brighter side shifts less than
+        # the top-hat's peak
+        from skimage.feature import hessian_matrix, hessian_matrix_eigvals
+
+        ridge = hessian_matrix_eigvals(hessian_matrix(a, sigma=max(1.0, membrane / 2), order="rc", use_gaussian_derivatives=True))[0]
+        lab = watershed(ridge, lab)
+    elif parent in ("bright", "dark"):
+        t, lo, hi = _mid_threshold(sm if mask is None else sm[~mask])
+        fg = sm > t if parent == "bright" else sm < t
+        fg = ndi.binary_fill_holes(fg)
+        lab, n = ndi.label(fg)
+        # the global threshold sits between the background and the average of everything inside (a
+        # dark nucleus pulls it into the cell): each object's edge is re-found halfway between the
+        # background and the grey just inside its edge
+        g_bg = lo if parent == "bright" else hi
+        bg_pix = ~ndi.binary_dilation(fg, iterations=3)
+        if bg_pix.any():
+            g_bg = float(np.median(sm[bg_pix]))
+        refined = np.zeros_like(lab)
+        for k, sl in enumerate(ndi.find_objects(lab), start=1):
+            if sl is None:
+                continue
+            R0, C0 = max(sl[0].start - 4, 0), max(sl[1].start - 4, 0)
+            R1, C1 = min(sl[0].stop + 4, rows), min(sl[1].stop + 4, cols)
+            reg = lab[R0:R1, C0:C1] == k
+            ring = reg & ~ndi.binary_erosion(reg, iterations=4) & ndi.binary_erosion(reg, iterations=1)
+            if ring.sum() < 8:
+                refined[R0:R1, C0:C1][reg] = k
+                continue
+            level = (g_bg + float(np.median(sm[R0:R1, C0:C1][ring]))) / 2
+            loc = sm[R0:R1, C0:C1]
+            new_reg = (loc > level) if parent == "bright" else (loc < level)
+            new_reg &= ndi.binary_dilation(reg, iterations=3)
+            nl, _ = ndi.label(new_reg)
+            ids = np.unique(nl[reg & (nl > 0)])
+            new_reg = ndi.binary_fill_holes(np.isin(nl, ids)) if ids.size else reg
+            tgt = refined[R0:R1, C0:C1]
+            tgt[new_reg & (tgt == 0)] = k
+        lab = refined
+    else:
+        raise ValueError("parent must be 'membrane', 'bright' or 'dark'")
+    border = np.unique(np.concatenate([lab[0], lab[-1], lab[:, 0], lab[:, -1]]))
+    if mask is not None and mask.any():
+        border = np.union1d(border, np.unique(lab[ndi.binary_dilation(mask, iterations=2)]))
+    objs = ndi.find_objects(lab)
+    sizes = np.bincount(lab.ravel(), minlength=len(objs) + 1)
+    at_border = 0
+    out = []
+    erode = int(math.ceil(membrane)) + 1 if parent == "membrane" else 2
+    for k, sl in enumerate(objs, start=1):
+        if sl is None or sizes[k] < min_area:
+            continue
+        if k in border:
+            at_border += 1
+            continue
+        pad = 2
+        R0, C0 = max(sl[0].start - pad, 0), max(sl[1].start - pad, 0)
+        R1, C1 = min(sl[0].stop + pad, rows), min(sl[1].stop + pad, cols)
+        reg = lab[R0:R1, C0:C1] == k
+        if parent == "membrane" and sizes[k] > 0.5 * rows * cols:
+            continue  # the background around separate cells
+        area = float(reg.sum())
+        core = ndi.binary_erosion(reg, iterations=erode)
+        loc = sm[R0:R1, C0:C1]
+        row: dict[str, Any] = {"area": area, "x": float(np.argwhere(reg)[:, 1].mean() + C0), "y": float(np.argwhere(reg)[:, 0].mean() + R0),
+                               "eq_diameter": 2 * math.sqrt(area / math.pi), "child_area": None, "ratio": None, "nc": None,
+                               "child_x": None, "child_y": None, "child_count": 0, "grey": float(loc[core].mean()) if core.any() else None,
+                               "child_grey": None, "outline": None, "child_outline": None, "reason": ""}  # fmt: skip
+        o = _mask_outline(reg)
+        if o is not None:
+            row["outline"] = (o + [C0, R0]).tolist()
+        vals = loc[core]
+        if vals.size < 16:
+            row["reason"] = "区域太小，内部无法判断"
+            out.append(row)
+            continue
+        try:
+            tc, lo, hi = _mid_threshold(vals)
+        except ValueError:
+            tc, lo, hi = 0.0, 0.0, 0.0
+        if hi - lo < 2 * noise:
+            row["reason"] = "内部灰度均匀：没有可分辨的子区域"
+            out.append(row)
+            continue
+        sel = core & ((loc < tc) if child == "dark" else (loc > tc))
+        cl, cn = ndi.label(sel)
+        if cn == 0:
+            row["reason"] = "没有子区域"
+            out.append(row)
+            continue
+        cs = np.bincount(cl.ravel(), minlength=cn + 1)
+        cs[0] = 0
+        keep = np.argsort(cs)[::-1][: max(1, max_children)]
+        keep = [j for j in keep if cs[j] > 0]
+        ch = ndi.binary_fill_holes(np.isin(cl, keep)) & reg
+        frac = float(ch.sum()) / area
+        if not (child_min <= frac <= child_max):
+            row["reason"] = f"子区域占比 {frac:.1%} 超出 {child_min:.1%}–{child_max:.0%}：不计"
+            out.append(row)
+            continue
+        ca = float(ch.sum())
+        cyx = np.argwhere(ch).mean(0)
+        row.update(child_area=ca, ratio=ca / area, nc=ca / (area - ca) if area > ca else None, child_x=float(cyx[1] + C0), child_y=float(cyx[0] + R0),
+                   child_count=len(keep), child_grey=float(loc[ch].mean()))  # fmt: skip
+        co = _mask_outline(ch)
+        if co is not None:
+            row["child_outline"] = (co + [C0, R0]).tolist()
+        out.append(row)
+    if len(out) >= 3 and np.median([r["eq_diameter"] for r in out]) < 1.5 * min_diameter:
+        # regions piling up at the smallest size allowed are fragments of texture, not cells
+        raise ValueError(f"找到的区域大多只有最小直径（{min_diameter:g} 像素）左右：多半是纹理碎片而不是细胞。"
+                         "请把“区域最小直径”设为细胞的大致直径；细胞内部纹理很强（如电镜切片）时，膜线可能无法与纹理区分")  # fmt: skip
+    ratios = np.array([r["ratio"] for r in out if r["ratio"] is not None])
+    ncs = np.array([r["nc"] for r in out if r["nc"] is not None])
+    areas = np.array([r["area"] for r in out])
+    summary: dict[str, Any] = {"parents": len(out), "with_child": int(len(ratios)), "at_border": at_border,
+                               "area_mean": float(areas.mean()) if len(areas) else None,
+                               "child_area_mean": float(np.mean([r["child_area"] for r in out if r["child_area"]])) if len(ratios) else None,
+                               "ratio_mean": float(ratios.mean()) if len(ratios) else None, "ratio_median": float(np.median(ratios)) if len(ratios) else None,
+                               "ratio_sd": float(ratios.std(ddof=1)) if len(ratios) > 1 else None,
+                               "nc_mean": float(ncs.mean()) if len(ncs) else None, "nc_median": float(np.median(ncs)) if len(ncs) else None}  # fmt: skip
+    if not out:
+        warnings.append("没有找到完整的区域：检查“父区域”的类型（膜包围、亮或暗的对象）、膜宽与最小直径")
+    elif len(areas) >= 4 and areas.max() > 4 * np.median(areas):
+        warnings.append("有的区域比中位数大 4 倍以上：边界线可能有缺口，相邻区域被并在一起，请看图核对")
+    if out and len(ratios) < len(out):
+        warnings.append(f"{len(out) - len(ratios)} 个区域没有找到子区域（原因见每行）")
+    return {"parents": out, "summary": summary, "warnings": warnings, "noise": noise}
+
+
 def distribution(d: np.ndarray) -> dict[str, float]:
     """d10, d50, d90 by number and by volume (weights d³), interpolated."""
     d = np.sort(np.asarray(d, float))
@@ -488,4 +688,4 @@ def distribution(d: np.ndarray) -> dict[str, float]:
     return out
 
 
-__all__ = ["CLASSES", "distribution", "feret", "holes", "lattice", "particles", "pores"]
+__all__ = ["CLASSES", "distribution", "feret", "holes", "lattice", "nested", "particles", "pores"]

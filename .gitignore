@@ -9,3 +9,12 @@ build/
 data/
 runs/
 .DS_Store
+# web edition: dependencies, builds and local secrets never enter the repository
+web/node_modules/
+web/dist/
+web/.env
+web/.env.*
+!web/.env.example
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

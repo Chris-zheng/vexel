@@ -318,3 +318,63 @@ def test_saved_methods_and_batch_triage(tmp_path, monkeypatch):
     assert list(t["file"]) == [r.path.name for r in res] and "d50_n" in t
     methods.delete("颗粒 A")
     assert methods.list_methods() == [] and methods.auto() is None
+
+
+# -- nested regions (cells and nuclei) --------------------------------------------------------------
+
+
+def _match(found: list[dict], truth: list[dict]) -> list[tuple[dict, dict]]:
+    from scipy.spatial import cKDTree
+
+    dist, idx = cKDTree([[c["x"], c["y"]] for c in found]).query([[c["x"], c["y"]] for c in truth])
+    return [(found[i], c) for c, d, i in zip(truth, dist, idx) if d < 5]
+
+
+def test_tissue_cells_split_along_shared_membranes():
+    img, tr = S.nested_cells(layout="tissue", rows=600, cols=700, n=30, seed=1)
+    r = O.nested(img)
+    pairs = _match(r["parents"], tr["cells"])
+    assert len(r["parents"]) == len(tr["cells"]) == len(pairs) and r["summary"]["at_border"] > 0
+    for f, c in pairs:
+        assert abs(f["area"] / c["area"] - 1) < 0.01
+        assert abs(f["child_area"] / c["nucleus_area"] - 1) < 0.03
+        assert abs(f["ratio"] - c["ratio"]) < 0.005
+        assert f["nc"] == pytest.approx(f["child_area"] / (f["area"] - f["child_area"]))
+
+
+def test_cells_without_membrane_as_dark_objects():
+    img, tr = S.nested_cells(layout="isolated", membrane=0.0, seed=2)
+    r = O.nested(img, parent="dark")
+    pairs = _match(r["parents"], tr["cells"])
+    assert len(pairs) == len(tr["cells"])
+    assert np.mean([abs(f["area"] / c["area"] - 1) for f, c in pairs]) < 0.02
+    assert max(abs(f["ratio"] - c["ratio"]) for f, c in pairs) < 0.01
+
+
+def test_cells_without_nucleus_have_no_ratio():
+    img, _ = S.nested_cells(layout="tissue", rows=600, cols=700, n=30, seed=5, levels=(0.85, 0.62, 0.22, 0.62))
+    r = O.nested(img)
+    assert r["parents"] and r["summary"]["with_child"] == 0 and r["summary"]["ratio_mean"] is None
+    assert all(p["reason"] for p in r["parents"])
+
+
+def test_nested_recipe_reports_areas_and_refuses_noise():
+    img, tr = S.nested_cells(layout="tissue", rows=600, cols=700, n=30, seed=1)
+    an = run(AnalysisSpec(id=1, recipe="nested"), img, Scale(pixel_size=0.5e-6, source="manual", confirmed=True))
+    vals = {k: v for k, _, v, _ in an.summary}
+    assert an.error is None and vals["parents"] == len(tr["cells"])
+    assert vals["ratio_mean"] == pytest.approx(np.mean([c["ratio"] for c in tr["cells"]]), abs=0.003)
+    assert vals["area_mean"] == pytest.approx(np.mean([c["area"] for c in tr["cells"]]) * 0.25e-12, rel=0.01)
+    assert sum(s[0] == "polygon" for s in an.shapes) == 1 + 2 * len(tr["cells"])  # region, each cell and its nucleus
+    noise = run(AnalysisSpec(id=1, recipe="nested"), np.random.default_rng(0).normal(0.5, 0.05, (300, 300)), Scale())
+    assert noise.error and "噪声" in noise.error
+
+
+@pytest.mark.parametrize("scale", [1.5, 2.5])
+def test_texture_is_not_taken_for_cells(scale):
+    """A textured interior (as in electron micrographs) breaks into fragments at the smallest
+    size allowed: refused with a hint, instead of reporting ratios for the fragments."""
+    t = ndi.gaussian_filter(np.random.default_rng(0).normal(0, 1, (500, 600)), scale)
+    t = (t - t.min()) / np.ptp(t) + np.random.default_rng(1).normal(0, 0.02, t.shape)
+    an = run(AnalysisSpec(id=1, recipe="nested"), t, Scale())
+    assert an.error and "纹理" in an.error and not an.summary

@@ -21,6 +21,8 @@ layers      cross-section layer stack: each interface and each layer's thickness
 profile     one line or trench in cross-section: height, top/middle/bottom width,
             sidewall angles (``metrology.feature_profile``)
 tip         apex radius of curvature (with its uncertainty) and cone angle (``tips.tip``)
+nested      regions inside regions - cells and nuclei: areas, area ratio, N/C
+            (``objects.nested``)
 ==========  ===============================================================================
 
 An ``AnalysisSpec`` (recipe, region ``[x0, y0, x1, y1]`` in image pixels, settings) is
@@ -305,24 +307,34 @@ def _fibres(a: np.ndarray, mask: np.ndarray | None, X0: int, Y0: int, sx: float,
 
 
 def _layers(a: np.ndarray, mask: np.ndarray | None, X0: int, Y0: int, sx: float, sy: float, p: dict[str, Any], spec: AnalysisSpec) -> Analysis:
-    from vexel.packs.sem.metrology import layers
+    from vexel.packs.sem.metrology import stack_layers
 
-    res = layers(a, method=p["method"], level=p["level"], smooth=p["smooth"], average=p["average"], mask=mask)
+    res = stack_layers(a, geometry=p.get("geometry", "auto"), orientation=p.get("orientation", "horizontal"), method=p["method"],
+                       level=p["level"], smooth=p["smooth"], average=p["average"], mask=mask)  # fmt: skip
+    vertical = res["orientation"] == "vertical"
+    s_ = sx if vertical else sy  # thickness runs across the layers
+    O_ = X0 if vertical else Y0
     an = Analysis(spec=spec, warnings=list(res["warnings"]))
     an.summary = [("interfaces", "界面数", len(res["interfaces"]), "count"), ("slant", "层面倾斜", res["slant_deg"], "angle"),
                   ("edge_definition", "边缘定义", f"阈值 {p['level']:.0%}" if p["method"] == "threshold" else "最大梯度", "text")]  # fmt: skip
+    if res["flattened"]:
+        an.summary.append(("bend", "层面弯曲（法向变化）", res["bend_deg"], "angle"))
+        an.summary.append(("thickness_direction", "厚度方向", "沿局部法向（已拉平）", "text"))
+    if vertical:
+        an.summary.append(("orientation", "层的走向", "竖直", "text"))
     for ly in res["layers"]:
         if ly["thickness"] is not None:
-            an.summary.append((f"layer{ly['layer']}", f"第 {ly['layer']} 层厚度", ly["thickness"] * sy, "length"))
-    rows = [{"layer": ly["layer"], "top": (ly["top"] + Y0) * sy, "bottom": (ly["bottom"] + Y0) * sy,
-             "thickness": ly["thickness"] and ly["thickness"] * sy, "sd": ly["sd"] and ly["sd"] * sy,
-             "min": ly["min"] and ly["min"] * sy, "max": ly["max"] and ly["max"] * sy} for ly in res["layers"]]  # fmt: skip
-    rows += [{"interface": it["index"], "y": (it["y"] + Y0) * sy, "roughness_3sigma": it["roughness_sigma"] and 3 * it["roughness_sigma"] * sy,
-              "roughness_3sigma_unbiased": it["roughness_sigma_unbiased"] and 3 * it["roughness_sigma_unbiased"] * sy} for it in res["interfaces"]]  # fmt: skip
-    xs = np.arange(a.shape[1], dtype=float) + X0
-    step = max(1, a.shape[1] // 200)
+            an.summary.append((f"layer{ly['layer']}", f"第 {ly['layer']} 层厚度", ly["thickness"] * s_, "length"))
+    rows = [{"layer": ly["layer"], "top": (ly["top"] + O_) * s_, "bottom": (ly["bottom"] + O_) * s_,
+             "thickness": ly["thickness"] and ly["thickness"] * s_, "sd": ly["sd"] and ly["sd"] * s_,
+             "min": ly["min"] and ly["min"] * s_, "max": ly["max"] and ly["max"] * s_,
+             "thickness_vertical": ly.get("thickness_vertical") and ly["thickness_vertical"] * s_} for ly in res["layers"]]  # fmt: skip
+    rows += [{"interface": it["index"], "y": (it["y"] + O_) * s_, "roughness_3sigma": it["roughness_sigma"] and 3 * it["roughness_sigma"] * s_,
+              "roughness_3sigma_unbiased": it["roughness_sigma_unbiased"] and 3 * it["roughness_sigma_unbiased"] * s_} for it in res["interfaces"]]  # fmt: skip
+    along = np.arange(a.shape[0] if vertical else a.shape[1], dtype=float)
+    step = max(1, len(along) // 200)
     for it in res["interfaces"]:
-        pts = _poly(xs, it["position"] + Y0, step)
+        pts = _poly(it["position"] + X0, along + Y0, step) if vertical else _poly(along + X0, it["position"] + Y0, step)
         if len(pts) >= 2:
             an.shapes.append(("polyline", pts, COLOURS["edge_l"], tuple(pts[-1]), f"I{it['index']}"))
     an.objects = pd.DataFrame(rows)
@@ -348,6 +360,41 @@ def _profile(a: np.ndarray, mask: np.ndarray | None, X0: int, Y0: int, sx: float
             ang = _true_angle(res[f"angle_{key}"], sx, sy)
             an.shapes.append(("polyline", pts, colour, tuple(pts[len(pts) // 2]), f"{ang:.1f}°"))
     an.objects = pd.DataFrame([{"row": int(r + Y0), "depth": (r - res["top"]) * sy, "width": (res["right"][r] - res["left"][r]) * sx} for r in rows])
+    return an
+
+
+def _nested(a: np.ndarray, mask: np.ndarray | None, X0: int, Y0: int, sx: float, sy: float, p: dict[str, Any], spec: AnalysisSpec) -> Analysis:
+    from vexel.packs.sem.objects import nested
+
+    s = math.sqrt(sx * sy)
+    A = sx * sy
+    res = nested(a, parent=p["parent"], child=p["child"], membrane=p["membrane"], smooth=p["smooth"], min_diameter=p["min_diameter"],
+                 child_max=p["child_max"], max_children=p["max_children"], mask=mask)  # fmt: skip
+    an = Analysis(spec=spec, warnings=list(res["warnings"]))
+    sm = res["summary"]
+    an.summary = [("parents", "区域数（完整）", sm["parents"], "count"), ("with_child", "含子区域的区域数", sm["with_child"], "count"),
+                  ("at_border", "被边界截断（未计入）", sm["at_border"], "count")]  # fmt: skip
+    if sm["area_mean"] is not None:
+        an.summary.append(("area_mean", "区域面积（平均）", sm["area_mean"] * A, "area"))
+    if sm["ratio_mean"] is not None:
+        an.summary += [("child_area_mean", "子区域面积（平均）", sm["child_area_mean"] * A, "area"),
+                       ("ratio_mean", "子区域/区域 面积比（平均）", sm["ratio_mean"], "ratio"), ("ratio_median", "子区域/区域 面积比（中位数）", sm["ratio_median"], "ratio"),
+                       ("ratio_sd", "子区域/区域 面积比（标准差）", sm["ratio_sd"], "ratio"),
+                       ("nc_mean", "子区域/其余部分（核质比 N/C，平均）", sm["nc_mean"], "ratio"), ("nc_median", "核质比 N/C（中位数）", sm["nc_median"], "ratio")]  # fmt: skip
+    an.summary.append(("boundary", "区域边界", {"membrane": "膜线中央", "bright": "亮对象边缘（半对比度）", "dark": "暗对象边缘（半对比度）"}[p["parent"]], "text"))
+    rows = []
+    for i, q in enumerate(res["parents"], start=1):
+        rows.append({"region": i, "x": (q["x"] + X0) * sx, "y": (q["y"] + Y0) * sy, "area": q["area"] * A, "eq_diameter": q["eq_diameter"] * s,
+                     "child_area": q["child_area"] and q["child_area"] * A, "ratio": q["ratio"], "nc": q["nc"],
+                     "child_x": q["child_x"] and (q["child_x"] + X0) * sx, "child_y": q["child_y"] and (q["child_y"] + Y0) * sy,
+                     "grey": q["grey"], "child_grey": q["child_grey"], "reason": q["reason"]})  # fmt: skip
+        for key, colour in (("outline", COLOURS["object"]), ("child_outline", COLOURS["fit"])):
+            o = q[key]
+            if o and len(o) > 2:
+                pts = (np.asarray(o) + [X0, Y0])[:: max(1, len(o) // 80)].tolist()
+                label = f"{q['ratio']:.0%}" if key == "outline" and q["ratio"] is not None else ""
+                an.shapes.append(("polygon", pts, colour, ((q["x"] + X0), (q["y"] + Y0)), label))
+    an.objects = pd.DataFrame(rows)
     return an
 
 
@@ -425,12 +472,24 @@ RECIPES: dict[str, Recipe] = {
         Recipe("layers", "截面层厚", [
             Param("method", "边缘定义", "choice", "gradient", (("gradient", "最大梯度"), ("threshold", "阈值"))), LEVEL,
             Param("smooth", "平滑（像素）", "float", 1.5, lo=0, hi=10, step=0.5), Param("average", "列平均", "int", 1, lo=1, hi=32),
-        ], "水平层叠的截面：逐列找各界面，给出每层厚度、均匀性与界面粗糙度（先把层面校正到水平）", _layers),  # fmt: skip
+            Param("geometry", "层面形状", "choice", "auto", (("auto", "自动（倾斜或弯曲时先拉平）"), ("straight", "水平直线（厚度竖直量）"),
+                                                       ("curved", "倾斜或弯曲（先拉平）")),
+                  help="倾斜或弯曲的层先逐列对齐拉平，厚度沿局部法向测量；假定各层共形（沉积膜）"),
+            Param("orientation", "层的走向", "choice", "horizontal", (("horizontal", "水平"), ("vertical", "竖直"), ("auto", "自动"))),
+        ], "层叠的截面：逐列找各界面，给出每层厚度、均匀性与界面粗糙度；倾斜或弯曲的层先拉平，厚度沿法向测量", _layers),  # fmt: skip
         Recipe("profile", "截面轮廓（侧壁角）", [
             Param("feature", "特征是", "choice", "bright", (("bright", "亮（线条）"), ("dark", "暗（沟槽）"))), LEVEL, SMOOTH,
             Param("fit_from", "侧壁拟合起点（高度比例）", "float", 0.1, lo=0, hi=0.9, step=0.05),
             Param("fit_to", "侧壁拟合终点（高度比例）", "float", 0.9, lo=0.1, hi=1, step=0.05),
         ], "框选一个线条或沟槽的截面（四周留出背景）：高度、顶/中/底宽度、两侧侧壁角（在特征内部、底部量，90° 为垂直）", _profile),  # fmt: skip
+        Recipe("nested", "嵌套区域（细胞核/细胞）", [
+            Param("parent", "区域是", "choice", "membrane", (("membrane", "由暗膜线围成（组织、带轮廓的细胞）"), ("dark", "比背景暗的对象"), ("bright", "比背景亮的对象"))),
+            Param("child", "子区域是", "choice", "dark", (("dark", "暗（例如细胞核）"), ("bright", "亮"))),
+            Param("membrane", "膜线宽度（像素）", "float", 3.0, lo=1, hi=30, step=0.5, help="区域由膜线围成时：膜线的宽度"),
+            SMOOTH, Param("min_diameter", "区域最小直径（像素）", "float", 12.0, lo=3, hi=10000, step=1),
+            Param("child_max", "子区域最大占比", "float", 0.8, lo=0.05, hi=1, step=0.05),
+            Param("max_children", "每个区域的子区域数", "int", 1, lo=1, hi=20),
+        ], "每个区域（细胞）与其中的子区域（细胞核）：面积、面积比与核质比 N/C；相邻细胞以共用膜线的中央分开，被边界截断的不计", _nested),  # fmt: skip
         Recipe("tip", "尖端", [
             FEATURE, SMOOTH,
             Param("cone_from", "锥角起点（距尖端，像素）", "float", 0.0, lo=0, hi=100000, step=5, help="0：2 倍曲率半径"),
