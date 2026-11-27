@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 UNITS = {"pm": 1e-12, "nm": 1e-9, "um": 1e-6, "µm": 1e-6, "μm": 1e-6, "mm": 1e-3, "cm": 1e-2, "m": 1.0, "å": 1e-10, "a": 1e-10}
-VENDOR_NAMES = {"thermo_fisher": "Thermo Fisher（FEI）", "zeiss": "Zeiss", "tescan": "TESCAN", "hitachi": "Hitachi", "jeol": "JEOL"}
+VENDOR_NAMES = {"thermo_fisher": "Thermo Fisher（FEI）", "zeiss": "Zeiss", "tescan": "TESCAN", "hitachi": "Hitachi", "jeol": "JEOL", "imagej": "ImageJ 标定"}
 TESCAN_TAG = 50431
 
 
@@ -277,6 +277,38 @@ def _jeol(kv: dict[str, str], shape: tuple[int, int]) -> SemMetadata:
     return md
 
 
+_IMAGEJ_UNITS = {"micron": 1e-6, "microns": 1e-6, "µm": 1e-6, "\u00b5m": 1e-6, "μm": 1e-6, "um": 1e-6, "\\u00b5m": 1e-6,
+                 "nm": 1e-9, "nanometer": 1e-9, "mm": 1e-3, "m": 1.0, "pm": 1e-12, "a": 1e-10, "å": 1e-10}  # fmt: skip
+
+
+def _imagej(tf: Any, shape: tuple[int, int]) -> SemMetadata | None:
+    """A pixel size written by ImageJ / Fiji (resolution tags in pixels per unit, the unit in
+    the ImageJ description): not the instrument's record, but a calibration someone set."""
+    ij = tf.imagej_metadata or {}
+    unit = str(ij.get("unit", "")).strip().lower()
+    factor = _IMAGEJ_UNITS.get(unit)
+    tags = tf.pages[0].tags
+    if factor is None or "XResolution" not in tags:
+        return None
+
+    def per_pixel(tag: str) -> float | None:
+        if tag not in tags:
+            return None
+        num, den = tags[tag].value
+        return factor * den / num if num else None
+
+    px = per_pixel("XResolution")
+    if px is None:
+        return None
+    md = SemMetadata(vendor="imagej", pixel_size=px, pixel_size_y=per_pixel("YResolution") or px, image_shape=shape,
+                     instrument=f"ImageJ {ij.get('ImageJ', '')}".strip())  # fmt: skip
+    md.raw = {"unit": str(ij.get("unit")), "XResolution": str(tags["XResolution"].value)}
+    if ij.get("spacing"):
+        md.raw["spacing"] = str(ij["spacing"])
+    md.warnings.append("像素尺寸来自 ImageJ 写入的标定（不是仪器原始记录）：图像若在 ImageJ 中缩放过，请核对")
+    return md
+
+
 def _sidecar(path: Path, suffix: str) -> str | None:
     for candidate in (path.with_suffix(suffix), path.with_suffix(suffix.upper()), Path(str(path) + suffix)):
         if candidate.is_file():
@@ -329,6 +361,8 @@ def read_metadata(path: str | Path) -> SemMetadata | None:
                 text = value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value)
                 if "PixelSizeX" in text:
                     md = _tescan(_key_values(text), shape, f"TIFF tag {TESCAN_TAG}")
+            elif tf.is_imagej:
+                md = _imagej(tf, shape)
     if md is None:
         text = _sidecar(path, ".hdr")
         if text and "PixelSizeX" in text:

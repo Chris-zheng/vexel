@@ -1,5 +1,14 @@
 # 更新记录
 
+## Unreleased — SEM: first acceptance on real images
+
+- Acceptance on 52 Phenom gallery images (data bars read by eye) and three FIB-SEM stacks: `tests/benchmarks/sem_real_eval.py --data <folder>` with the truth in `tests/benchmarks/real/` (images not in the repository).
+- Scale bar ends: a JPEG halo along the bar no longer pulls the end ticks inwards (pixel sizes were about 6 % too large on 14 of 52 images).
+- Phenom's field width ("FW") is read and cross-checked; field values under a data-bar table header are no longer taken for the scale label; when both the field width and the scale bar are read, the more precise is used and a disagreement beyond their combined uncertainty is flagged.
+- ImageJ / Fiji calibrations in TIFF files are read (FIB-SEM stacks).
+- Images over 100 MP are refused before their pixels are read, with a message (stitched maps used gigabytes of memory).
+- Result: 51 of 52 pixel sizes within 1 % of the field width, the other flagged; recognition names no wrong kind (it names few: 4 of 21).
+
 ## Unreleased — SEM window: result first
 
 - Opening an image without automatic measurements recognises, plans and tries it at once (switch "打开图片时自动规划", remembered): the trial is drawn on the image and summarised on a card in the panel (image type, method, key numbers, checks, the first reasons) with three choices: accept, adjust (method, settings and region into the panel), do it myself. The plan no longer opens a dialog.

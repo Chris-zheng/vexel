@@ -141,16 +141,28 @@ def _vertical_extent(fg: np.ndarray, x: int, y0: int, y1: int) -> tuple[int, int
     return up, down
 
 
-def _end(fg: np.ndarray, xs: range, y0: int, y1: int) -> tuple[float | None, int]:
-    """Centre column of a tick or rounded cap at one end, and how far it reaches beyond the stroke."""
+def _end(fg: np.ndarray, xs: range, y0: int, y1: int, halo: int = 0) -> tuple[float | None, int]:
+    """Centre column of a tick or rounded cap at one end, and how far it reaches beyond the stroke.
+
+    ``halo``: how far the stroke's own body reaches beyond its rows (a blurred or JPEG-ringing
+    stroke is lit a pixel above or below along its whole length); only columns reaching
+    clearly further belong to a tick."""
     cols, reach = [], 0
     for x in xs:
         if 0 <= x < fg.shape[1]:
             up, down = _vertical_extent(fg, x, y0, y1)
-            if up or down:
+            if up + down > halo:
                 cols.append(x)
                 reach = max(reach, up + down)
     return (float(np.mean(cols)) if cols else None), reach
+
+
+def _halo(fg: np.ndarray, x0: int, x1: int, y0: int, y1: int) -> int:
+    """Typical reach beyond the stroke's rows along its body (median over its columns), plus a margin."""
+    xs = range(x0 + (x1 - x0) // 10, x1 - (x1 - x0) // 10 + 1, max(1, (x1 - x0) // 60))
+    reach = [sum(_vertical_extent(fg, x, y0, y1)) for x in xs]
+    base = int(np.median(reach)) if reach else 0
+    return base + 1 if base else 0
 
 
 def _dotted(fg: np.ndarray) -> list[ScaleBar]:
@@ -206,8 +218,9 @@ def find_scalebar(image: np.ndarray, bar: DataBar | None, *, near: tuple[float, 
         if thickness > max(3, (x1 - x0 + 1) / 4):
             continue  # a filled box or logo, not a stroke
         span = max(3, int(0.06 * (x1 - x0 + 1)))
-        left, left_reach = _end(fg, range(x0 - 1, x0 + span), y0, y1)
-        right, right_reach = _end(fg, range(x1 - span + 1, x1 + 2), y0, y1)
+        halo = _halo(fg, x0, x1, y0, y1)
+        left, left_reach = _end(fg, range(x0 - 1, x0 + span), y0, y1, halo)
+        right, right_reach = _end(fg, range(x1 - span + 1, x1 + 2), y0, y1, halo)
         if max(left_reach, right_reach) + thickness >= 0.6 * rh:
             continue  # ends on cell borders that run through the whole bar: a table line
         if left is not None and right is not None:

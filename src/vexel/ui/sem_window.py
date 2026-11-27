@@ -57,7 +57,7 @@ from vexel.i18n import tr
 from vexel.ui.sem_canvas import TOOL_HINTS, ImageView, ProfilePlot
 from vexel.ui.widgets import heading, muted
 
-VENDORS = {"thermo_fisher": tr("Thermo Fisher（FEI）"), "zeiss": "Zeiss", "tescan": "TESCAN", "hitachi": "Hitachi", "jeol": "JEOL"}
+VENDORS = {"thermo_fisher": tr("Thermo Fisher（FEI）"), "zeiss": "Zeiss", "tescan": "TESCAN", "hitachi": "Hitachi", "jeol": "JEOL", "imagej": tr("ImageJ 标定")}
 SOURCES = {"metadata": tr("仪器元数据"), "databar": tr("信息栏比例尺识别"), "manual": tr("手动"), "none": tr("无")}
 STATE_COLOURS = {"confirmed": "#16a34a", "pending": "#d97706", "none": "#dc2626"}
 TOOLS = [("pan", tr("选择"), "V"), ("line", tr("长度"), "L"), ("polyline", tr("折线"), "Shift+L"), ("polygon", tr("面积"), "A"), ("freehand", tr("自由画"), "F"),

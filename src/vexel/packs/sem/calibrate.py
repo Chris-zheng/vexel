@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,6 +54,7 @@ class Calibration:
     crop_source: str = "none"  # metadata | detected | none
     scale_bar: dict[str, Any] | None = None
     label: str = ""  # the scale label as read, e.g. "500 µm"
+    basis: str = ""  # databar: what the pixel size rests on, "" (the scale bar) or "field width"
     checks: list[dict[str, Any]] = field(default_factory=list)  # independent estimates and how they agree
     warnings: list[str] = field(default_factory=list)
     reason: str = ""  # why there is no calibration
@@ -76,6 +79,8 @@ class Calibration:
         if not self.ok:
             return f"未标定：{self.reason}"
         src = {"metadata": "仪器元数据", "databar": "信息栏比例尺识别", "manual": "手动"}.get(self.source, self.source)
+        if self.source == "databar" and self.basis == "field width":
+            src = "信息栏视场宽度（比例尺核对）"
         state = "已确认" if self.confirmed else "待确认"
         return f"{format_length(self.pixel_size)}/像素（{src}，{state}）"
 
@@ -109,16 +114,37 @@ def file_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+MAX_PIXELS = 100_000_000  # one SEM image in memory: processing keeps several float copies of it
+
+
+class ImageTooLarge(ValueError):
+    pass
+
+
+def _too_large(shape: tuple[int, ...], path: Path) -> None:
+    rows, cols = int(shape[-2]), int(shape[-1])
+    if rows * cols > MAX_PIXELS:
+        raise ImageTooLarge(f"{path.name}: {cols}×{rows} 像素（{rows * cols / 1e6:.0f} MP），超过 SEM 模块单张图的上限 {MAX_PIXELS / 1e6:.0f} MP。"
+                            "这通常是拼接的大图：请先裁出要测量的区域，或用 vexel convert 转成多分辨率格式查看")  # fmt: skip
+
+
 def load_image(path: str | Path) -> np.ndarray:
-    """The first image of the file as a 2-D array (colour averaged to grey), unscaled."""
+    """The first image of the file as a 2-D array (colour averaged to grey), unscaled.
+    Refuses images over ``MAX_PIXELS`` (``ImageTooLarge``) before reading their pixels."""
     path = Path(path)
     if path.suffix.lower() in (".tif", ".tiff"):
         import tifffile
 
+        with tifffile.TiffFile(path) as tf:
+            page = tf.pages[0]
+            shape = page.shape[:-1] if page.shape and page.shape[-1] in (3, 4) and len(page.shape) == 3 else page.shape
+            _too_large(tuple(shape), path)
         img = tifffile.imread(path, key=0)
     else:
         import imageio.v3 as iio
 
+        props = iio.improps(path)
+        _too_large(tuple(props.shape[:2]), path)
         img = iio.imread(path)
     img = np.asarray(img)
     if img.ndim == 3 and img.shape[-1] in (3, 4):
@@ -218,13 +244,43 @@ def calibrate(path: str | Path, *, use_ocr: bool = True, cross_check: bool = Tru
     cal.pixel_size = cal.pixel_size_y = px
     cal.source, cal.confidence = "databar", "low"
     if "hfw" in found:
-        if _check(cal, "field width", found["hfw"] / width, px, "视场宽度 ÷ 图片宽度"):
-            cal.confidence = "medium"
+        _field_width(cal, found["hfw"] / width, px, found.get("hfw_text", ""))
     else:
         cal.warnings.append("信息栏中没有可核对的视场宽度，只有比例尺一个依据")
     if cal.scale_bar and cal.scale_bar["length_px"] < 50:
         cal.warnings.append(f"比例尺只有 {cal.scale_bar['length_px']:.0f} 像素长，1 像素的误差就是 {100 / cal.scale_bar['length_px']:.1f}%")
     return cal
+
+
+def _rounding(text: str) -> float:
+    """Relative uncertainty of a printed number from its last digit (half a unit): "519 µm" 0.1 %."""
+    m = re.search(r"(\d+)(?:[.,](\d+))?", text or "")
+    if not m:
+        return 0.01
+    value = float(m.group(1) + ("." + m.group(2) if m.group(2) else ""))
+    unit = 10.0 ** -(len(m.group(2)) if m.group(2) else 0)
+    return 0.5 * unit / value if value else 0.01
+
+
+def _field_width(cal: Calibration, from_fw: float, from_bar: float, text: str) -> None:
+    """The bar's field width against the scale bar. Both are independent readings of the same
+    pixel size; the more precise one is used (the field width's printed digits against one
+    pixel of the bar's length), and they must agree within three times their combined
+    uncertainty (at least 1 %). A field width more than 20 % away is taken as misread."""
+    u_fw = _rounding(text)
+    u_bar = 1.0 / max(float((cal.scale_bar or {}).get("length_px", 100.0)), 1.0)
+    limit = max(0.01, 3 * math.hypot(u_fw, u_bar))
+    diff = from_fw / from_bar - 1
+    agree = abs(diff) <= limit
+    cal.checks.append({"check": "field width", "pixel_size": from_fw, "difference": diff, "agree": agree, "limit": limit})
+    if abs(diff) <= 0.2 and u_fw < u_bar:
+        cal.pixel_size = cal.pixel_size_y = from_fw
+        cal.basis = "field width"
+    if agree:
+        cal.confidence = "medium"
+    else:
+        used = "视场宽度" if cal.basis == "field width" else "比例尺"
+        cal.warnings.append(f"信息栏的视场宽度与比例尺相差 {diff * 100:+.1f}%（允许 ±{limit * 100:.1f}%）：已采用更精确的{used}，请核对")
 
 
 def _check(cal: Calibration, name: str, other: float, ours: float, label: str) -> bool:

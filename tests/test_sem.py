@@ -189,9 +189,84 @@ def test_reading_values_from_recognised_text():
     texts = [T("HFW", 1, (175, 443, 199, 454)), T("mag", 1, (126, 444, 161, 455)), T("1.73 mm", 1, (168, 458, 207, 469)),
              T("120 x", 1, (130, 458, 156, 469)), T("500", 1, (397, 444, 417, 456)), T("μm", 1, (415, 445, 433, 456))]  # fmt: skip
     joined = ocr._join_units(texts)
-    assert "500 μm" in [t.text for t in joined] and {t.text for t in ocr.scale_labels(joined)} == {"1.73 mm", "500 μm"}
-    assert ocr.fields(joined) == {"hfw": pytest.approx(1.73e-3), "mag": 120}
-    assert ocr.fields([T("Width = 5.965 µm", 1, (0, 0, 50, 10)), T("EHT = 5.00 kV", 1, (60, 0, 90, 10))]) == {"hfw": pytest.approx(5.965e-6), "hv": 5000}
+    # the field width under its header is a length, but not the scale bar's label
+    assert "500 μm" in [t.text for t in joined] and {t.text for t in ocr.scale_labels(joined)} == {"500 μm"}
+    assert ocr.fields(joined) == {"hfw": pytest.approx(1.73e-3), "hfw_text": "1.73 mm", "mag": 120}
+    one_line = ocr.fields([T("Width = 5.965 µm", 1, (0, 0, 50, 10)), T("EHT = 5.00 kV", 1, (60, 0, 90, 10))])
+    assert one_line["hfw"] == pytest.approx(5.965e-6) and one_line["hv"] == 5000
+
+
+def test_phenom_data_bar_fields():
+    """Phenom: a table of headers (Mag., FW, HV, ..., WD) above their values; the scale bar's
+    label sits under the bar on the left."""
+    T = ocr.Text
+    texts = [T("30 µm", 1, (150, 975, 210, 990)), T("Mag.", 1, (400, 955, 440, 968)), T("3900 ×", 1, (390, 975, 450, 990)),
+             T("FW", 1, (510, 955, 530, 968)), T("132 µm", 1, (495, 975, 555, 990)), T("HV", 1, (610, 955, 630, 968)),
+             T("10 kV", 1, (600, 975, 645, 990)), T("WD", 1, (940, 955, 965, 968)), T("10.202 mm", 1, (915, 975, 1000, 990))]  # fmt: skip
+    assert [t.text for t in ocr.scale_labels(texts)] == ["30 µm"]
+    f = ocr.fields(texts)
+    assert f["hfw"] == pytest.approx(132e-6) and f["hfw_text"] == "132 µm" and f["mag"] == 3900 and f["wd"] == pytest.approx(10.202e-3)
+    assert "hfw" not in ocr.fields([T("FWD 3 mm", 1, (0, 0, 60, 10))])  # FW only as the whole word
+
+
+def test_scale_bar_ends_ignore_the_strokes_own_halo():
+    """A JPEG'd bar is lit a pixel above and below along its whole length: only the end ticks,
+    which reach further, mark its ends."""
+    img = np.zeros((120, 1000), np.uint8)  # a bar is at most half the width
+    img[:90] = 120  # the micrograph
+    img[100:103, 20:421] = 255  # the bar, 400 px between tick centres
+    img[103, 23:421] = 160  # a ringing halo along almost all of it (starting a few pixels in, as on the real images)
+    img[95:108, 20] = img[95:108, 420] = 255  # end ticks
+    img[97:106, 153] = img[97:106, 287] = 255  # inner ticks
+    sb = db.find_scalebar(img, None)  # no data bar: the bottom quarter
+    assert sb is not None and sb.ends == "ticks" and sb.length_px == pytest.approx(400, abs=0.6), sb
+
+
+def test_field_width_and_scale_bar_the_more_precise_wins():
+    cal = semcal.Calibration(file="x.jpg", sha256="0", image_shape=(1000, 1500), scale_bar={"length_px": 408.0})
+    assert semcal._rounding("519 µm") == pytest.approx(0.5 / 519) and semcal._rounding("1.05 mm") == pytest.approx(0.005 / 1.05)
+    truth = 519e-6 / 1500
+    cal.pixel_size = truth * 1.015  # the bar measured 1.5 % long
+    semcal._field_width(cal, truth, cal.pixel_size, "519 µm")
+    assert cal.pixel_size == pytest.approx(truth) and cal.basis == "field width" and not cal.checks[-1]["agree"] and cal.warnings
+    cal2 = semcal.Calibration(file="y.jpg", sha256="0", image_shape=(1000, 1500), scale_bar={"length_px": 408.0})
+    cal2.pixel_size = truth * 1.003
+    semcal._field_width(cal2, truth, cal2.pixel_size, "519 µm")
+    assert cal2.checks[-1]["agree"] and cal2.confidence == "medium" and not cal2.warnings
+    cal3 = semcal.Calibration(file="z.jpg", sha256="0", image_shape=(1000, 1500), scale_bar={"length_px": 408.0})
+    cal3.pixel_size = truth
+    semcal._field_width(cal3, truth * 10, truth, "5190 µm")  # a misread field width: the bar stays
+    assert cal3.pixel_size == truth and cal3.basis == "" and not cal3.checks[-1]["agree"]
+
+
+def test_imagej_calibration_is_read(tmp_path):
+    import tifffile
+
+    p = tmp_path / "fib.tif"
+    tifffile.imwrite(p, np.zeros((4, 64, 80), np.uint8), imagej=True, resolution=(50.0, 50.0), metadata={"unit": "micron", "spacing": 0.02})
+    md = read_metadata(p)
+    assert md is not None and md.vendor == "imagej" and md.pixel_size == pytest.approx(20e-9) and md.warnings
+    cal = semcal.calibrate(p)
+    assert cal.ok and cal.source == "metadata" and cal.pixel_size == pytest.approx(20e-9)
+    plain = tmp_path / "plain.tif"
+    tifffile.imwrite(plain, np.zeros((4, 64, 80), np.uint8), imagej=True)  # no unit: not a calibration
+    assert read_metadata(plain) is None
+
+
+def test_images_too_large_are_refused_before_reading(tmp_path, monkeypatch):
+    import tifffile
+
+    monkeypatch.setattr(semcal, "MAX_PIXELS", 1000)
+    tifffile.imwrite(tmp_path / "big.tif", np.zeros((40, 40), np.uint8))
+    with pytest.raises(semcal.ImageTooLarge, match="40×40"):
+        semcal.load_image(tmp_path / "big.tif")
+    import imageio.v3 as iio
+
+    iio.imwrite(tmp_path / "big.png", np.zeros((40, 40), np.uint8))
+    with pytest.raises(semcal.ImageTooLarge):
+        semcal.load_image(tmp_path / "big.png")
+    tifffile.imwrite(tmp_path / "ok.tif", np.zeros((20, 20), np.uint8))
+    assert semcal.load_image(tmp_path / "ok.tif").shape == (20, 20)
 
 
 @needs_ocr

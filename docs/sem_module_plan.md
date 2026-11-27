@@ -437,6 +437,33 @@
 - 模型按平行投影、共心倾转处理；放大倍数很低（透视明显）或倾转不共心时会出现整体倾斜，校平可去掉一部分。
 - 实物验收需要台阶或金字塔标准样品的倾转图组。
 
+## 十四、真实图片验收（第一轮，2026-11-27）
+
+**数据**：远端整理的 `Dataset/SEM`（不进仓库）：52 张 Phenom（Pharos、ProX、XL、Pure）样图，JPEG，带信息栏；3 个 ImageJ 保存的 FIB-SEM 序列；2 张拼接大图（6.7 亿、10.6 亿像素）。都不是半导体 CD-SEM 图片，半导体计量的验收仍等 Hitachi 原图。真值：每张信息栏的比例尺与视场宽度（FW）由人读出，每张图适合的测量类型由人判断（`tests/benchmarks/real/sem_gallery_truth.csv`）。
+
+| 项目 | 修正前 | 修正后 | 要求 |
+| :--- | :--- | :--- | :--- |
+| 打开、标定、规划不崩溃 | 52/52 | 52/52 | 全部 |
+| 像素尺寸与 FW ÷ 宽度相差 ≤ 1% | 36/52 | 51/52 | （记录） |
+| 相差 > 1% 而没有提示 | 16 | 0 | 0 |
+| 做了视场宽度核对 | 0/52 | 52/52 | 全部 |
+| ImageJ 序列的标定 | 未标定 | 3/3 准确 | 准确 |
+| 拼接大图 | 读入约 1–8.5 GB 内存 | 读像素之前拒绝并说明 | 不耗尽内存 |
+| 识别：认错 | 2 | 0 | 0 |
+| 识别：认出（21 张有明确测量对象） | 2 | 4 | （记录） |
+| 每张用时 | 0.5–1.6 s | 0.5–1.6 s | < 3 s |
+
+**发现并修正的问题**：
+
+- 比例尺两端：JPEG 压缩让比例尺上下沿整条带一圈亮边，端点刻度的位置被算到了里面约 12 像素，像素尺寸偏大约 6%（14 张）。现在只有比亮边伸得更远的列才算刻度。
+- Phenom 把视场宽度写作“FW”，原来只认 HFW / Width，52 张都没有核对。
+- 信息栏表格中的数值（FW、WD）被当成比例尺的标注（3 张，像素尺寸错 2–2400 倍）。现在表头下方的数值不再当作标注。
+- 视场宽度与比例尺都有时，原来只用比例尺、相差 2% 以内不提示；现在用更精确的一个，按两者的读数误差决定是否提示。
+- ImageJ 写入的标定（分辨率标签 + 单位）没有读取。
+- 单张图片没有大小上限：10 亿像素的拼接图会耗尽内存。
+
+**识别**：试过把“灰度在两类之间”的判据按边界长度归一，召回提高但把组织、断口等纹理认成颗粒（20 张认错），已撤回。规则方法在多样的真实图片上宁可不认，这符合“不猜”的原则；提高认出率需要训练的分类器（M5 后半），这 52 张带标注的图是它的第一批评估数据。
+
 ## 来源
 
 - SEM 元数据：Thermo/Zeiss/TESCAN 的 TIFF 元数据处理 <https://github.com/mac4DSTEM/macTEM/pull/136>；Zeiss 标签 34118 <https://gist.github.com/solarchemist/9de1a3397aca8b721908>；tifffile <https://www.cgohlke.com/docs/tifffile/>；TESCAN `.hdr` <https://sites.imagej.net/IMBalENce/plugins/Scripts/EM_tool/SEM_tescan_metadata.py-20220613174621>；JEOL <https://matwerk.datamanager.kit.edu/docs/mapping-service/jeolsemtojson.html>；Hitachi <https://bo-wang-em.github.io/scripts/imagej-particle-analysis>

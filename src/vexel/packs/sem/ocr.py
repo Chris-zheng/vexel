@@ -220,29 +220,53 @@ def _label_only(text: str) -> bool:
     return bool(re.fullmatch(r"\s*\d+(?:[.,]\d+)?\s*(pm|nm|um|µm|μm|mm|Å)\s*", text, re.IGNORECASE))
 
 
+# column headers of data-bar tables (Thermo Fisher, Phenom, ...): the text below one is its value
+HEADERS = ("hfw", "fw", "width", "fov", "mag", "hv", "eht", "wd", "det", "int", "pres", "vac", "spot", "tilt", "curr", "pw", "dwell", "kv")
+
+
+def _below(texts: list[Text], header: Text) -> Text | None:
+    cx = header.centre[0]
+    cands = [t for t in texts if t is not header and t.box[1] >= header.box[3] - 2 and abs(t.centre[0] - cx) < (header.box[2] - header.box[0]) / 2 + 20]
+    return min(cands, key=lambda t: t.box[1], default=None)
+
+
+def header_values(texts: list[Text]) -> set[int]:
+    """Indices of texts that are the value under a column header (field width, working
+    distance...): lengths, but not the scale bar's label."""
+    out = set()
+    for t in texts:
+        word = re.sub(r"[^a-z]", "", t.text.lower())
+        if word in HEADERS and not re.search(r"\d", t.text):
+            v = _below(texts, t)
+            if v is not None:
+                out.add(texts.index(v))
+    return out
+
+
 def scale_labels(texts: list[Text]) -> list[Text]:
-    return [t for t in texts if _label_only(t.text)]
+    """Texts that are only a length (``"200 nm"``), except field values under a table header."""
+    values = header_values(texts)
+    return [t for i, t in enumerate(texts) if _label_only(t.text) and i not in values]
 
 
 def fields(texts: list[Text]) -> dict[str, Any]:
     """Field width, magnification, working distance and voltage, where the bar shows them.
 
-    Handles ``"Width = 5.965 µm"`` / ``"HFW 1.73 mm"`` on one line and the Thermo Fisher table
-    (header ``HFW`` above its value).
+    Handles ``"Width = 5.965 µm"`` / ``"HFW 1.73 mm"`` on one line and the Thermo Fisher and
+    Phenom tables (header ``HFW`` / ``FW`` above its value).
     """
     out: dict[str, Any] = {}
 
     def below(header: Text) -> Text | None:
-        cx = header.centre[0]
-        cands = [t for t in texts if t is not header and t.box[1] >= header.box[3] - 2 and abs(t.centre[0] - cx) < (header.box[2] - header.box[0]) / 2 + 20]
-        return min(cands, key=lambda t: t.box[1], default=None)
+        return _below(texts, header)
 
     for t in texts:
         low = t.text.lower().replace(" ", "")
-        for key, names in (("hfw", ("hfw", "width", "fov", "fieldofview")), ("wd", ("wd",)), ("mag", ("mag",)), ("hv", ("hv", "eht", "acc.v", "kv"))):
+        for key, names in (("hfw", ("hfw", "fw", "width", "fov", "fieldofview")), ("wd", ("wd",)), ("mag", ("mag",)), ("hv", ("hv", "eht", "acc.v", "kv"))):
             if key in out:
                 continue
-            hit = next((n for n in names if low.startswith(n)), None)
+            # "FW" (Phenom) only as the whole word: not the start of another one
+            hit = next((n for n in names if low.startswith(n) and (n != "fw" or not low[2:3].isalpha())), None)
             if hit is None:
                 continue
             rest = t.text[t.text.lower().find(hit[0]) :]
@@ -254,6 +278,7 @@ def fields(texts: list[Text]) -> dict[str, Any]:
                 vals = lengths_in(rest)
                 if vals:
                     out[key] = vals[0]
+                    out[f"{key}_text"] = rest
             elif key == "mag":
                 m = _mag(rest)
                 if m and re.search(r"\d", rest):
@@ -265,7 +290,7 @@ def fields(texts: list[Text]) -> dict[str, Any]:
     return out
 
 
-__all__ = ["OcrUnavailable", "Text", "available", "fields", "lengths_in", "read_text", "scale_labels", "UNITS"]
+__all__ = ["HEADERS", "OcrUnavailable", "Text", "available", "fields", "header_values", "lengths_in", "read_text", "scale_labels", "UNITS"]
 
 
 if __name__ == "__main__" and "--serve" in sys.argv:
