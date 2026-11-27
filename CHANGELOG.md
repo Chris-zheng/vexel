@@ -1,6 +1,6 @@
 # 更新记录
 
-## Unreleased — SEM window P1: correct by example, methods, batches
+## 0.7.0b2 — SEM window P1: correct by example, methods, batches (second SEM tester build)
 
 - Correct by example (particles, pores, holes): click objects that should be found and ones that should not; Vexel re-measures with other settings of the same method (in parallel, a few seconds) and shows the three best side by side - clicks agreed with, then objects like the examples, then fewest changes - to pick from (undoable).
 - Saved methods (`~/.vexel/sem/methods.json`): an automatic measurement with its processing, applied in one click; one method can be applied to every image opened without measurements.

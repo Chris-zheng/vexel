@@ -44,18 +44,18 @@
 
 ---
 
-# SEM 模块内测（M7，0.7.0b1）
+# SEM 模块内测（M7，0.7.0b1 起；当前 0.7.0b2）
 
 目标：第一位 SEM 用户（半导体制造）用 2–3 周，拿到**真实 CD-SEM 图像与 CD-SEM 的参考值**，完成半导体计量的真实数据验收，同时收集识别分类器（M5 后半）的训练与评估图像。给测试者的文件在 [sem/](sem/README.md)。
 
 ## 发放前
 
 - [ ] CI 全绿；`uv run python tests/benchmarks/sem_real_eval.py --data <SEM 样图文件夹>` 与各 SEM 合成验收脚本通过。
-- [ ] `scripts/build_dist.sh` 构建 0.7.0b1；在一台干净的 Windows 电脑上按 [SEM 内测说明](sem/README.md) 从零安装一次（带 `[sem]`），确认 `vexel gui --module sem --preview` 能打开、信息栏文字能读出；在大陆网络下按镜像设置装一次。
+- [ ] `scripts/build_dist.sh` 构建当前版本；在一台干净的 Windows 电脑上按 [SEM 内测说明](sem/README.md) 从零安装一次（带 `[sem]`），确认 `vexel gui --module sem --preview` 能打开、信息栏文字能读出；在大陆网络下按镜像设置装一次。
 - [ ] 与对方确认 [数据需求](sem/data_request.md) 末尾的保密约定（产品名与批号、能否保留脱敏小块做回归测试、结束后如何处理、报告给谁看、谁解答参考值问题）。有保密协议时以协议为准。
 - [ ] 约定数据的传递方式（加密盘或对方指定的方式），**不经过公共网盘或聊天软件传图像**。
 - [ ] 决定反馈渠道，写进 SEM 内测说明的“联系”一栏。
-- [ ] 打 tag：`git tag v0.7.0b1`。
+- [ ] 打 tag：`git tag v0.7.0b2`（每次发放新版本都打）。
 
 ## 第 1 天
 
