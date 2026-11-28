@@ -502,6 +502,49 @@ describe('Workflow fit and the Python engine request', () => {
     expect(workflowMismatch(guessed, 'sem_curved_multilayer', 'zh')).toBeNull();
   });
 
+  it('sends an uploaded file itself to the Python engine and maps its outlines back', async () => {
+    const { measureRequest, sourceInputFor, shapesForCanvas } = await import('../src/engine/pythonEngine');
+    const file = new Blob([new Uint8Array([1, 2, 3])]);
+    // a 4000x3000 TIFF shown at 960x720, its 60-row bottom data bar cut off by the person
+    const base = {
+      name: 'wafer.tif', width: 960, height: 660, rawWidth: 960, rawHeight: 720, rawRgba: new Uint8ClampedArray(4),
+      rawCroppedBarPx: 60, rawBarPosition: 'bottom', sourceFile: file, sourceWidth: 4000, sourceHeight: 3000,
+      gray: new Float32Array(960 * 660),
+      calibration: { pixelSize: 4.8, spaceUnit: 'nm', cropRows: 660, source: 'manual', confirmed: true },
+    };
+    const spec = base as never;
+    expect(sourceInputFor(spec)?.width).toBe(4000);
+    const body = measureRequest(spec, 'lines', 'zh', {}, 'AAEC') as Record<string, unknown>;
+    expect(body.file).toBe('AAEC');
+    expect(body.pixels).toBeUndefined();
+    expect(body.filename).toBe('wafer.tif');
+    expect(body.pixel_size as number).toBeCloseTo(4.8 * 960 / 4000, 9); // the person's calibration, per file pixel
+    expect(body.crop_rows).toBe(Math.floor(660 * 3000 / 720));
+    expect(body.region).toBeNull();
+    // the instrument's metadata: Python reads it from the file
+    const meta = measureRequest({ ...base, calibration: { ...base.calibration, source: 'metadata' } } as never, 'lines', 'zh', {}, 'AAEC');
+    expect(meta.pixel_size).toBeNull();
+    // a data bar cut off the top: Python measures the region below it, outlines shift up
+    const topSpec = { ...base, rawBarPosition: 'top' } as never;
+    const top = measureRequest(topSpec, 'lines', 'zh', {}, 'AAEC') as Record<string, unknown>;
+    expect(top.crop_rows).toBeNull();
+    expect(top.region).toEqual([0, Math.ceil(60 * 3000 / 720), 4000, 3000]);
+    const shape = { kind: 'polygon', points: [[4000 / 960 * 96, 3000 / 720 * 160]], color: '#a3e635', anchor: [0, 3000 / 720 * 60], label: '' };
+    const m = { result: { shapes: [shape] } as never, input: 'file' as const };
+    const [p] = shapesForCanvas(spec, m);
+    expect((p.points as number[][])[0][0]).toBeCloseTo(96, 9);
+    expect((p.points as number[][])[0][1]).toBeCloseTo(160, 9);
+    const [q] = shapesForCanvas(topSpec, m);
+    expect((q.points as number[][])[0][1]).toBeCloseTo(100, 9);
+    expect(q.anchor[1]).toBeCloseTo(0, 9);
+    // pixels measured (built-in samples, DM3, or a file Python refused): outlines are already in place
+    const [r] = shapesForCanvas(spec, { ...m, input: 'pixels' });
+    expect((r.points as number[][])[0][0]).toBeCloseTo(400, 9);
+    // DM3 and built-in samples go as pixels
+    expect(sourceInputFor({ ...base, name: 'stack.dm3' } as never)).toBeNull();
+    expect(sourceInputFor({ ...base, sourceFile: undefined } as never)).toBeNull();
+  });
+
   it('sends the pixels, the calibration and the crop to the Python engine', async () => {
     const { measureRequest, pythonParamsFor, pythonRecipeFor } = await import('../src/engine/pythonEngine');
     const gray = new Float32Array([0, 0.5, 1, 0.25, 0.75, 0.125]);
@@ -510,7 +553,7 @@ describe('Workflow fit and the Python engine request', () => {
     expect(body.pixel_size).toBe(2.5);
     expect(body.unit).toBe('nm');
     expect(body.crop_rows).toBe(1);
-    const back = new Float32Array(Uint8Array.from(atob(body.pixels), (c) => c.charCodeAt(0)).buffer);
+    const back = new Float32Array(Uint8Array.from(atob(body.pixels as string), (c) => c.charCodeAt(0)).buffer);
     expect(Array.from(back)).toEqual(Array.from(gray));
     const uncal = measureRequest({ ...(spec as object), calibration: { pixelSize: 1, spaceUnit: 'px' } } as never, 'lines', 'zh');
     expect(uncal.pixel_size).toBeNull();

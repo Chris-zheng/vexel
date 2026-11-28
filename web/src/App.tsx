@@ -45,7 +45,8 @@ import {
   loadKidneySectionSpecimen,
 } from './engine/samples';
 import { BUILTIN_MODELS, type TrainedLocalModel } from './engine/mlRuntime';
-import { PythonEngineCard } from './components/PythonEngineCard';
+import { overlayKey, PythonEngineCard } from './components/PythonEngineCard';
+import type { PythonShape } from './engine/pythonEngine';
 import {
   deleteLocalModel,
   deleteOnnxModel,
@@ -145,6 +146,9 @@ export default function App() {
   );
   const [engineMode, setEngineMode] = useState<'web' | 'python'>('web');
   const [pythonUrl, setPythonUrl] = useState('http://127.0.0.1:8765');
+  // Python's outlines for one image and workflow, in canvas coordinates, and whether they are shown
+  const [pythonOverlay, setPythonOverlay] = useState<{ key: string; shapes: PythonShape[] } | null>(null);
+  const [showPythonOverlay, setShowPythonOverlay] = useState(true);
   const [pythonCheckState, setPythonCheckState] = useState<{
     status: 'idle' | 'checking' | 'ok' | 'error';
     message?: string;
@@ -1993,6 +1997,11 @@ export default function App() {
             <ScientificCanvas
               specimen={activeSpecimen}
               result={runResult}
+              pythonShapes={
+                showPythonOverlay && pythonOverlay?.key === overlayKey(activeSpecimen, activeRecipe.id)
+                  ? pythonOverlay.shapes
+                  : null
+              }
               lang={lang}
               darkMode={darkMode}
               activeRecipe={activeRecipe}
@@ -2100,6 +2109,9 @@ export default function App() {
                   pythonUrl={pythonUrl}
                   connected={pythonCheckState.status === 'ok'}
                   lang={lang}
+                  onShapes={setPythonOverlay}
+                  overlayVisible={showPythonOverlay}
+                  onToggleOverlay={setShowPythonOverlay}
                   previewSummary={runResult?.summary.map((m) => ({
                     key: m.key,
                     label: lang === 'zh' ? m.labelZh : m.labelEn,

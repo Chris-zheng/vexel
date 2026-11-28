@@ -95,6 +95,33 @@ def test_file_is_calibrated_from_its_metadata(client: TestClient, tmp_path: Path
     assert truth is not None
 
 
+def test_web_upload_as_a_16bit_file(client: TestClient, tmp_path: Path) -> None:
+    """What the web workbench sends for an upload: the file itself (full resolution, 16 bits), the
+    person's calibration per file pixel, and - for a data bar cut off the top - the region below."""
+    import tifffile
+
+    img = S.line_space(seed=4)
+    rows, cols = img.shape
+    path = tmp_path / "lines16.tif"
+    tifffile.imwrite(path, np.clip(img / max(float(img.max()), 1e-9) * 65000, 0, 65535).astype(np.uint16))
+    data = base64.b64encode(path.read_bytes()).decode()
+    body = {"recipe": "lines", "file": data, "filename": path.name, "pixel_size": 2.0, "unit": "nm"}
+    res = client.post("/api/v1/sem/measure", json=body).json()
+    assert res["error"] is None and res["calibration"]["source"] == "person" and res["unit"] == "nm"
+    assert (res["image"]["width"], res["image"]["height"]) == (cols, rows)
+    whole = _value(res, "cd_mean")
+    assert whole == pytest.approx(_value(client.post("/api/v1/sem/measure", json={"recipe": "lines", "pixel_size": 2.0, "unit": "nm", **_pixels(img)}).json(), "cd_mean"), rel=0.02)
+    # a top data bar cut off in the browser: only the region below it is measured, outlines in file pixels
+    y0 = rows // 4
+    part = client.post("/api/v1/sem/measure", json={**body, "region": [0, y0, cols, rows]}).json()
+    assert part["error"] is None and part["region"] is not None and part["region"][1] >= y0
+    ys = [pt[1] for sh in part["shapes"][1:] if sh["kind"] != "ellipse" for pt in sh["points"]]
+    assert ys and min(ys) >= y0 - 1
+    # a file Python cannot read is a clear 400 (the web then measures the shown pixels instead)
+    bad = client.post("/api/v1/sem/measure", json={**body, "file": base64.b64encode(b"not an image").decode()})
+    assert bad.status_code in (400, 422) or bad.json().get("error")
+
+
 @pytest.mark.parametrize(
     "body, needle",
     [

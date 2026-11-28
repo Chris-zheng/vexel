@@ -1085,6 +1085,8 @@ export async function decodeUploadedImage(
   let vendorMetaCal: Partial<Calibration> | undefined;
   let vendorMetadataFound = false;
   let downscaleFactor = 1;
+  let sourceWidth = 0;
+  let sourceHeight = 0;
 
   // Peek first 256 bytes for magic-header format routing (TIFF/OME-TIFF/SEM-TIFF/DM3/DM4/CZI/ND2/LIF/etc.)
   const headerSlice = await file.slice(0, 256).arrayBuffer();
@@ -1111,6 +1113,8 @@ export async function decodeUploadedImage(
 
     const scale = Math.min(1, maxDim / Math.max(decoded.width, decoded.height));
     downscaleFactor = scale;
+    sourceWidth = decoded.width;
+    sourceHeight = decoded.height;
     origWidth = Math.max(32, Math.round(decoded.width * scale));
     origHeight = Math.max(32, Math.round(decoded.height * scale));
 
@@ -1166,6 +1170,8 @@ export async function decodeUploadedImage(
       });
       const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
       downscaleFactor = scale;
+      sourceWidth = img.naturalWidth || img.width;
+      sourceHeight = img.naturalHeight || img.height;
       origWidth = Math.max(32, Math.round(img.width * scale));
       origHeight = Math.max(32, Math.round(img.height * scale));
 
@@ -1352,6 +1358,9 @@ export async function decodeUploadedImage(
       cropRows: workingHeight,
     },
     importReport,
+    sourceFile: file,
+    sourceWidth,
+    sourceHeight,
     sha256: fastSha256Hex(rgba),
     descriptionZh: autoCrop
       ? cls.recognized

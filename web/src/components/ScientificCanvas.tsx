@@ -70,6 +70,7 @@ import {
   type SmartSegmentResult,
 } from '../engine/mlRuntime';
 import { snapManualLineToScaleBar } from '../engine/samples';
+import type { PythonShape } from '../engine/pythonEngine';
 import { t } from '../i18n/strings';
 
 interface ScientificCanvasProps {
@@ -124,6 +125,8 @@ interface ScientificCanvasProps {
   onDeleteMeasurement: (id: string) => void;
   onClearMeasurements: () => void;
   onRegisterSnapshot?: (fn: () => string | undefined) => void;
+  /** The validated Python engine's outlines, in this image's pixels (drawn dashed over the preview). */
+  pythonShapes?: PythonShape[] | null;
 }
 
 const BRUSH_CLASS_COLORS: Record<number, { color: string; zh: string; en: string }> = {
@@ -184,6 +187,7 @@ export function ScientificCanvas({
   onDeleteMeasurement,
   onClearMeasurements,
   onRegisterSnapshot,
+  pythonShapes = null,
 }: ScientificCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -1727,6 +1731,44 @@ export function ScientificCanvas({
         }
       }
 
+      // 4b. The validated Python engine's outlines (dashed, in its own colours) over the preview
+      if (pythonShapes && pythonShapes.length && !isRawSource && !isCropPreview) {
+        ctx.save();
+        ctx.lineWidth = 1.6 / zoom;
+        ctx.setLineDash([5 / zoom, 3 / zoom]);
+        ctx.font = `600 ${11 / zoom}px "JetBrains Mono", monospace`;
+        for (const sh of pythonShapes) {
+          if (sh.kind === 'ellipse') continue;
+          const pts = sh.points as number[][];
+          if (!pts.length) continue;
+          ctx.strokeStyle = sh.color;
+          ctx.fillStyle = sh.color;
+          if (sh.kind === 'points') {
+            for (const [x, y] of pts) {
+              ctx.beginPath();
+              ctx.arc(x, y, 3 / zoom, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          } else {
+            ctx.beginPath();
+            ctx.moveTo(pts[0][0], pts[0][1]);
+            for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+            if (sh.kind === 'polygon') ctx.closePath();
+            ctx.stroke();
+          }
+          if (sh.label && showOverlayLabels && sh.anchor.length >= 2) {
+            ctx.save();
+            ctx.setLineDash([]);
+            ctx.lineWidth = 3 / zoom;
+            ctx.strokeStyle = 'rgba(7, 10, 18, 0.8)';
+            ctx.strokeText(sh.label, sh.anchor[0] + 4 / zoom, sh.anchor[1] - 4 / zoom);
+            ctx.fillText(sh.label, sh.anchor[0] + 4 / zoom, sh.anchor[1] - 4 / zoom);
+            ctx.restore();
+          }
+        }
+        ctx.restore();
+      }
+
       // 5. Calibrated physical scale bar on image bottom-right
       const rawPhys = viewWidth * 0.16 * specimen.calibration.pixelSize;
       const pow = Math.pow(10, Math.floor(Math.log10(Math.max(1e-6, rawPhys))));
@@ -1810,6 +1852,7 @@ export function ScientificCanvas({
     viewHeight,
     lang,
     darkMode,
+    pythonShapes,
   ]);
 
   // Register PNG snapshot callback for HTML Report export

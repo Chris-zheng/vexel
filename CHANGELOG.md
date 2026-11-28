@@ -1,5 +1,10 @@
 # 更新记录
 
+## Unreleased — web workbench sends the original file; Python's outlines on the canvas (step 3)
+
+- Uploads (TIFF, PNG, JPEG, BMP) go to the Python engine as the original file: full resolution and bit depth, the instrument's metadata and data bar read by Python (the workbench shows uploads at most 960 px and 8 bits). The person's calibration is converted to file pixels; a confirmed data-bar crop is passed on (bottom bar: rows above it; top bar: the region below it). Built-in samples and DM3/DM4 still go as the shown pixels; a file Python cannot read falls back to the shown pixels and the card says why. The card names what was measured.
+- Python's outlines are drawn dashed on the canvas, in the SEM window's colours, mapped from file pixels to the shown, cropped image; shown only for the image and workflow they were measured on, with a switch on the card.
+
 ## Unreleased — web workbench on the Python engine; layer stacks tilted, bent or vertical (steps 1–2)
 
 - `vexel serve` measures SEM images for the web workbench: `GET /api/v1/sem/recipes` (every measurement with its settings, Chinese or English) and `POST /api/v1/sem/measure` (grey pixels or the original file, the person's pixel size or the file's calibration; numbers, units, calibration, warnings, outlines, the rows measured). The same numbers as the SEM window (tested).

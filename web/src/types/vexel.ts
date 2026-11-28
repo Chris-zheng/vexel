@@ -116,6 +116,11 @@ export interface Specimen {
   rawCroppedBarPx?: number;
   calibration: Calibration;
   importReport?: ImportRecognitionReport;
+  /** The uploaded file itself, kept in memory for the Python engine (full resolution and bit
+   * depth, the instrument's metadata), with its size in pixels before the workbench's downscale. */
+  sourceFile?: Blob;
+  sourceWidth?: number;
+  sourceHeight?: number;
   sha256: string;
   descriptionZh: string;
   descriptionEn: string;

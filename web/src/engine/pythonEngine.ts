@@ -3,8 +3,10 @@
  *
  * The browser engine in this workbench gives a quick preview; the numbers that count come from
  * the Python engine, whose measurements passed the synthetic and real-image acceptance. This
- * module sends the image the workbench shows (its grey pixels, the person's calibration and the
- * data-bar crop) and returns the engine's result - numbers, units, warnings and outlines.
+ * module sends the uploaded file itself (full resolution and bit depth, the instrument's metadata)
+ * or, for the built-in samples, the grey pixels the workbench shows - with the person's
+ * calibration and data-bar crop - and returns the engine's result: numbers, units, warnings and
+ * the outlines to draw on the canvas.
  * The engine runs on this computer: nothing leaves it.
  */
 
@@ -126,8 +128,41 @@ export function pythonParamsFor(recipeId: string): Record<string, unknown> {
   return { ...(PYTHON_SEM_RECIPE[recipeId]?.params ?? {}) };
 }
 
-/** The request body for one specimen (exported for tests). */
-export function measureRequest(specimen: Specimen, recipe: string, lang: 'zh' | 'en', params: Record<string, unknown> = {}) {
+/** Files the Python engine reads itself (TIFF keeps the instrument metadata; the others it reads
+ * at full resolution). Other uploads (Gatan DM3/DM4) and the built-in samples go as pixels. */
+const FILE_TYPES = /\.(tiff?|png|jpe?g|bmp)$/i;
+
+/** What the Python engine is sent for this specimen: its original file, or the pixels shown. */
+export interface SourceInput {
+  name: string;
+  file: Blob;
+  width: number; // pixels of the original file
+  height: number;
+}
+
+export function sourceInputFor(specimen: Specimen): SourceInput | null {
+  const f = specimen.sourceFile;
+  if (!f || !FILE_TYPES.test(specimen.name) || !specimen.sourceWidth || !specimen.sourceHeight) return null;
+  return { name: specimen.name, file: f, width: specimen.sourceWidth, height: specimen.sourceHeight };
+}
+
+/** Original-file pixels per displayed pixel (the workbench shows uploads at most 960 px wide). */
+function sourcePerShown(specimen: Specimen, src: SourceInput): { x: number; y: number } {
+  const w = specimen.rawWidth ?? specimen.width;
+  const h = specimen.rawHeight ?? specimen.height;
+  return { x: src.width / Math.max(1, w), y: src.height / Math.max(1, h) };
+}
+
+/** The request body for one specimen (exported for tests). With ``fileBase64`` (the specimen's
+ * original file, see ``sourceInputFor``) Python reads the file itself: full resolution and bit
+ * depth, and - unless the person calibrated - the instrument's metadata or data bar. */
+export function measureRequest(
+  specimen: Specimen,
+  recipe: string,
+  lang: 'zh' | 'en',
+  params: Record<string, unknown> = {},
+  fileBase64?: string
+) {
   const cal = specimen.calibration;
   // only a measured calibration is sent: the instrument's metadata, the person's own (drawn on
   // the scale bar), or a data bar the person confirmed. The workbench's defaults for uploads
@@ -135,6 +170,29 @@ export function measureRequest(specimen: Specimen, recipe: string, lang: 'zh' | 
   // Python engine then reports lengths in pixels and says the image is uncalibrated.
   const measured = cal.source === 'metadata' || cal.source === 'manual' || (cal.source === 'databar' && cal.confirmed);
   const calibrated = measured && UNIT_OK.has(cal.spaceUnit) && cal.pixelSize > 0;
+  const src = fileBase64 ? sourceInputFor(specimen) : null;
+  if (src && fileBase64) {
+    const k = sourcePerShown(specimen, src);
+    // the instrument's metadata: Python reads it from the file itself. The person's calibration
+    // is per displayed pixel; the file's pixels are smaller by the downscale.
+    const own = calibrated && cal.source !== 'metadata';
+    // a data bar the person cut off: at the bottom, Python measures the rows above it; at the top,
+    // the region below it. Not cut: Python finds the data bar itself.
+    const cut = specimen.rawCroppedBarPx && specimen.rawHeight ? specimen.rawCroppedBarPx : 0;
+    const bottom = cut > 0 && specimen.rawBarPosition !== 'top';
+    const top = cut > 0 && specimen.rawBarPosition === 'top';
+    return {
+      recipe,
+      params,
+      file: fileBase64,
+      filename: src.name,
+      pixel_size: own ? cal.pixelSize / k.x : null,
+      unit: own ? cal.spaceUnit : 'nm',
+      crop_rows: bottom ? Math.floor(((specimen.rawHeight as number) - cut) * k.y + 1e-6) : null,
+      region: top ? [0, Math.ceil(cut * k.y - 1e-6), src.width, src.height] : null,
+      lang,
+    };
+  }
   const gray = specimen.gray instanceof Float32Array ? specimen.gray : new Float32Array(specimen.gray);
   return {
     recipe,
@@ -149,19 +207,28 @@ export function measureRequest(specimen: Specimen, recipe: string, lang: 'zh' | 
   };
 }
 
-export async function measureWithPython(
-  baseUrl: string,
-  specimen: Specimen,
-  recipe: string,
-  lang: 'zh' | 'en',
-  params: Record<string, unknown> = {},
-  signal?: AbortSignal
-): Promise<PythonMeasureResult> {
-  const url = baseUrl.replace(/\/+$/, '') + '/api/v1/sem/measure';
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+/** A Python result with what it was measured on. ``fileRefused`` is Python's reason when it could
+ * not read the original file and the shown pixels were measured instead. */
+export interface PythonMeasurement {
+  result: PythonMeasureResult;
+  input: 'file' | 'pixels';
+  fileRefused?: string;
+}
+
+async function post(url: string, body: unknown, signal?: AbortSignal): Promise<PythonMeasureResult> {
   const resp = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(measureRequest(specimen, recipe, lang, params)),
+    body: JSON.stringify(body),
     signal,
   });
   const data = await resp.json().catch(() => ({}));
@@ -169,4 +236,42 @@ export async function measureWithPython(
     throw new Error(typeof data?.detail === 'string' ? data.detail : `Python engine returned HTTP ${resp.status}`);
   }
   return data as PythonMeasureResult;
+}
+
+export async function measureWithPython(
+  baseUrl: string,
+  specimen: Specimen,
+  recipe: string,
+  lang: 'zh' | 'en',
+  params: Record<string, unknown> = {},
+  signal?: AbortSignal
+): Promise<PythonMeasurement> {
+  const url = baseUrl.replace(/\/+$/, '') + '/api/v1/sem/measure';
+  const src = sourceInputFor(specimen);
+  let fileRefused: string | undefined;
+  if (src) {
+    const b64 = bytesToBase64(new Uint8Array(await src.file.arrayBuffer()));
+    try {
+      return { result: await post(url, measureRequest(specimen, recipe, lang, params, b64), signal), input: 'file' };
+    } catch (err) {
+      if (signal?.aborted || !(err instanceof Error) || err.name === 'TypeError') throw err; // stopped, or no connection
+      fileRefused = err.message; // Python could not read the file (format, size): measure the shown pixels
+    }
+  }
+  return { result: await post(url, measureRequest(specimen, recipe, lang, params), signal), input: 'pixels', fileRefused };
+}
+
+/** Python's outlines in the coordinates of the image the canvas shows: an original file was
+ * measured at full resolution, before the person's data-bar crop; the canvas shows it downscaled
+ * and cropped. */
+export function shapesForCanvas(specimen: Specimen, m: PythonMeasurement): PythonShape[] {
+  const src = m.input === 'file' ? sourceInputFor(specimen) : null;
+  const k = src ? sourcePerShown(specimen, src) : { x: 1, y: 1 };
+  const dy = src && specimen.rawBarPosition === 'top' ? specimen.rawCroppedBarPx ?? 0 : 0;
+  const pt = (p: number[]) => [p[0] / k.x, p[1] / k.y - dy];
+  return m.result.shapes.map((sh) => ({
+    ...sh,
+    points: sh.kind === 'ellipse' ? sh.points : (sh.points as number[][]).map(pt),
+    anchor: sh.anchor.length >= 2 ? pt(sh.anchor) : sh.anchor,
+  }));
 }

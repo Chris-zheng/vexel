@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { CheckCircle2, Loader2, ShieldCheck, XCircle } from 'lucide-react';
 import type { Specimen } from '../types/vexel';
-import { measureWithPython, pythonCount, pythonParamsFor, pythonRecipeFor, SAME_COUNT, SAME_QUANTITY, type PythonMeasureResult } from '../engine/pythonEngine';
+import { measureWithPython, pythonCount, pythonParamsFor, pythonRecipeFor, SAME_COUNT, SAME_QUANTITY, shapesForCanvas, type PythonMeasureResult, type PythonMeasurement, type PythonShape } from '../engine/pythonEngine';
 import { workflowMismatch } from '../engine/workflowFit';
 
 interface Props {
@@ -13,7 +13,10 @@ interface Props {
   /** The browser preview's summary (key, label, value, unit): the quantity both engines measure
    * (``SAME_QUANTITY``) is compared, nothing else. */
   previewSummary?: Array<{ key: string; label: string; value: number | string | null; unit: string }> | null;
-  onShapes?: (shapes: PythonMeasureResult['shapes'] | null) => void;
+  /** Python's outlines in the canvas's coordinates, keyed by specimen, image and workflow (null: none). */
+  onShapes?: (overlay: { key: string; shapes: PythonShape[] } | null) => void;
+  overlayVisible?: boolean;
+  onToggleOverlay?: (visible: boolean) => void;
 }
 
 function fmt(v: number | string | null, unit: string): string {
@@ -26,22 +29,27 @@ function fmt(v: number | string | null, unit: string): string {
 
 /** The validated Python engine's result for the current image and workflow, beside the browser
  * preview: the numbers that count, with the engine and its version named. */
-export function PythonEngineCard({ specimen, recipeId, pythonUrl, connected, lang, previewSummary, onShapes }: Props) {
+/** Key of a Python overlay: the outlines belong to this image (as cropped) and this workflow. */
+export function overlayKey(specimen: Specimen, recipeId: string): string {
+  return `${specimen.id}:${specimen.sha256}:${recipeId}`;
+}
+
+export function PythonEngineCard({ specimen, recipeId, pythonUrl, connected, lang, previewSummary, onShapes, overlayVisible = true, onToggleOverlay }: Props) {
   const recipe = pythonRecipeFor(recipeId);
-  const [state, setState] = useState<{ status: 'idle' | 'running' | 'done' | 'error'; result?: PythonMeasureResult; error?: string; key?: string }>({
+  const [state, setState] = useState<{ status: 'idle' | 'running' | 'done' | 'error'; result?: PythonMeasureResult; m?: PythonMeasurement; error?: string; key?: string }>({
     status: 'idle',
   });
   const zh = lang === 'zh';
-  const key = `${specimen.id}:${recipeId}`;
+  const key = overlayKey(specimen, recipeId);
   const stale = state.key !== key;
 
   const run = async () => {
     if (!recipe) return;
     setState({ status: 'running', key });
     try {
-      const result = await measureWithPython(pythonUrl, specimen, recipe, lang, pythonParamsFor(recipeId));
-      setState({ status: 'done', result, key });
-      onShapes?.(result.shapes);
+      const m = await measureWithPython(pythonUrl, specimen, recipe, lang, pythonParamsFor(recipeId));
+      setState({ status: 'done', result: m.result, m, key });
+      onShapes?.({ key, shapes: shapesForCanvas(specimen, m) });
     } catch (err) {
       setState({ status: 'error', error: err instanceof Error ? err.message : String(err), key });
       onShapes?.(null);
@@ -125,6 +133,30 @@ export function PythonEngineCard({ specimen, recipeId, pythonUrl, connected, lan
           <div className="text-slate-500">
             {result.recipe_label} · {result.calibration.text}
           </div>
+          {state.m && (
+            <div className="text-slate-500">
+              {state.m.input === 'file'
+                ? zh
+                  ? `测量的是原始文件 ${specimen.name}（${result.image.width}×${result.image.height} px，全分辨率与原始位深）。`
+                  : `Measured the original file ${specimen.name} (${result.image.width}×${result.image.height} px, full resolution and bit depth).`
+                : zh
+                  ? `测量的是工作台显示的像素（${result.image.width}×${result.image.height} px）。`
+                  : `Measured the pixels the workbench shows (${result.image.width}×${result.image.height} px).`}
+            </div>
+          )}
+          {state.m?.fileRefused && (
+            <div className="text-amber-600 dark:text-amber-400">
+              {zh
+                ? `Python 读不了原始文件（${state.m.fileRefused}），改为测量工作台显示的像素：分辨率和位深可能低于原图。`
+                : `Python could not read the original file (${state.m.fileRefused}), so it measured the pixels the workbench shows: resolution and bit depth may be lower than the original.`}
+            </div>
+          )}
+          {result.shapes.length > 0 && onToggleOverlay && (
+            <label className="flex items-center gap-1.5 text-slate-600 dark:text-slate-300 cursor-pointer select-none">
+              <input type="checkbox" checked={overlayVisible} onChange={(e) => onToggleOverlay(e.target.checked)} />
+              {zh ? `在图上显示 Python 的测量轮廓（${result.shapes.length} 个，虚线）` : `Show Python's outlines on the image (${result.shapes.length}, dashed)`}
+            </label>
+          )}
           {result.error ? (
             <div className="text-amber-600 dark:text-amber-400">{result.error}</div>
           ) : (
