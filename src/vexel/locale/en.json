@@ -832,5 +832,22 @@
  "自动测量计算中…（大图需要一些时间，窗口可以继续使用）": "Computing the automatic measurements… (large images take a while; the window stays usable)",
  "（预览）": " (preview)",
  "这种测量只在合成图像上验收过：请与你们现有的测量结果对照后再使用": "This measurement has been accepted on synthetic images only: compare it with your existing measurements before relying on it",
- "预览：新的测量，还没有在真实图像上验收": "Preview: a new measurement, not yet accepted on real images"
+ "预览：新的测量，还没有在真实图像上验收": "Preview: a new measurement, not yet accepted on real images",
+ "AI 规划服务": "Vexel AI planning service",
+ "AI 规划服务…": "Vexel AI planning service…",
+ "自动规划可以请 Vexel 的 AI 规划服务（云端大模型）帮忙选择测量方法和设置。只发送图像的统计数字和你写的目标；图片只有在你的组织允许、并在下面勾选时才发送。没有登录时，自动规划只用本机的离线规则。": "Automatic planning can ask the Vexel AI planning service (hosted language models) to help choose the measurement and its settings. Only the image's statistics and your goal are sent; pictures only when your organisation allows it and you tick the box below. Without signing in, planning uses the offline rules on this computer.",
+ "允许发送缩略图（组织也须允许）": "Allow sending a thumbnail (your organisation must allow it too)",
+ "服务地址": "Service address",
+ "邀请码": "Invite code",
+ "这台电脑的名称": "Name of this computer",
+ "登录": "Sign in",
+ "刷新额度": "Refresh quota",
+ "退出登录": "Sign out",
+ "请输入邀请码": "Enter the invite code",
+ "登录失败：{}": "Sign-in failed: {}",
+ "无法取得额度：{}": "Could not get the quota: {}",
+ "未登录：自动规划只用离线规则。向管理员索取邀请码后登录。": "Not signed in: planning uses the offline rules. Ask your administrator for an invite code.",
+ "已登录。": "Signed in.",
+ "已登录：{}（{}）<br>今天还可以规划 {} 次，剩余 {} 个 token；本组织本月预算还剩 ${}<br>组织允许发送缩略图": "Signed in: {} ({})<br>{} plans and {} tokens left today; ${} left of the organisation's budget this month<br>Thumbnails allowed by the organisation",
+ "已登录：{}（{}）<br>今天还可以规划 {} 次，剩余 {} 个 token；本组织本月预算还剩 ${}<br>组织不允许发送图片：只发送数字": "Signed in: {} ({})<br>{} plans and {} tokens left today; ${} left of the organisation's budget this month<br>Pictures not allowed by the organisation: numbers only"
 }

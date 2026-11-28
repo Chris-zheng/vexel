@@ -1,0 +1,21 @@
+[Unit]
+Description=Vexel AI gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=vexel
+Group=vexel
+EnvironmentFile=/etc/vexel/gateway.env
+ExecStart=/opt/vexel/bin/vexel gateway serve --host 127.0.0.1 --port 8780
+Restart=on-failure
+RestartSec=5
+# hardening: the gateway only needs its database folder
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/vexel
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

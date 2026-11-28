@@ -1,5 +1,12 @@
 # 更新记录
 
+## Unreleased — 0.8 phase 3: the Vexel AI gateway and the agent loop
+
+- New `vexel.gateway` (extra `gateway`; runs on Vexel's server, default Singapore): the only way the desktop reaches hosted models. It holds the DeepSeek and Gemini keys; organisations with a region (cn: DeepSeek first, intl: Gemini first), a monthly budget and whether pictures may be sent; invite codes; per-user tokens (stored hashed). One kind of request: plan an image's measurement. Goals and every string in the context pass a rule filter (abuse, injection, exfiltration, off-topic; no tokens spent on refusals); the prompt, answer schema (with an out-of-scope flag) and allowlist are built on the server from Vexel's recipe definitions; answers are validated, settings outside the allowlist dropped, notes capped at 160 characters. Limits: input ≤ 3000 tokens, output ≤ 600, ≤ 4 model calls per plan, 30 plans and 50k tokens per user per day, the organisation's budget; real token counts from the providers in the ledger (no goals, answers or pictures there); identical requests answered from a week's cache. HTTP API with four endpoints; `vexel gateway serve|org|invite|users|revoke|usage`; deployment files in `deploy/gateway/` (systemd, Caddy, environment template).
+- Desktop: 帮助 → AI 规划服务… signs in with an invite code (token kept in the configuration, readable by the user only; diagnostics record whether signed in, never the token). Signed in, planning goes gateway → offline rules; refusals, used-up limits and no connection fall back with the reason shown.
+- Agent loop: after a failed trial the model revises up to 3 times (SEM and droplets), stopping when a trial passes or it proposes nothing new.
+- Red-team set grown to 186 prompts in three sets; `tests/benchmarks/redteam_eval.py` scores the rule filter alone or the whole chain through a gateway. The rule filter alone: 119/123 refusals, 1/63 false refusals; on the set written after tuning 18/22 refusals, 1/11 false refusals (the model's out-of-scope flag is the second layer; the whole chain needs real keys to measure).
+
 ## Unreleased — 0.8 feature audit applied (confirmed)
 
 - Fluorescence calling is a preview (not yet checked on real fluorescence data): hidden unless `VEXEL_PREVIEW=1` or a plan or setting turned it on, then labelled.

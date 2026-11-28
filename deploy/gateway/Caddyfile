@@ -1,0 +1,12 @@
+# Replace ai.example.com with the gateway's domain; Caddy gets and renews the TLS certificate.
+ai.example.com {
+	encode gzip
+	request_body {
+		max_size 2MB
+	}
+	reverse_proxy 127.0.0.1:8780
+	log {
+		output file /var/log/caddy/vexel-gateway.log
+		# no request bodies are logged: goals and pictures stay out of the logs
+	}
+}

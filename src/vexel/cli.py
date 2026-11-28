@@ -885,6 +885,59 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_gateway(args: argparse.Namespace) -> int:
+    """The AI gateway (server side): serve it, and manage organisations, invites and usage."""
+    from vexel.gateway.store import Store
+
+    if args.gateway_command == "serve":
+        try:
+            import fastapi  # noqa: F401
+            import uvicorn  # noqa: F401
+        except ImportError:
+            print("the gateway needs the 'gateway' extra: uv sync --extra gateway")
+            return 2
+        from vexel.gateway.app import serve
+
+        serve(args.host, args.port)
+        return 0
+    store = Store()
+    if args.gateway_command == "org":
+        if args.action == "add":
+            o = store.add_org(args.name, region=args.region or "intl", monthly_budget_usd=50.0 if args.budget is None else args.budget,
+                              allow_images=bool(args.images), daily_requests=args.daily_requests or 30,
+                              daily_tokens=args.daily_tokens or 50_000)  # fmt: skip
+        elif args.action == "set":
+            fields = {k: v for k, v in (("region", args.region), ("monthly_budget_usd", args.budget), ("daily_requests", args.daily_requests),
+                                        ("daily_tokens", args.daily_tokens)) if v is not None}  # fmt: skip
+            if args.images is not None:
+                fields["allow_images"] = args.images
+            o = store.set_org(args.name, **fields)
+        else:
+            for o in store.orgs():
+                print(f"{o.name:24s} region {o.region:4s} budget ${o.monthly_budget_usd:g}/month  images {'yes' if o.allow_images else 'no'}  "
+                      f"per user/day {o.daily_requests} requests, {o.daily_tokens} tokens{'' if o.active else '  (inactive)'}")  # fmt: skip
+            return 0
+        print(f"{o.name}: region {o.region}, budget ${o.monthly_budget_usd:g}/month, images {'allowed' if o.allow_images else 'not allowed'}, "
+              f"per user/day {o.daily_requests} requests and {o.daily_tokens} tokens")  # fmt: skip
+        return 0
+    if args.gateway_command == "invite":
+        code = store.new_invite(args.org, uses=args.uses, days=args.days)
+        print(f"invite code for {args.org} ({args.uses} uses, {args.days:g} days): {code}\n(shown once: give it to the testers of this organisation)")
+        return 0
+    if args.gateway_command == "users":
+        for u in store.users(args.org):
+            print(f"{u['id']:5d}  {u['label']:30s} {'active' if u['active'] else 'revoked'}")
+        return 0
+    if args.gateway_command == "revoke":
+        store.revoke(args.user_id)
+        print(f"user {args.user_id}: token revoked")
+        return 0
+    if args.gateway_command == "usage":
+        print(json.dumps(store.usage_summary(args.org, args.days), indent=2, ensure_ascii=False))
+        return 0
+    return 2
+
+
 def cmd_sem_report(args: argparse.Namespace) -> int:
     """An HTML report of one image's record."""
     from vexel.packs.sem import calibrate as semcal
@@ -1210,6 +1263,32 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", default="127.0.0.1", help="address to listen on (default 127.0.0.1: this computer only)")
     p.add_argument("--port", type=int, default=8765)
     p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("gateway", help="the AI gateway (server side): serve it; organisations, invites, usage (needs the 'gateway' extra)")
+    gsub = p.add_subparsers(dest="gateway_command", required=True)
+    g = gsub.add_parser("serve", help="run the gateway's HTTP API (put a TLS proxy in front of it)")
+    g.add_argument("--host", default="127.0.0.1")
+    g.add_argument("--port", type=int, default=8780)
+    g = gsub.add_parser("org", help="add, change or list organisations")
+    g.add_argument("action", choices=["add", "set", "list"])
+    g.add_argument("name", nargs="?", default="")
+    g.add_argument("--region", choices=["cn", "intl"], help="cn: DeepSeek first; intl: Gemini first")
+    g.add_argument("--budget", type=float, help="monthly budget in USD")
+    g.add_argument("--images", action=argparse.BooleanOptionalAction, default=None, help="may pictures reach a model (default: no)")
+    g.add_argument("--daily-requests", type=int)
+    g.add_argument("--daily-tokens", type=int)
+    g = gsub.add_parser("invite", help="an invite code for an organisation (each use signs in one computer)")
+    g.add_argument("org")
+    g.add_argument("--uses", type=int, default=10)
+    g.add_argument("--days", type=float, default=30)
+    g = gsub.add_parser("users", help="the users of an organisation")
+    g.add_argument("org")
+    g = gsub.add_parser("revoke", help="revoke a user's token")
+    g.add_argument("user_id", type=int)
+    g = gsub.add_parser("usage", help="usage and cost of an organisation")
+    g.add_argument("org")
+    g.add_argument("--days", type=int, default=30)
+    p.set_defaults(func=cmd_gateway)
 
     p = sub.add_parser("brush", help="train a pixel classifier by painting strokes; writes a recipe that uses it")
     p.add_argument("input", help="data to paint on")

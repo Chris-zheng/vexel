@@ -63,6 +63,10 @@ def environment() -> dict[str, Any]:
                               "api_key_env": env_name or None, "api_key_set": bool(env_name and os.environ.get(env_name))}  # fmt: skip
             if name in models.COMPATIBLE and tier.get("base_url") != models.COMPATIBLE[name]["base_url"]:
                 planning[name]["base_url"] = "custom"
+    from urllib.parse import urlparse
+
+    gw = cfg.get("gateway") or {}
+    planning["gateway"] = {"signed_in": bool(gw.get("token")), "host": urlparse(gw.get("url", "")).hostname}  # never the token
     out["planning_models"] = planning
     out["vexel_home_set"] = "VEXEL_HOME" in os.environ
     from vexel.policy import load_policy

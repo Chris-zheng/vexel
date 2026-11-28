@@ -18,3 +18,7 @@ web/.env.*
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+
+# AI gateway secrets (deploy/gateway/gateway.env.example is the template)
+gateway.env
+.env

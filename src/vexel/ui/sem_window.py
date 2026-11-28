@@ -446,10 +446,18 @@ class SemWindow(QMainWindow):
         m.addAction(self.fit_act)
         m.addAction(self.processing_act)
         m = menus.addMenu(tr("帮助"))
+        self.ai_act = m.addAction(tr("AI 规划服务…"))
+        self.ai_act.triggered.connect(self.open_ai_service)
         m.addAction(self.bug_act)
         m.addAction(self.lang_act)
         self.addAction(self.redo_act)
         self.addAction(self.fit_act)
+
+    def open_ai_service(self) -> None:
+        from vexel.ui.ai_service import AiServiceDialog
+
+        self.ai_dialog = AiServiceDialog(self)
+        self.ai_dialog.show()
 
     def _tool_chosen(self, act: QAction) -> None:
         """The "更多工具" button names the tool in use when it is one of its tools."""

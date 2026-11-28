@@ -180,7 +180,8 @@ class MainWindow(QMainWindow):
         help_menu.addAction("打开示例数据", self.open_sample)
         from vexel.ui.launcher import preview_enabled
 
-        if preview_enabled():  # 0.8: cloud models only through the Vexel gateway (phase 3); the offline rules until then
+        help_menu.addAction("AI 规划服务…", self.open_ai_service)
+        if preview_enabled():  # 0.8: hosted models through the Vexel AI service; the old self-keyed settings are a preview
             help_menu.addAction("规划模型设置…", self.open_model_settings)
         help_menu.addSeparator()
         help_menu.addAction("导出诊断包…", lambda: self.export_bugreport())
@@ -211,7 +212,7 @@ class MainWindow(QMainWindow):
         self.goal_edit = QLineEdit()
         self.goal_edit.setPlaceholderText("想测什么？例如：数每个液滴里的细胞")
         self.plan_btn = QPushButton("自动规划…")
-        self.plan_btn.setToolTip("看一遍数据，起草设置，在前几百帧上试运行，再交给你确认（离线规则，不联网）")
+        self.plan_btn.setToolTip("看一遍数据，起草设置，在前几百帧上试运行，再交给你确认。登录 AI 规划服务（帮助 → AI 规划服务）后会请云端模型帮忙；否则只用离线规则")
         self.plan_btn.clicked.connect(self.auto_plan)
         plan_row.addWidget(self.goal_edit, 1)
         plan_row.addWidget(self.plan_btn)
@@ -1086,6 +1087,12 @@ class MainWindow(QMainWindow):
         return out
 
     # -- automatic planning --------------------------------------------------------------
+
+    def open_ai_service(self) -> None:
+        from vexel.ui.ai_service import AiServiceDialog
+
+        self.ai_dialog = AiServiceDialog(self)
+        self.ai_dialog.show()
 
     def open_model_settings(self) -> None:
         from vexel.ui.model_settings import ModelSettingsDialog

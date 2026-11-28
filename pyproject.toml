@@ -44,6 +44,12 @@ web = [
     "fastapi>=0.115",
     "uvicorn>=0.32",
 ]
+# the AI gateway (runs on Vexel's server, not on testers' computers)
+gateway = [
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+    "httpx>=0.27",
+]
 
 [dependency-groups]
 dev = ["pytest>=8", "httpx>=0.27"]  # httpx: FastAPI's test client

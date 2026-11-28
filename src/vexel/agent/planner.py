@@ -380,22 +380,28 @@ def make_plan(
         _apply(plan, proposal, label)
     if trial:
         refine(plan, volume, frames=frames)
-        if plan.status in ("check", "needs_user") and plan.planner != "rules" and plan.attempts:
+        # the agent loop: the model sees the trial and revises, up to MAX_REVISIONS times, until a
+        # trial passes or it proposes nothing new; the best attempt is kept
+        for round_ in range(1, models.MAX_REVISIONS + 1):
+            if plan.status not in ("check", "needs_user") or plan.planner == "rules" or not plan.attempts:
+                break
             second, more = models.propose(_context("revise", plan, fp, goal_text), None, chain)
             plan.skipped += [s for s in more if s not in plan.skipped]
-            if second.tier != "rules":
-                before = plan.overrides.copy()
-                if _apply(plan, second, f"模型 {second.model or second.tier} 看过试运行后"):
-                    metrics, violations, failure = _trial(Recipe.load(plan.base).with_overrides(plan.overrides), volume, frames)
-                    attempt = Attempt(plan.overrides.copy(), "模型建议的调整", metrics, violations, failure)
-                    plan.attempts.append(attempt)
-                    best = min(plan.attempts, key=lambda a: (a.problems, plan.attempts.index(a)))
-                    if best is attempt:
-                        plan.status = "ready" if not attempt.problems[0] else ("check" if not attempt.failure else "needs_user")
-                        plan.reasons.append("采用模型建议后试运行" + ("通过全部质控规则" if plan.status == "ready" else "有改善"))
-                    else:
-                        plan.overrides = before
-                        plan.reasons.append("模型建议的调整没有改善试运行，未采用")
+            if second.tier == "rules":
+                break
+            before = plan.overrides.copy()
+            if not _apply(plan, second, f"模型 {second.model or second.tier} 看过第 {round_} 次试运行后"):
+                break
+            metrics, violations, failure = _trial(Recipe.load(plan.base).with_overrides(plan.overrides), volume, frames)
+            attempt = Attempt(plan.overrides.copy(), f"模型建议的调整（第 {round_} 轮）", metrics, violations, failure)
+            plan.attempts.append(attempt)
+            best = min(plan.attempts, key=lambda a: (a.problems, plan.attempts.index(a)))
+            if best is attempt:
+                plan.status = "ready" if not attempt.problems[0] else ("check" if not attempt.failure else "needs_user")
+                plan.reasons.append(f"第 {round_} 轮：采用模型建议后试运行" + ("通过全部质控规则" if plan.status == "ready" else "有改善"))
+            else:
+                plan.overrides = before
+                plan.reasons.append(f"第 {round_} 轮：模型建议的调整没有改善试运行，未采用")
     plan._fp = fp  # type: ignore[attr-defined]  # kept for remembering the outcome
     return plan
 

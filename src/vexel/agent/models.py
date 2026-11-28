@@ -50,13 +50,16 @@ COMPATIBLE: dict[str, dict[str, Any]] = {
                "api_key_env": "GEMINI_API_KEY"},  # fmt: skip
     "custom": {"label": "其他兼容服务（自定义）", "base_url": "", "model": "", "api_key_env": ""},
 }
-PROVIDERS = ["claude", *COMPATIBLE, "local", "rules"]
-LABELS = {"claude": "Anthropic Claude", **{k: v["label"] for k, v in COMPATIBLE.items()}, "local": "本地模型（Ollama）", "rules": "离线规则引擎"}
+PROVIDERS = ["gateway", "claude", *COMPATIBLE, "local", "rules"]
+LABELS = {"gateway": "Vexel AI 规划服务", "claude": "Anthropic Claude", **{k: v["label"] for k, v in COMPATIBLE.items()}, "local": "本地模型（Ollama）",
+          "rules": "离线规则引擎"}  # fmt: skip
+GATEWAY_URL = os.environ.get("VEXEL_GATEWAY_URL", "https://ai.vexel.example")  # the service's address (set when it is deployed)
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "order": ["claude", "local", "rules"],
     "claude": {"model": "claude-opus-5-5", "effort": "medium", "send_images": False, "timeout_s": 120},
     "local": {"url": "http://localhost:11434", "model": "", "send_images": False, "timeout_s": 120},
+    "gateway": {"url": GATEWAY_URL, "token": "", "send_images": False, "timeout_s": 60},
     **{k: {**{x: y for x, y in v.items() if x != "label"}, "send_images": False, "timeout_s": 120} for k, v in COMPATIBLE.items()},
 }
 
@@ -76,6 +79,9 @@ ALLOWED: dict[str, tuple] = {
     "positivity.method": ("enum", ["auto", "otsu", "outlier", "fixed"]),
     "positivity.threshold": ("float", 0.0, 1e9),
 }
+
+
+MAX_REVISIONS = 3  # the agent loop: revisions after trial runs (with the draft, at most 4 model calls per plan)
 
 
 class ModelUnavailable(RuntimeError):
@@ -100,6 +106,10 @@ def save_config(cfg: dict[str, Any]) -> Path:
     data["models"] = {k: v for k, v in cfg.items()}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)  # it may hold the Vexel AI service's sign-in token
+    except OSError:
+        pass
     return path
 
 
@@ -110,14 +120,14 @@ def load_config(policy: bool = True) -> dict[str, Any]:
     path = home() / "config.json"
     user = json.loads(path.read_text(encoding="utf-8")).get("models", {}) if path.exists() else {}
     cfg = {**DEFAULT_CONFIG, **{k: v for k, v in user.items() if k == "order"}}
-    for tier in ("claude", "local", *COMPATIBLE):
+    for tier in ("gateway", "claude", "local", *COMPATIBLE):
         cfg[tier] = {**DEFAULT_CONFIG[tier], **user.get(tier, {})}
     if os.environ.get("VEXEL_OFFLINE", "").strip() not in ("", "0", "false"):
         cfg["order"] = ["rules"]
     elif policy and os.environ.get("VEXEL_PREVIEW", "").strip() in ("", "0", "false"):
-        # 0.8: cloud models are a preview until they go through the Vexel gateway (plan phase 3); the
-        # configured order applies with VEXEL_PREVIEW=1 (or an explicit `vexel plan --model ...`)
-        cfg["order"] = ["rules"]
+        # 0.8: hosted models only through the Vexel gateway (signed in with an invite code); the
+        # other tiers are a preview (VEXEL_PREVIEW=1, or an explicit `vexel plan --model ...`)
+        cfg["order"] = ["gateway", "rules"] if cfg["gateway"].get("token") else ["rules"]
     return apply_policy(cfg) if policy else cfg
 
 
@@ -125,6 +135,8 @@ def tier_host(name: str, cfg: dict[str, Any]) -> str | None:
     """The server a tier sends requests to (None: the offline rules engine)."""
     if name == "rules":
         return None
+    if name == "gateway":
+        return cfg.get("gateway", {}).get("url", "")
     if name == "claude":
         return os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     tier = cfg.get(name, {})
@@ -139,7 +151,7 @@ def apply_policy(cfg: dict[str, Any]) -> dict[str, Any]:
     if policy.offline:
         cfg["order"] = [n for n in cfg["order"] if n == "rules" or policy.host_allowed(tier_host(n, cfg) or "")] or ["rules"]
     if not policy.allow_images:
-        for name in ("claude", "local", *COMPATIBLE):
+        for name in ("gateway", "claude", "local", *COMPATIBLE):
             cfg[name] = {**cfg[name], "send_images": False}
     return cfg
 
@@ -366,6 +378,82 @@ class ClaudeTier:
         return _parse(text, self.name, response.model)
 
 
+class GatewayTier:
+    """The Vexel AI gateway: hosted models (DeepSeek, Gemini) behind Vexel's own service, which
+    holds the keys, the limits and the rules (``vexel.gateway``). Signed in with an invite code;
+    the token is kept in the configuration. A refusal, a used-up limit or no connection hands
+    over to the next tier (the offline rules), with the reason."""
+
+    name = "gateway"
+
+    def __init__(self, cfg: dict[str, Any]) -> None:
+        self.cfg = cfg
+
+    def available(self) -> tuple[bool, str]:
+        if not self.cfg.get("url") or not self.cfg.get("token"):
+            return False, "not signed in to the Vexel AI service"
+        return True, ""
+
+    @staticmethod
+    def plan_id(context: dict[str, Any]) -> str:
+        """The same for every step of one plan (task, goal, the image's numbers, today), so the
+        service can count a plan's revisions."""
+        import hashlib
+        import time as _t
+
+        key = {k: context.get(k) for k in ("task", "goal", "image", "fingerprint")}
+        return hashlib.sha256((json.dumps(key, sort_keys=True, default=str) + _t.strftime("%Y-%m-%d")).encode()).hexdigest()[:32]
+
+    def propose(self, context: dict[str, Any], image: bytes | None = None) -> Proposal:
+        import urllib.error
+        import urllib.request
+
+        body: dict[str, Any] = {"plan_id": self.plan_id(context), "context": context}
+        if image is not None and self.cfg.get("send_images"):
+            body["image"] = base64.standard_b64encode(image).decode()
+        req = urllib.request.Request(self.cfg["url"].rstrip("/") + "/v1/plan", data=json.dumps(body, default=str).encode(),
+                                     headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.cfg['token']}"})  # fmt: skip
+        try:
+            with urllib.request.urlopen(req, timeout=float(self.cfg.get("timeout_s", 60))) as resp:
+                data = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            try:
+                msg = json.loads(e.read().decode()).get("message") or f"HTTP {e.code}"
+            except (ValueError, OSError):
+                msg = f"HTTP {e.code}"
+            raise ModelUnavailable({401: "sign-in expired or revoked"}.get(e.code, msg)) from e
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+            raise ModelUnavailable("Vexel AI service not reachable") from e
+        a = data.get("answer") or {}
+        settings = {s["key"]: s["value"] for s in a.get("settings", []) if isinstance(s, dict) and "key" in s}
+        notes = [str(n) for n in a.get("notes", [])] + [f"{s['key']}：{s.get('reason', '')}" for s in a.get("settings", []) if isinstance(s, dict)]
+        notes += [str(n) for n in data.get("notes", []) if not str(n).startswith("skipped")]
+        model = f"{data.get('provider', '')}/{data.get('model', '')}" + ("（缓存）" if data.get("cached") else "")
+        return Proposal(a.get("cells"), a.get("fluorescence"), settings, notes, "gateway", model, a.get("recipe"))
+
+
+def gateway_request(cfg: dict[str, Any], path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A call to the gateway outside planning (sign in, quota); errors as ``ModelUnavailable``."""
+    import urllib.error
+    import urllib.request
+
+    headers = {"Content-Type": "application/json"}
+    if cfg.get("token"):
+        headers["Authorization"] = f"Bearer {cfg['token']}"
+    req = urllib.request.Request(cfg["url"].rstrip("/") + path, data=None if body is None else json.dumps(body).encode(), headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=float(cfg.get("timeout_s", 60))) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read().decode()).get("error") or f"HTTP {e.code}"
+        except (ValueError, OSError):
+            msg = f"HTTP {e.code}"
+        raise ModelUnavailable(msg) from e
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+        raise ModelUnavailable("Vexel AI service not reachable") from e
+
+
 class LocalTier:
     """A local model served by Ollama (``/api/chat``, JSON-schema constrained output)."""
 
@@ -463,7 +551,8 @@ def _host_of(tier: Any) -> str | None:
 
 def tiers(cfg: dict[str, Any] | None = None) -> list[Any]:
     cfg = cfg or load_config()
-    make: dict[str, Any] = {"claude": lambda: ClaudeTier(cfg["claude"]), "local": lambda: LocalTier(cfg["local"]), "rules": RulesTier}
+    make: dict[str, Any] = {"gateway": lambda: GatewayTier(cfg["gateway"]), "claude": lambda: ClaudeTier(cfg["claude"]),
+                            "local": lambda: LocalTier(cfg["local"]), "rules": RulesTier}  # fmt: skip
     for name in COMPATIBLE:
         make[name] = lambda name=name: CompatibleTier(name, cfg[name])
     out = [make[name]() for name in cfg["order"] if name in make]

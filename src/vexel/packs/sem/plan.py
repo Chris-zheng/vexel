@@ -437,12 +437,18 @@ def make_plan(image: np.ndarray, *, cal: Any = None, goal: str = "", scale: Any 
             _apply_proposal(plan, proposal, f"模型 {proposal.model or proposal.tier} ")
     if trial_run and plan.recipe:
         trial(plan, image, scale or Scale(), crop, base_steps)
-        if models and plan.status != "ready" and plan.planner != "rules":
+        if models and plan.planner != "rules":
             from vexel.agent import models as M
 
-            second, more = M.propose(_context("revise", plan), None, chain)
-            plan.skipped += [s for s in more if s not in plan.skipped]
-            if second.tier != "rules" and _apply_proposal(plan, second, f"模型 {second.model or second.tier} 看过试运行后"):
+            # the agent loop: the model sees the trial and revises, up to MAX_REVISIONS times,
+            # until a trial passes or it proposes nothing new
+            for round_ in range(1, M.MAX_REVISIONS + 1):
+                if plan.status == "ready":
+                    break
+                second, more = M.propose(_context("revise", plan), None, chain)
+                plan.skipped += [s for s in more if s not in plan.skipped]
+                if second.tier == "rules" or not _apply_proposal(plan, second, f"模型 {second.model or second.tier} 看过第 {round_} 次试运行后"):
+                    break
                 before = list(plan.attempts)
                 plan.attempts = []
                 trial(plan, image, scale or Scale(), crop, base_steps, rounds=1)

@@ -48,9 +48,9 @@ jobs:
       - name: Lock file matches pyproject.toml
         run: uv lock --check
       - name: Install
-        run: uv sync --locked --extra agent --extra sem --extra web
+        run: uv sync --locked --extra agent --extra sem --extra web --extra gateway
       - name: Tests
-        run: uv run --locked --extra agent --extra sem --extra web pytest -q --durations=10
+        run: uv run --locked --extra agent --extra sem --extra web --extra gateway pytest -q --durations=10
 
   web:
     name: web workbench (type check, tests, build)

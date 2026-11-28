@@ -1421,6 +1421,11 @@ agent = [
     { name = "anthropic" },
     { name = "mcp" },
 ]
+gateway = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "uvicorn" },
+]
 sem = [
     { name = "onnxruntime", marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
     { name = "opencv-python-headless", marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
@@ -1441,7 +1446,9 @@ dev = [
 requires-dist = [
     { name = "anthropic", marker = "extra == 'agent'", specifier = ">=2.8" },
     { name = "dask", extras = ["array"], specifier = ">=2024.8" },
+    { name = "fastapi", marker = "extra == 'gateway'", specifier = ">=0.115" },
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.115" },
+    { name = "httpx", marker = "extra == 'gateway'", specifier = ">=0.27" },
     { name = "imagecodecs", specifier = ">=2024.9" },
     { name = "imageio", extras = ["pyav"], specifier = ">=2.36" },
     { name = "laptrack", specifier = ">=0.16" },
@@ -1459,10 +1466,11 @@ requires-dist = [
     { name = "scikit-learn", specifier = ">=1.5" },
     { name = "scipy", specifier = ">=1.13" },
     { name = "tifffile", specifier = ">=2025.5.10" },
+    { name = "uvicorn", marker = "extra == 'gateway'", specifier = ">=0.32" },
     { name = "uvicorn", marker = "extra == 'web'", specifier = ">=0.32" },
     { name = "zarr", specifier = ">=3.0" },
 ]
-provides-extras = ["agent", "sem", "web"]
+provides-extras = ["agent", "sem", "web", "gateway"]
 
 [package.metadata.requires-dev]
 dev = [
