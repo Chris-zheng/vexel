@@ -1,5 +1,12 @@
 # 更新记录
 
+## Unreleased — 0.8 feature audit applied (confirmed)
+
+- Fluorescence calling is a preview (not yet checked on real fluorescence data): hidden unless `VEXEL_PREVIEW=1` or a plan or setting turned it on, then labelled.
+- The nested-regions and traces measurements are previews: listed only with `VEXEL_PREVIEW=1`; records that contain them still open and recompute.
+- Cloud planning models are a preview until the Vexel gateway: the desktop plans with the offline rules; "规划模型设置" shows with `VEXEL_PREVIEW=1`; `vexel plan --model …` still chooses one explicitly. Diagnostics record both the configured and the in-force order.
+- Results of measurements accepted on synthetic images only (lines, holes, layers, profile, tip, pores, fibres) say so under the numbers.
+
 ## Unreleased — 0.8 phase 2: stability
 
 - Safety net (`vexel.ui.crash`): an uncaught error in the desktop app is logged to `~/.vexel/logs/` (paths shortened to file names, no image data) and shown once, instead of a button that silently does nothing; diagnostics bundles include the latest logs. Tests now fail when an error escapes a Qt signal handler (they used to pass).

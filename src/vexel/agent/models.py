@@ -104,13 +104,19 @@ def save_config(cfg: dict[str, Any]) -> Path:
 
 
 def load_config(policy: bool = True) -> dict[str, Any]:
-    """The model settings; with ``policy`` (default) restricted by the organisation policy."""
+    """The model settings; with ``policy`` (default) the ones in force: restricted by the
+    organisation policy, and to the offline rules unless ``VEXEL_PREVIEW`` is set (0.8). Without
+    it, the settings as configured."""
     path = home() / "config.json"
     user = json.loads(path.read_text(encoding="utf-8")).get("models", {}) if path.exists() else {}
     cfg = {**DEFAULT_CONFIG, **{k: v for k, v in user.items() if k == "order"}}
     for tier in ("claude", "local", *COMPATIBLE):
         cfg[tier] = {**DEFAULT_CONFIG[tier], **user.get(tier, {})}
     if os.environ.get("VEXEL_OFFLINE", "").strip() not in ("", "0", "false"):
+        cfg["order"] = ["rules"]
+    elif policy and os.environ.get("VEXEL_PREVIEW", "").strip() in ("", "0", "false"):
+        # 0.8: cloud models are a preview until they go through the Vexel gateway (plan phase 3); the
+        # configured order applies with VEXEL_PREVIEW=1 (or an explicit `vexel plan --model ...`)
         cfg["order"] = ["rules"]
     return apply_policy(cfg) if policy else cfg
 

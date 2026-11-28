@@ -32,6 +32,28 @@ def fps(droplet_dataset, cells_dataset, fluo_dataset):
     return vols, {k: probe(v) for k, v in vols.items()}
 
 
+
+@pytest.fixture(autouse=True)
+def _preview(monkeypatch):
+    """These tests exercise the configured language-model tiers, a preview in 0.8."""
+    monkeypatch.setenv("VEXEL_PREVIEW", "1")
+
+
+def test_without_preview_only_the_offline_rules_plan(monkeypatch, tmp_path):
+    """0.8 feature audit: cloud models only through the gateway (phase 3); until then the
+    desktop plans with the offline rules whatever the configuration says."""
+    import json
+
+    from vexel.agent import models
+
+    monkeypatch.delenv("VEXEL_PREVIEW", raising=False)
+    monkeypatch.setenv("VEXEL_HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    (tmp_path / "home" / "config.json").write_text(json.dumps({"models": {"order": ["deepseek", "claude", "rules"]}}), encoding="utf-8")
+    assert models.load_config()["order"] == ["rules"] and [t.name for t in models.tiers()] == ["rules"]
+    monkeypatch.setenv("VEXEL_PREVIEW", "1")
+    assert models.load_config()["order"] == ["deepseek", "claude", "rules"]
+
 def test_probe_reads_motion_objects_and_channel_roles(fps):
     _, fp = fps
     d = fp["plain"].channels[0]

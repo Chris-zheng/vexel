@@ -829,5 +829,8 @@
  "无法打开": "Cannot open",
  "无法读取这个文件：\n{}": "This file cannot be read:\n{}",
  "：计算中…": ": computing…",
- "自动测量计算中…（大图需要一些时间，窗口可以继续使用）": "Computing the automatic measurements… (large images take a while; the window stays usable)"
+ "自动测量计算中…（大图需要一些时间，窗口可以继续使用）": "Computing the automatic measurements… (large images take a while; the window stays usable)",
+ "（预览）": " (preview)",
+ "这种测量只在合成图像上验收过：请与你们现有的测量结果对照后再使用": "This measurement has been accepted on synthetic images only: compare it with your existing measurements before relying on it",
+ "预览：新的测量，还没有在真实图像上验收": "Preview: a new measurement, not yet accepted on real images"
 }

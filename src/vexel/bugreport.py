@@ -52,8 +52,9 @@ def environment() -> dict[str, Any]:
         out["qt"] = {"binding": qtpy.API_NAME, "version": QtCore.qVersion()}
     except Exception as e:  # no GUI libraries: still a useful report
         out["qt"] = {"error": type(e).__name__}
-    cfg = models.load_config()
-    planning = {"order": cfg["order"], "offline": os.environ.get("VEXEL_OFFLINE", "") not in ("", "0", "false")}
+    cfg = models.load_config(policy=False)  # as configured; the order in force is recorded beside it
+    planning = {"order": models.load_config()["order"], "configured_order": cfg["order"],
+                "offline": os.environ.get("VEXEL_OFFLINE", "") not in ("", "0", "false")}  # fmt: skip
     for name in cfg["order"]:
         tier = cfg.get(name)
         if isinstance(tier, dict):

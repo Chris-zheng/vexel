@@ -486,6 +486,7 @@ def test_model_settings_dialog_saves_the_choice(app, tmp_path, monkeypatch):
     from vexel.ui.model_settings import ModelSettingsDialog
 
     monkeypatch.setenv("VEXEL_HOME", str(tmp_path))
+    monkeypatch.setenv("VEXEL_PREVIEW", "1")  # 0.8: the settings dialog and cloud tiers are a preview
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("VEXEL_OFFLINE", raising=False)
     dialog = ModelSettingsDialog()
@@ -1362,3 +1363,44 @@ def test_sem_large_image_measures_in_the_background_and_reuses_results(app, tmp_
     w.run_analysis(recipe="holes", region=None)
     assert calls.count("particles") == 1 and calls.count("holes") == 1  # the first one was not redone
     _dispose(w)
+
+
+def test_feature_audit_previews_are_hidden(app, tmp_path, monkeypatch):
+    """0.8 feature audit (confirmed): fluorescence calling, the nested and traces measurements and
+    the planning-model settings show only with VEXEL_PREVIEW=1 (fluorescence also when a plan
+    turned it on); results of synthetic-only measurements say so."""
+    from qtpy.QtWidgets import QMenu
+
+    from vexel.synthetic.sem import write_sem
+    from vexel.ui.main_window import MainWindow
+    from vexel.ui.sem_window import SemWindow
+
+    monkeypatch.setenv("VEXEL_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("VEXEL_PREVIEW", raising=False)
+    w = MainWindow()
+    items = [a.text() for m in w.menuBar().findChildren(QMenu) for a in m.actions()]
+    assert not any("规划模型设置" in t for t in items)
+    w.path = tmp_path  # data loaded: the settings show
+    w._set_ready(True)
+    w.show()
+    app.processEvents()
+    assert not w.fluo_check.isVisible()
+    w.fluo_check.setChecked(True)  # e.g. a plan for two-channel data
+    app.processEvents()
+    assert w.fluo_check.isVisible() and "预览" in w.fluo_check.text()
+    _dispose(w)
+    s = SemWindow()
+    listed = [s.recipe.itemData(i) for i in range(s.recipe.count())]
+    assert "nested" not in listed and "traces" not in listed and "particles" in listed
+    p = tmp_path / "a.tif"
+    write_sem(p, "thermo", pixel_size=4e-9, rows=300, cols=400)
+    assert s.open_path(p, wait=True)
+    s.run_analysis(recipe="holes", region=None)
+    assert "合成图像" in s.auto_summary.text()
+    s.run_analysis(recipe="particles", region=None)
+    assert "合成图像" not in s.auto_summary.text()
+    _dispose(s)
+    monkeypatch.setenv("VEXEL_PREVIEW", "1")
+    s = SemWindow()
+    assert "nested" in [s.recipe.itemData(i) for i in range(s.recipe.count())]
+    _dispose(s)

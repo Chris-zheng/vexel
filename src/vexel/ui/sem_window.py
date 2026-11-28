@@ -63,6 +63,8 @@ STATE_COLOURS = {"confirmed": "#16a34a", "pending": "#d97706", "none": "#dc2626"
 TOOLS = [("pan", tr("选择"), "V"), ("line", tr("长度"), "L"), ("polyline", tr("折线"), "Shift+L"), ("polygon", tr("面积"), "A"), ("freehand", tr("自由画"), "F"),
          ("wand", tr("魔棒"), "W"), ("angle", tr("角度"), "G"), ("point", tr("计数"), "N"), ("circle", tr("圆"), "C"), ("ellipse", tr("椭圆"), "E"),
          ("profile", tr("线剖面"), "P")]  # fmt: skip
+PREVIEW_RECIPES = ("nested", "traces")  # listed only with VEXEL_PREVIEW=1 (0.8 feature audit)
+SYNTHETIC_ONLY = ("lines", "holes", "layers", "profile", "tip", "pores", "fibres")  # accepted on synthetic images only so far
 CORE_TOOLS = ("pan", "line", "polygon", "point")  # on the toolbar; the others under "更多工具"
 EDGE_METHODS = [("threshold", tr("阈值（50% 等）")), ("gradient", tr("最大梯度")), ("peak", tr("亮边峰值"))]
 TAB_CALIBRATION, TAB_PROCESSING, TAB_MEASURE, TAB_AUTO, TAB_3D = range(5)
@@ -684,7 +686,11 @@ class SemWindow(QMainWindow):
         v.addWidget(self.plan_card)
         v.addWidget(muted(tr("或手动选择：")))
         self.recipe = QComboBox()
+        from vexel.ui.launcher import preview_enabled
+
         for name, rec in RECIPES.items():
+            if name in PREVIEW_RECIPES and not preview_enabled():
+                continue  # 0.8: new, not yet checked on real images (VEXEL_PREVIEW=1 shows them)
             self.recipe.addItem(tr(rec.label), name)
         self.recipe.currentIndexChanged.connect(lambda _i: self._show_recipe())
         v.addWidget(self.recipe)
@@ -1670,6 +1676,8 @@ class SemWindow(QMainWindow):
         self._loading_params = True
         try:
             if recipe and recipe != self.recipe.currentData():
+                if self.recipe.findData(recipe) < 0 and recipe in RECIPES:  # a preview method in a record made with it
+                    self.recipe.addItem(tr(RECIPES[recipe].label) + tr("（预览）"), recipe)
                 self.recipe.setCurrentIndex(self.recipe.findData(recipe))
             for name, (prm, w) in self._auto_widgets.items():
                 v = params.get(name, prm.default)
@@ -2245,6 +2253,10 @@ class SemWindow(QMainWindow):
         else:
             lines = [f"<b>A{an.spec.id}</b>" + (tr(f"（区域 {an.extra.get('region')}）") if an.spec.region else tr("（整张图）"))]
             lines += [tr(f"{tr(lab)}：<b>{self._fmt(v, kind, unit, f)}</b>") for k, lab, v, kind in an.summary if v is not None]
+            if an.spec.recipe in SYNTHETIC_ONLY:
+                lines.append(f"<span style='color:#b45309'>{tr('这种测量只在合成图像上验收过：请与你们现有的测量结果对照后再使用')}</span>")
+            elif an.spec.recipe in PREVIEW_RECIPES:
+                lines.append(f"<span style='color:#b45309'>{tr('预览：新的测量，还没有在真实图像上验收')}</span>")
             self.auto_summary.setText("<br>".join(lines))
         self.auto_notes.setText("\n".join(f"• {tr(w)}" for w in an.warnings))
         self.auto_notes.setVisible(bool(an.warnings))
