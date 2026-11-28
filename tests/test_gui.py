@@ -1326,3 +1326,39 @@ def test_droplet_window_asks_only_for_data_first(window, droplet_dataset, app):
     assert window.open_path(droplet_dataset / "droplets.ome.tif")
     app.processEvents()
     assert window.settings_box.isVisible() and window.analyse_box.isVisible() and window.plan_box.isVisible()
+
+
+def test_sem_large_image_measures_in_the_background_and_reuses_results(app, tmp_path, monkeypatch):
+    """0.8 phase 2: adding a measurement does not redo the others; on a large image they are
+    computed off the window's thread (the list says "计算中…" meanwhile)."""
+    from qtpy.QtCore import QEventLoop, QTimer
+
+    from vexel.packs.sem import analysis as A
+    from vexel.synthetic.sem import write_sem
+    from vexel.ui import sem_window
+    from vexel.ui.sem_window import SemWindow
+
+    monkeypatch.setenv("VEXEL_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(sem_window, "BACKGROUND_PIXELS", 100_000)  # a small image counts as large here
+    calls = []
+    real = A.run
+    monkeypatch.setattr(A, "run", lambda spec, *a, **k: calls.append(spec.recipe) or real(spec, *a, **k))
+    p = tmp_path / "a.tif"
+    write_sem(p, "thermo", pixel_size=4e-9, rows=400, cols=500)
+    w = SemWindow()
+    assert w.open_path(p, wait=True)
+    w._sync = False
+    w.run_analysis(recipe="particles", region=None)
+    assert w.analyses[0].extra.get("pending") and "计算中" in w.auto_list.item(0).text()
+    loop = QEventLoop()
+    poll = QTimer()
+    poll.timeout.connect(lambda: loop.quit() if w._auto_thread is None else None)
+    poll.start(20)
+    QTimer.singleShot(60000, loop.quit)
+    loop.exec()
+    poll.stop()
+    assert not w.analyses[0].extra.get("pending") and w.analyses[0].value("particles") > 0
+    w._sync = True
+    w.run_analysis(recipe="holes", region=None)
+    assert calls.count("particles") == 1 and calls.count("holes") == 1  # the first one was not redone
+    _dispose(w)

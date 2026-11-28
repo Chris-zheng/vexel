@@ -128,9 +128,17 @@ def _too_large(shape: tuple[int, ...], path: Path) -> None:
                             "这通常是拼接的大图：请先裁出要测量的区域，或用 vexel convert 转成多分辨率格式查看")  # fmt: skip
 
 
+MIN_SIDE = 16  # px: smaller images (a row, a few pixels) cannot be measured
+
+
+class ImageTooSmall(ValueError):
+    pass
+
+
 def load_image(path: str | Path) -> np.ndarray:
     """The first image of the file as a 2-D array (colour averaged to grey), unscaled.
-    Refuses images over ``MAX_PIXELS`` (``ImageTooLarge``) before reading their pixels."""
+    Refuses images over ``MAX_PIXELS`` (``ImageTooLarge``) before reading their pixels, and
+    images under ``MIN_SIDE`` pixels on a side (``ImageTooSmall``)."""
     path = Path(path)
     if path.suffix.lower() in (".tif", ".tiff"):
         import tifffile
@@ -147,10 +155,16 @@ def load_image(path: str | Path) -> np.ndarray:
         _too_large(tuple(props.shape[:2]), path)
         img = iio.imread(path)
     img = np.asarray(img)
-    if img.ndim == 3 and img.shape[-1] in (3, 4):
-        img = img[..., :3].astype(np.float32).mean(-1)
-    while img.ndim > 2:
+    colour = img.ndim >= 3 and img.shape[-1] in (2, 3, 4) and img.shape[-2] > 4  # samples last: grey+alpha, RGB, RGBA
+    while img.ndim > (3 if colour else 2):  # frames, pages or slices first: the first one
         img = img[0]
+    if colour:
+        img = img[..., 0] if img.shape[-1] == 2 else img[..., :3].astype(np.float32).mean(-1)
+    if img.dtype == bool:  # a mask saved as an image: black and white
+        img = img.astype(np.uint8) * 255
+    if img.ndim != 2 or min(img.shape) < MIN_SIDE:
+        shape = "×".join(str(v) for v in img.shape[::-1]) or "0"
+        raise ImageTooSmall(f"{path.name}: {shape} 像素，小于 {MIN_SIDE}×{MIN_SIDE}：太小，无法测量")
     return img
 
 
@@ -175,8 +189,11 @@ def _read_bar(img: np.ndarray, bar: db.DataBar | None, cal: Calibration, *, use_
     if use_ocr:
         ok, why = ocr.available()
         if ok:
-            texts = ocr.read_text(img[top:], top=top)
-            cal.texts = [t.to_dict() for t in texts]
+            try:
+                texts = ocr.read_text(img[top:], top=top)
+                cal.texts = [t.to_dict() for t in texts]
+            except ocr.OcrUnavailable as e:  # an odd bar (e.g. a thin strip): no reading, the rest still works
+                cal.warnings.append(f"信息栏文字识别失败：{e}")
         else:
             cal.warnings.append(why)
     labels = ocr.scale_labels(texts)

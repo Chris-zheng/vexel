@@ -35,6 +35,8 @@ from typing import Any
 
 import numpy as np
 
+from vexel.packs.sem.process import IMAGE_DTYPE, edt
+
 from vexel.packs.sem.objects import _mid_threshold
 
 
@@ -45,7 +47,7 @@ def _segment(s: np.ndarray, mask: np.ndarray | None) -> tuple[np.ndarray, float]
     t, _, _ = _mid_threshold(vals)
     for _ in range(2):  # halfway between the two plateaus, not the class means: from pixels well inside each
         fg = s > t
-        din, dout = ndi.distance_transform_edt(fg), ndi.distance_transform_edt(~fg)
+        din, dout = edt(fg), edt(~fg)
         if mask is not None:
             din, dout = np.where(mask, 0, din), np.where(mask, 0, dout)
         core = next((din >= r for r in (3.5, 2.5, 1.5) if (din >= r).sum() > 20), None)
@@ -105,7 +107,7 @@ def traces(a: np.ndarray, *, feature: str = "bright", method: str = "threshold",
 
     from vexel.packs.sem.fibres import _near, fibres
 
-    a = np.asarray(a, np.float64)
+    a = np.asarray(a, IMAGE_DTYPE)
     h, w = a.shape
     sm = ndi.gaussian_filter(a, smooth) if smooth else a
     s = sm if feature == "bright" else -sm
@@ -118,7 +120,7 @@ def traces(a: np.ndarray, *, feature: str = "bright", method: str = "threshold",
     if not fg.any():
         raise ValueError("no conductors found: check whether they are brighter or darker than the substrate")
     nets, n_nets = ndi.label(fg, structure=np.ones((3, 3)))
-    dist = ndi.distance_transform_edt(fg)
+    dist = edt(fg)
     skel = skeletonize(fg)
     warnings: list[str] = []
 
@@ -141,9 +143,11 @@ def traces(a: np.ndarray, *, feature: str = "bright", method: str = "threshold",
     wide = []  # wide parts that are not round: square pads, sharp bends, junctions
     for p in regionprops(plab):
         r0, c0, r1, c1 = p.bbox
-        cy, cx = np.unravel_index(np.argmax(np.where(plab == p.label, dist, 0)), dist.shape)
+        pys, pxs = p.coords[:, 0], p.coords[:, 1]  # the pad's own pixels: no scan of the whole image per pad
+        i_max = int(np.argmax(dist[pys, pxs]))
+        cy, cx = int(pys[i_max]), int(pxs[i_max])
         R = float(dist[cy, cx])
-        touches = r0 == 0 or c0 == 0 or r1 == h or c1 == w or (near_mask is not None and bool(near_mask[plab == p.label].any()))
+        touches = r0 == 0 or c0 == 0 or r1 == h or c1 == w or (near_mask is not None and bool(near_mask[pys, pxs].any()))
         n_rays = max(64, int(2 * math.pi * R))
         th = np.linspace(0, 2 * math.pi, n_rays, endpoint=False)
         tt = np.arange(0.0, 1.6 * R + 4, 0.25)
@@ -176,7 +180,7 @@ def traces(a: np.ndarray, *, feature: str = "bright", method: str = "threshold",
             square = math.hypot(c4, s4)  # a square's edge swings 6-12 % of the radius 4 times round
         # small pads: pixel noise sets the floor
         if not (res <= max(0.08 * fr, 0.35 * px_) and square <= max(0.04 * fr, 0.25 * px_) and share >= 0.5):
-            ys_, xs_ = np.nonzero(plab == p.label)
+            ys_, xs_ = pys, pxs
             wide.append({"area": float(p.area * sx * sy), "eq_diameter": 2 * math.sqrt(p.area * sx * sy / math.pi), "x": float(xs_.mean()),
                          "y": float(ys_.mean()), "net": int(nets[cy, cx]), "width_box": (c1 - c0) * sx, "height_box": (r1 - r0) * sy,
                          "at_border": bool(touches), "_outline": _boundary(plab[r0:r1, c0:c1] == p.label, c0, r0),
@@ -207,7 +211,9 @@ def traces(a: np.ndarray, *, feature: str = "bright", method: str = "threshold",
     from scipy.spatial import cKDTree
     from skimage.measure import find_contours
 
-    _, (iy, ix) = ndi.distance_transform_edt(~fg, return_indices=True)
+    idx = np.empty((2, h, w), np.int32)
+    ndi.distance_transform_edt(~fg, return_distances=False, return_indices=True, indices=idx)
+    iy, ix = idx
     near_net = nets[iy, ix]  # the nearest conductor of every pixel
     verts: dict[int, list[np.ndarray]] = {}
     for c in find_contours(np.where(mask, s.min(), s) if mask is not None else s, t):

@@ -33,6 +33,8 @@ from typing import Any
 
 import numpy as np
 
+from vexel.packs.sem.process import IMAGE_DTYPE
+
 from vexel.packs.sem.recognize import KIND_NAMES, SemFingerprint, probe
 
 MAX_ROUNDS = 4
@@ -395,12 +397,15 @@ def _picture(image: np.ndarray) -> bytes:
 
     from vexel.packs.sem.process import _to_u8
 
-    a = np.asarray(image, np.float64)
+    a = np.asarray(image, IMAGE_DTYPE)
     img = Image.fromarray(_to_u8(a))
     img.thumbnail((768, 768))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
+
+
+MIN_SIDE = 16  # px: smaller images are not recognised (the planner leaves the choice to the person)
 
 
 def make_plan(image: np.ndarray, *, cal: Any = None, goal: str = "", scale: Any = None, crop_rows: int | None = None,
@@ -414,6 +419,9 @@ def make_plan(image: np.ndarray, *, cal: Any = None, goal: str = "", scale: Any 
 
     crop = crop_rows if crop_rows and crop_rows < image.shape[0] else None
     micro = image[:crop] if crop else image
+    if min(micro.shape[:2]) < MIN_SIDE:  # nothing to recognise in a handful of pixels
+        return SemPlan(recipe=None, params={}, region=None, steps=[], goal=goal, status="needs_user",
+                       reasons=[f"图像太小（{micro.shape[1]}×{micro.shape[0]} 像素）：无法识别，请手动选择测量方法"])  # fmt: skip
     fp = probe(micro, raw=micro, cal=cal)
     plan = draft(fp, goal, memory)
     if models:

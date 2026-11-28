@@ -120,6 +120,20 @@ def _number_edit(placeholder: str) -> QLineEdit:
     return edit
 
 
+def _open_error(e: Exception) -> str:
+    """Why a recording cannot be opened, in words (not decoder error numbers or folder paths)."""
+    import re
+
+    text = str(e)
+    if "Invalid data found" in text or "moov atom" in text or isinstance(e, EOFError):
+        return "文件已损坏，或者不是视频（视频解码器读不出内容）。"
+    if text.startswith("no reader for"):
+        return "文件夹里没有可读的图像或视频（支持 TIFF / OME-TIFF、AVI / MP4 / MOV、图像序列）。"
+    if isinstance(e, FileNotFoundError):
+        return "文件不存在。"
+    return re.sub(r"(?:[A-Za-z]:)?[\\/](?:[^\\/\s'\"]+[\\/])+", "", f"{type(e).__name__}: {text}")[:400]
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -485,7 +499,7 @@ class MainWindow(QMainWindow):
         try:
             volume = open_volume(path)
         except Exception as e:
-            self.warn("无法打开", f"{path.name}\n\n{e}")
+            self.warn("无法打开", f"{path.name}\n\n{_open_error(e)}")
             return False
         self.path = path
         self.settings.setValue("last_dir", str(path.parent))

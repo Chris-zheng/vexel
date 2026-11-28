@@ -66,6 +66,8 @@ def to_qimage(img: np.ndarray, stretch: bool = True) -> QImage:
     if img.ndim == 3:  # RGB, prepared (a height map in colour)
         rgb = np.ascontiguousarray(img[..., :3].astype(np.uint8))
         return QImage(rgb.data, rgb.shape[1], rgb.shape[0], rgb.strides[0], QImage.Format.Format_RGB888).copy()
+    if img.dtype == bool:
+        img = img.astype(np.uint8) * 255
     if stretch or img.dtype != np.uint8:
         lo, hi = float(np.percentile(img, 0.5)), float(np.percentile(img, 99.5))
         gray = np.clip((img.astype(np.float64) - lo) / max(hi - lo, 1e-9) * 255, 0, 255).astype(np.uint8)

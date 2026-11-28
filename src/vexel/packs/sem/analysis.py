@@ -40,6 +40,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import numpy as np
+
+from vexel.packs.sem.process import IMAGE_DTYPE
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -575,7 +577,11 @@ def contrast_to_noise(a: np.ndarray, mask: np.ndarray | None = None) -> float:
 
     from vexel.packs.sem.objects import _mid_threshold
 
-    a = np.asarray(a, np.float64)
+    a = np.asarray(a, IMAGE_DTYPE)
+    step = int(math.ceil(a.size / 4_000_000))  # large images: every step-th row is enough for these two numbers
+    if step > 1 and a.shape[0] > 3 * step:
+        a = a[::step]
+        mask = mask[::step] if mask is not None else None
     d = np.diff(a, axis=1)
     noise = 1.4826 * float(np.median(np.abs(d - np.median(d)))) / math.sqrt(2)
     sm = ndi.gaussian_filter(a, 1.0)
@@ -592,7 +598,7 @@ def run(spec: AnalysisSpec, image: np.ndarray, scale: Any, mask: np.ndarray | No
     try:
         p = rec.resolve(spec.params)
         X0, Y0, X1, Y1 = region_of(spec, image.shape, crop_rows)
-        a = np.asarray(image[Y0:Y1, X0:X1], np.float64)
+        a = np.asarray(image[Y0:Y1, X0:X1], IMAGE_DTYPE)
         m = None if mask is None else mask[Y0:Y1, X0:X1]
         cnr = contrast_to_noise(a, m)
         if cnr < MIN_CONTRAST:

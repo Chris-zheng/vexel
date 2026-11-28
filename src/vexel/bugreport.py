@@ -10,6 +10,7 @@
 - for each SEM image given: its calibration (without the text read from the data bar, which
   may name products or lots) and its measurement record (measurements, processing,
   automatic measurements, tilt 3D settings: coordinates and settings, no pixels);
+- ``logs/``: the five latest error logs of the desktop app (``vexel.ui.crash``), if any;
 - ``README.txt`` listing what is in the bundle and what is not.
 
 Never included: images, videos, review pictures, the HTML report (it embeds pictures),
@@ -166,6 +167,11 @@ def write_bundle(out: str | Path, runs: list[str | Path] = (), *, note: str = ""
             for name, text in _sem_entries(image, keep_paths).items():
                 zf.writestr(prefix + name, text)
                 listing.append(prefix + name)
+        from vexel.ui.crash import recent_logs  # no Qt needed to read them
+
+        for log in recent_logs(5):  # paths in them are already shortened to file names
+            zf.writestr("logs/" + log.name, log.read_text(encoding="utf-8", errors="replace"))
+            listing.append("logs/" + log.name)
         readme = [
             "Vexel diagnostics bundle",
             f"created: {datetime.now(timezone.utc).isoformat(timespec='seconds')}",

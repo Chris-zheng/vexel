@@ -36,6 +36,8 @@ from typing import Any
 
 import numpy as np
 
+from vexel.packs.sem.process import IMAGE_DTYPE
+
 KINDS = ("lines", "holes", "particles", "layers", "profile", "tip", "other")
 KIND_NAMES = {"lines": "线条与间隔", "holes": "接触孔阵列", "particles": "颗粒/缺陷", "layers": "截面层叠", "profile": "截面轮廓（单个线条或沟槽）",
               "tip": "尖端", "other": "其他", "unknown": "无法确定"}  # fmt: skip
@@ -278,7 +280,7 @@ def state(a: np.ndarray, raw: np.ndarray | None, orientation: str | None, contra
 def probe(image: np.ndarray, *, raw: np.ndarray | None = None, cal: Any = None) -> SemFingerprint:
     """Recognise ``image`` (the micrograph, without the data bar). ``raw``: the same region of
     the original image (for saturation); ``cal``: its calibration (for scale and vendor)."""
-    a0 = np.asarray(image, np.float64)
+    a0 = np.asarray(image, IMAGE_DTYPE)
     a, f = _small(a0)
     lo, hi = np.percentile(a, (1, 99))
     a = (a - lo) / max(hi - lo, 1e-12)

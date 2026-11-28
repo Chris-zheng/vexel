@@ -124,7 +124,8 @@ class Op:
 
 
 def _range(a: np.ndarray) -> tuple[float, float]:
-    lo, hi = np.percentile(a, (0.5, 99.5))
+    step = int(np.ceil(a.size / 4_000_000)) if a.ndim == 2 else 1  # large images: every step-th row (same range)
+    lo, hi = np.percentile(a[::step] if step > 1 else a, (0.5, 99.5))
     return float(lo), float(max(hi, lo + 1e-12))
 
 
@@ -493,9 +494,29 @@ def saturation_mask(image: np.ndarray, sat: Saturation | None = None) -> tuple[n
 # -- running a chain -----------------------------------------------------------------------------
 
 
+IMAGE_DTYPE = np.float32  # whole images in processing and measurement: 16-bit data is exact in it; half the memory of float64
+
+
+def edt(mask: np.ndarray) -> np.ndarray:
+    """Euclidean distance of each ``True`` pixel to the nearest ``False`` one, single precision.
+    OpenCV's exact transform when installed (the SEM extra): no image-size index arrays, several
+    times faster; otherwise SciPy's (the same distances to 1e-6)."""
+    m = np.asarray(mask, bool)
+    try:
+        import cv2
+
+        if m.ndim == 2 and min(m.shape) > 0 and not m.all():  # no background at all: SciPy's (degenerate) answer, as before
+            return cv2.distanceTransform(m.view(np.uint8), cv2.DIST_L2, cv2.DIST_MASK_PRECISE)
+    except ImportError:
+        pass
+    from scipy import ndimage as ndi
+
+    return ndi.distance_transform_edt(m).astype(np.float32)
+
+
 @dataclass
 class Result:
-    analysis: np.ndarray  # float64, full image (data bar untouched): what measurements use
+    analysis: np.ndarray  # IMAGE_DTYPE (float32), full image (data bar untouched): what measurements use
     display: np.ndarray  # uint8, full image: what is shown and exported as a picture
     original: np.ndarray  # uint8, full image, no processing: for the before/after view
     mask: np.ndarray | None  # saturated pixels (full image), or None
@@ -505,7 +526,11 @@ class Result:
 
 def _to_u8(a: np.ndarray, rng: tuple[float, float] | None = None) -> np.ndarray:
     lo, hi = rng or _range(a)
-    return np.clip((a - lo) / max(hi - lo, 1e-12) * 255 + 0.5, 0, 255).astype(np.uint8)
+    out = np.asarray(a, np.float32) - np.float32(lo)  # one single-precision copy, then in place
+    out *= np.float32(255 / max(hi - lo, 1e-12))
+    out += np.float32(0.5)
+    np.clip(out, 0, 255, out=out)
+    return out.astype(np.uint8)
 
 
 def _key(steps: list[Step]) -> str:
@@ -539,13 +564,13 @@ class Processor:
 
     def _run(self, steps: list[Step], mask: np.ndarray | None) -> np.ndarray:
         if not steps:
-            return np.asarray(self.micro, np.float64)
+            return np.asarray(self.micro, IMAGE_DTYPE)
         key = _key(steps) + (f"|m{int(mask.sum())}" if mask is not None else "")
         if key not in self._cache:
             prev = self._run(steps[:-1], mask)
             s = steps[-1]
             op = OPS[s.op]
-            self._cache[key] = np.asarray(op.func(prev, mask=mask, **op.resolve(s.params)), np.float64)
+            self._cache[key] = np.asarray(op.func(prev, mask=mask, **op.resolve(s.params)), IMAGE_DTYPE)
             if len(self._cache) > 12:
                 self._cache.pop(next(iter(self._cache)))
         return self._cache[key]
@@ -567,7 +592,7 @@ class Processor:
         stretched = any(s.op == "contrast" for s in shows)
         notes = [f"{OPS[s.op].label}：{OPS[s.op].caution}" for s in corrections if OPS[s.op].caution]
         bar = self.image[self.crop_rows :] if self.crop_rows else None
-        full = np.asarray(self.image, np.float64)
+        full = np.asarray(self.image, IMAGE_DTYPE)
         analysis = full.copy()
         analysis[: corrected.shape[0]] = corrected
         orig_rng = _range(self.micro)

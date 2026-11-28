@@ -19,6 +19,8 @@ from typing import Any
 
 import numpy as np
 
+from vexel.packs.sem.process import IMAGE_DTYPE
+
 
 def tip(a: np.ndarray, *, feature: str = "bright", smooth: float = 1.0, cone_from: float | None = None, cone_to: float | None = None,
         mask: np.ndarray | None = None) -> dict[str, Any]:  # fmt: skip
@@ -28,7 +30,7 @@ def tip(a: np.ndarray, *, feature: str = "bright", smooth: float = 1.0, cone_fro
     from vexel.packs.sem.measure import fit_circle
     from vexel.packs.sem.objects import _mid_threshold
 
-    a = np.asarray(a, np.float64)
+    a = np.asarray(a, IMAGE_DTYPE)
     sm = ndi.gaussian_filter(a, smooth) if smooth else a
     if feature == "dark":
         sm = -sm

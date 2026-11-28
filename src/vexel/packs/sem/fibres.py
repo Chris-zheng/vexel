@@ -28,28 +28,80 @@ from typing import Any
 
 import numpy as np
 
+from vexel.packs.sem.process import IMAGE_DTYPE, edt
+
 from vexel.packs.sem.objects import _mid_threshold
+
+
+def _gradient32(d: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``np.gradient`` (central differences, one-sided at the edges) in single precision."""
+    out = []
+    for axis in (0, 1):
+        g = np.empty(d.shape, np.float32)
+        n = d.shape[axis]
+        if n < 2:
+            g[...] = 0
+            out.append(g)
+            continue
+        sl = lambda a, b: tuple(slice(a, b) if k == axis else slice(None) for k in range(2))  # noqa: E731
+        if n > 2:
+            np.subtract(d[sl(2, None)], d[sl(None, -2)], out=g[sl(1, -1)])
+            g[sl(1, -1)] *= 0.5
+        g[sl(0, 1)] = d[sl(1, 2)] - d[sl(0, 1)]
+        g[sl(-1, None)] = d[sl(-1, None)] - d[sl(-2, -1)]
+        out.append(g)
+    return out[0], out[1]
 
 
 def _direction(fg: np.ndarray, dist: np.ndarray, rho: float) -> tuple[np.ndarray, np.ndarray]:
     """Unit vector along the fibre (dx, dy in pixels) at every pixel."""
     from scipy import ndimage as ndi
 
-    d = ndi.gaussian_filter(dist, 1.0)
-    gy, gx = np.gradient(d)
-    axx, axy, ayy = (ndi.gaussian_filter(v, rho) for v in (gx * gx, gx * gy, gy * gy))
-    phi = 0.5 * np.arctan2(2 * axy, axx - ayy)  # dominant gradient: across the fibre
-    return -np.sin(phi), np.cos(phi)
+    d = ndi.gaussian_filter(np.asarray(dist, np.float32), 1.0)
+    gy, gx = _gradient32(d)
+    del d
+    # structure tensor, one product at a time (large images: few image-size arrays alive at once)
+    axy = ndi.gaussian_filter(gx * gy, rho)
+    axy *= 2
+    diff = ndi.gaussian_filter(gx * gx, rho)
+    np.multiply(gx, gx, out=gx)  # gx no longer needed: reuse it
+    del gx
+    diff -= ndi.gaussian_filter(gy * gy, rho)
+    del gy
+    phi = np.arctan2(axy, diff)  # dominant gradient: across the fibre (2x the angle)
+    del axy, diff
+    phi *= 0.5
+    ux = np.sin(phi)
+    np.negative(ux, out=ux)
+    np.cos(phi, out=phi)
+    return ux, phi
 
 
 def _near(points: np.ndarray, radius_at: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
     """Pixels closer to one of ``points`` (bool image) than that point's radius."""
     from scipy import ndimage as ndi
 
+    from scipy.spatial import cKDTree
+
     if not points.any():
         return np.zeros(shape, bool)
-    d, (iy, ix) = ndi.distance_transform_edt(~points, return_indices=True)
-    return d < radius_at[iy, ix]
+    py, px = np.nonzero(points)
+    r = np.asarray(np.broadcast_to(radius_at, shape)[py, px], np.float64)
+    # only pixels within the largest radius can qualify; their nearest point from a k-d tree
+    # (the same answer as the distance map's nearest-pixel indices, without two image-size index arrays)
+    within = edt(~points) < r.max()
+    tree = cKDTree(np.column_stack([py, px]))
+    out = np.zeros(shape, bool)
+    step = max(1, 2_000_000 // max(shape[1], 1))  # rows at a time: candidate lists stay small
+    for y0 in range(0, shape[0], step):
+        cy, cx = np.nonzero(within[y0 : y0 + step])
+        if not len(cy):
+            continue
+        cy += y0
+        dist, k = tree.query(np.column_stack([cy, cx]))
+        keep = dist < r[k]
+        out[cy[keep], cx[keep]] = True
+    return out
 
 
 def _steepest(prof: np.ndarray, off: np.ndarray, x0: np.ndarray, sgn: int, reach: float = 2.5) -> np.ndarray:
@@ -88,7 +140,7 @@ def fibres(a: np.ndarray, *, feature: str = "bright", threshold: str = "mid", me
     from scipy import ndimage as ndi
     from skimage.morphology import remove_small_holes, remove_small_objects, skeletonize
 
-    a = np.asarray(a, np.float64)
+    a = np.asarray(a, IMAGE_DTYPE)
     h, w = a.shape
     sm = ndi.gaussian_filter(a, smooth) if smooth else a
     sign = 1.0 if feature == "bright" else -1.0
@@ -121,16 +173,16 @@ def fibres(a: np.ndarray, *, feature: str = "bright", threshold: str = "mid", me
     fg = remove_small_holes(fg, max_size=int(math.pi * r_min**2) + 1)
     if not fg.any():
         raise ValueError("no fibres found: check whether the fibres are bright or dark")
-    dist = ndi.distance_transform_edt(fg)
+    dist = edt(fg)
     skel = skeletonize(fg)
     nb = ndi.convolve(skel.astype(np.uint8), np.ones((3, 3), np.uint8), mode="constant") - 1
     junction = skel & (nb >= 3)
     ends = skel & (nb == 1)
     r_med = float(np.median(dist[skel])) if skel.any() else 1.0
     excl = _near(junction, 1.5 * ndi.maximum_filter(dist, 3) + 2.0, (h, w)) | _near(ends, dist + 1.5, (h, w))
-    yy, xx = np.mgrid[0:h, 0:w]
-    edge = np.minimum.reduce([yy, xx, h - 1 - yy, w - 1 - xx])
-    excl |= edge < 2 * dist + 3
+    ry = np.minimum(np.arange(h), h - 1 - np.arange(h)).astype(np.float32)[:, None]  # distance to the region's edge
+    rx = np.minimum(np.arange(w), w - 1 - np.arange(w)).astype(np.float32)[None, :]
+    excl |= np.minimum(ry, rx) < 2 * dist + 3
     if mask is not None:
         excl |= _near(mask, mask_margin * ndi.maximum_filter(dist, 5) + 3, (h, w))
     ux, uy = _direction(fg, dist, max(1.5, 0.75 * r_med))
@@ -183,13 +235,16 @@ def fibres(a: np.ndarray, *, feature: str = "bright", threshold: str = "mid", me
     lab, nseg = ndi.label(branches, structure=np.ones((3, 3)))
     seg_of = lab[sy_[sel], sx_[sel]]
     segs = []
+    seg_boxes = ndi.find_objects(lab)  # each segment's box: its pixels without scanning the image per segment
     for k in range(1, nseg + 1):
         m = seg_of == k
         if m.sum() < 3:
             continue
         d, an, ln = samples["diameter"][m], samples["angle"][m], samples["length"][m]
         mean_dir = 0.5 * math.degrees(math.atan2(np.sum(ln * np.sin(np.radians(2 * an))), np.sum(ln * np.cos(np.radians(2 * an))))) % 180
-        ys_, xs_ = np.nonzero(lab == k)
+        sl = seg_boxes[k - 1]
+        ys_, xs_ = np.nonzero(lab[sl] == k)
+        ys_, xs_ = ys_ + sl[0].start, xs_ + sl[1].start
         segs.append({"segment": len(segs) + 1, "x": float(xs_.mean()), "y": float(ys_.mean()), "diameter": float(np.median(d)),
                      "diameter_sd": float(d.std(ddof=1)) if len(d) > 1 else 0.0, "samples": int(m.sum()),
                      "length": float(ln.sum()), "angle": float(mean_dir), "_pts": (xs_, ys_)})  # fmt: skip

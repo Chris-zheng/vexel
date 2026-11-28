@@ -51,6 +51,9 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName("Vexel")
     app.setOrganizationName("Vexel")
     app.setStyleSheet(STYLE)
+    from vexel.ui.crash import install
+
+    install()  # an uncaught error is logged and shown, not silent (0.8 phase 2)
     start(args.input, args.module)
     return int(app.exec())
 

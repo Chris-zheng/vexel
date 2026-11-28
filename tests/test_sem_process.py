@@ -155,7 +155,7 @@ def test_display_steps_leave_measurements_alone_and_the_data_bar_untouched(parti
     shown = P.Processing(steps=[P.step("line_level"), P.step("contrast", gamma=0.5, clahe=True), P.step("sharpen")])
     a, b = P.apply(img, corr, crop_rows=256), P.apply(img, shown, crop_rows=256)
     assert np.array_equal(a.analysis, b.analysis) and not np.array_equal(a.display, b.display)
-    assert np.array_equal(a.analysis[256:], img[256:]) and np.array_equal(a.display[256:], a.original[256:])
+    assert np.array_equal(a.analysis[256:], img[256:].astype(a.analysis.dtype)) and np.array_equal(a.display[256:], a.original[256:])
     assert a.display.dtype == np.uint8 and a.display.shape == img.shape
 
 
@@ -176,7 +176,7 @@ def test_disabled_steps_are_skipped_and_prefixes_are_cached(particles, monkeypat
     pr.run(chain)  # only the display step changed
     assert len(calls) == 1
     chain.steps[0].enabled = False
-    assert np.array_equal(pr.run(chain).analysis, particles)
+    assert np.array_equal(pr.run(chain).analysis, particles.astype(np.float32))  # measurements work in single precision
 
 
 def test_steps_are_validated_and_parsed():

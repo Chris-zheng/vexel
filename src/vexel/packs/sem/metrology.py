@@ -32,6 +32,8 @@ from typing import Any
 
 import numpy as np
 
+from vexel.packs.sem.process import IMAGE_DTYPE
+
 # -- edge tracking -------------------------------------------------------------------------------
 
 
@@ -139,7 +141,7 @@ def track_edges(a: np.ndarray, *, method: str = "threshold", level: float = 0.5,
     ``mask`` (saturated) pixels make the line's edge missing."""
     from scipy import ndimage as ndi
 
-    a = np.asarray(a, np.float64)
+    a = np.asarray(a, IMAGE_DTYPE)
     rows, cols = a.shape
     if average > 1:
         a = ndi.uniform_filter1d(a, int(average), axis=0, mode="nearest")
@@ -148,8 +150,7 @@ def track_edges(a: np.ndarray, *, method: str = "threshold", level: float = 0.5,
     yy = np.arange(rows)
     # mean profile with the slant taken out
     shift = slope * (yy - rows / 2)
-    rr, cc = np.meshgrid(yy.astype(float), np.arange(cols, dtype=float), indexing="ij")
-    straight = ndi.map_coordinates(sm, [rr, cc + shift[:, None]], order=1, mode="nearest")
+    straight = _shear_rows(sm, shift)
     mean = straight.mean(0)
     med = np.median(straight, axis=1)
     row_offset = med - np.median(med)  # each line's brightness against the others (charging stripes, drift along the lines)
@@ -344,6 +345,26 @@ class LineResult:
     info: dict[str, Any] = field(default_factory=dict)
 
 
+ROW_BLOCK = 512  # rows resampled at a time (coordinate arrays stay small on large images)
+
+
+def _shear_rows(sm: np.ndarray, shift: np.ndarray) -> np.ndarray:
+    """``out[y, x] = sm[y, x + shift[y]]`` (linear interpolation, edges repeated), in blocks of rows."""
+    from scipy import ndimage as ndi
+
+    rows, cols = sm.shape
+    if not np.any(np.abs(shift) > 1e-6):
+        return np.array(sm, copy=True)
+    out = np.empty(sm.shape, np.float32)
+    xs = np.arange(cols, dtype=np.float32)
+    for i0 in range(0, rows, ROW_BLOCK):
+        i1 = min(i0 + ROW_BLOCK, rows)
+        rr = np.broadcast_to(np.arange(i0, i1, dtype=np.float32)[:, None], (i1 - i0, cols))
+        cc = xs[None, :] + np.asarray(shift[i0:i1], np.float32)[:, None]
+        out[i0:i1] = ndi.map_coordinates(sm, [rr, cc], order=1, mode="nearest")
+    return out
+
+
 def lines_spaces(a: np.ndarray, *, feature: str = "bright", method: str = "threshold", level: float = 0.5, smooth: float = 1.0,
                  average: int = 1, mask: np.ndarray | None = None) -> LineResult:  # fmt: skip
     """CD, space, pitch, LER and LWR of a pattern of vertical lines filling ``a``.
@@ -473,7 +494,7 @@ def stack_orientation(a: np.ndarray, smooth: float = 2.0) -> str:
     ``vertical`` when they run along y; from the structure tensor of the whole region."""
     from scipy import ndimage as ndi
 
-    sm = ndi.gaussian_filter(np.nan_to_num(np.asarray(a, np.float64), nan=float(np.nanmean(a))), smooth)
+    sm = ndi.gaussian_filter(np.nan_to_num(np.asarray(a, IMAGE_DTYPE), nan=float(np.nanmean(a))), smooth)
     gy, gx = np.gradient(sm)
     return "horizontal" if float(np.mean(gy * gy)) >= float(np.mean(gx * gx)) else "vertical"
 
@@ -503,7 +524,7 @@ def stack_shift(a: np.ndarray, *, band: int = 16, smooth: float = 1.5, max_step:
     residual shape, which edge tracking then follows."""
     from scipy import ndimage as ndi
 
-    a = np.asarray(a, np.float64)
+    a = np.asarray(a, IMAGE_DTYPE)
     rows, cols = a.shape
     filled = np.where(np.isfinite(a), a, float(np.nanmean(a)))
     g = ndi.gaussian_filter1d(ndi.gaussian_filter(filled, smooth), 1.0, axis=0, order=1)
@@ -545,7 +566,7 @@ def stack_field(a: np.ndarray, *, smooth: float = 1.5, slab: int | None = None) 
     changes with depth; one shift per column (``stack_shift``) is refined in overlapping
     horizontal slabs of the once-flattened image, and the slabs' residual shifts are
     interpolated down each column. Slabs without structure take their neighbours' shift."""
-    a = np.asarray(a, np.float64)
+    a = np.asarray(a, IMAGE_DTYPE)
     rows, cols = a.shape
     s0 = stack_shift(a, smooth=smooth)
     flat0, _ = flatten(a, s0)
@@ -591,13 +612,18 @@ def flatten(a: np.ndarray, shift: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     as a mask."""
     from scipy import ndimage as ndi
 
-    a = np.asarray(a, np.float64)
+    a = np.asarray(a, IMAGE_DTYPE)
     rows, cols = a.shape
     sh = np.asarray(shift, float)
-    yy = np.arange(rows, dtype=float)[:, None] + (sh if sh.ndim == 2 else sh[None, :])
-    xx = np.broadcast_to(np.arange(cols, dtype=float)[None, :], yy.shape)
-    flat = ndi.map_coordinates(np.nan_to_num(a, nan=float(np.nanmean(a))), [yy, xx], order=1, mode="nearest")
+    yy = (np.arange(rows, dtype=np.float32)[:, None] + (sh if sh.ndim == 2 else sh[None, :])).astype(np.float32)
+    src = np.nan_to_num(a, nan=float(np.nanmean(a)))
+    flat = np.empty(a.shape, src.dtype)
+    xs = np.arange(cols, dtype=np.float32)
+    for i0 in range(0, rows, ROW_BLOCK):  # in blocks of rows: no full-size coordinate grids
+        i1 = min(i0 + ROW_BLOCK, rows)
+        flat[i0:i1] = ndi.map_coordinates(src, [yy[i0:i1], np.broadcast_to(xs, (i1 - i0, cols))], order=1, mode="nearest")
     outside = (yy < 0) | (yy > rows - 1)
+    xx = np.broadcast_to(xs[None, :], yy.shape)  # a view: no memory
     if not np.isfinite(a).all():
         outside |= ndi.map_coordinates((~np.isfinite(a)).astype(float), [yy, xx], order=1, mode="nearest") > 0
     return flat, outside
@@ -613,7 +639,7 @@ def stack_layers(a: np.ndarray, *, geometry: str = "auto", orientation: str = "h
     region's own coordinates: ``position`` is y for every x (or x for every y when vertical).
 
     ``geometry`` ``straight`` is ``layers`` unchanged (thickness measured straight down)."""
-    a = np.asarray(a, np.float64)
+    a = np.asarray(a, IMAGE_DTYPE)
     if orientation == "auto":
         orientation = stack_orientation(a)
     vertical = orientation == "vertical"
@@ -709,7 +735,7 @@ def feature_profile(a: np.ndarray, *, feature: str = "bright", level: float = 0.
     from scipy import ndimage as ndi
     from skimage.filters import threshold_otsu
 
-    a = np.asarray(a, np.float64)
+    a = np.asarray(a, IMAGE_DTYPE)
     sm = ndi.gaussian_filter(a, smooth) if smooth else a
     if mask is not None:
         sm = np.where(mask, np.nan, sm)

@@ -71,11 +71,15 @@ def micrograph(rows: int, cols: int, seed: int = 0, noise: float = 0.03) -> np.n
     rng = np.random.default_rng(seed)
     base = ndi.gaussian_filter(rng.normal(size=(rows, cols)), 8) * 4 + ndi.gaussian_filter(rng.normal(size=(rows, cols)), 1.5)
     img = 0.45 + 0.08 * base / (np.abs(base).max() + 1e-9)
-    yy, xx = np.mgrid[:rows, :cols]
     for _ in range(int(rows * cols / 9000)):
         cy, cx, r = rng.uniform(0, rows), rng.uniform(0, cols), rng.uniform(4, 22)
+        y0, y1 = max(int(cy - r) - 1, 0), min(int(cy + r) + 2, rows)  # only the particle's box: same picture, any size
+        x0, x1 = max(int(cx - r) - 1, 0), min(int(cx + r) + 2, cols)
+        if y0 >= y1 or x0 >= x1:
+            continue
+        yy, xx = np.mgrid[y0:y1, x0:x1]
         d = np.hypot(yy - cy, xx - cx) / r
-        img += np.where(d < 1, 0.15 + 0.35 * d**4, 0)  # edge brightening
+        img[y0:y1, x0:x1] += np.where(d < 1, 0.15 + 0.35 * d**4, 0)  # edge brightening
     if noise:
         img += rng.normal(0, noise, img.shape)
     return np.clip(img, 0, 1)

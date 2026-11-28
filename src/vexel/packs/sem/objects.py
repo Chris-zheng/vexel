@@ -25,12 +25,20 @@ from typing import Any
 
 import numpy as np
 
+from vexel.packs.sem.process import IMAGE_DTYPE, edt
+
+
+MAX_SAMPLE = 2_000_000  # grey values used to find a threshold (large images: a regular subsample)
+
 
 def _mid_threshold(v: np.ndarray) -> tuple[float, float, float]:
     """Threshold halfway between the two grey classes (Otsu, then iterated means)."""
     from skimage.filters import threshold_otsu
 
-    v = np.asarray(v, np.float64).ravel()
+    v = np.asarray(v).ravel()
+    if v.size > MAX_SAMPLE:  # a regular subsample: the same two classes, a fraction of the memory and time
+        v = v[:: int(math.ceil(v.size / MAX_SAMPLE))]
+    v = np.asarray(v, np.float32)
     v = v[np.isfinite(v)]
     if v.size < 2 or not np.ptp(v) > 0:
         raise ValueError("the region has no contrast: nothing to measure")
@@ -155,7 +163,7 @@ def holes(a: np.ndarray, *, feature: str = "dark", method: str = "threshold", le
 
     from vexel.packs.sem.measure import fit_circle, fit_ellipse
 
-    a = np.asarray(a, np.float64)
+    a = np.asarray(a, IMAGE_DTYPE)
     sm = ndi.gaussian_filter(a, smooth) if smooth else a
     t, lo, hi = _mid_threshold(sm[~mask] if mask is not None and mask.any() else sm.ravel())
     inside = sm < t if feature == "dark" else sm > t
@@ -171,19 +179,27 @@ def holes(a: np.ndarray, *, feature: str = "dark", method: str = "threshold", le
         if r0 == 0 or c0 == 0 or r1 == a.shape[0] or c1 == a.shape[1]:
             edge_count += 1
             continue
-        region = lab == p.label
-        ring = ndi.binary_dilation(region, iterations=max(2, int(p.equivalent_diameter_area / 4))) & ~ndi.binary_dilation(region, iterations=2)
-        ring &= lab == 0
+        # a window around the hole, wide enough for the ring: no scan of the whole image per hole
+        grow = max(2, int(p.equivalent_diameter_area / 4))
+        m_ = grow + 4
+        W0, V0 = max(r0 - m_, 0), max(c0 - m_, 0)
+        W = (slice(W0, min(r1 + m_, a.shape[0])), slice(V0, min(c1 + m_, a.shape[1])))
+        lab_w, sm_w = lab[W], sm[W]
+        region = lab_w == p.label
+        ring = ndi.binary_dilation(region, iterations=grow) & ~ndi.binary_dilation(region, iterations=2)
+        ring &= lab_w == 0
         if mask is not None:
-            if (mask & ndi.binary_dilation(region, iterations=2)).any():
+            if (mask[W] & ndi.binary_dilation(region, iterations=2)).any():
                 warnings.append(f"孔 ({p.centroid[1]:.0f}, {p.centroid[0]:.0f}) 接触饱和区，已跳过")
                 continue
-        in_v = float(np.median(sm[ndi.binary_erosion(region, iterations=1)] if ndi.binary_erosion(region, iterations=1).any() else sm[region]))
-        out_v = float(np.median(sm[ring])) if ring.any() else (hi if feature == "dark" else lo)
+        inner = ndi.binary_erosion(region, iterations=1)
+        in_v = float(np.median(sm_w[inner] if inner.any() else sm_w[region]))
+        out_v = float(np.median(sm_w[ring])) if ring.any() else (hi if feature == "dark" else lo)
         lev = in_v + 0.5 * (out_v - in_v)
-        rough = _outline(sm, region, lev, p.bbox)  # first estimate of centre and radius
+        rough = _outline(sm_w, region, lev, (r0 - W0, c0 - V0, r1 - W0, c1 - V0))  # first estimate of centre and radius
         if rough is None or len(rough) < 8:
             continue
+        rough = rough + [V0, W0]
         c0x, c0y, r0, _ = fit_circle(rough)
         outline = radial_edges(sm, (c0x, c0y), r0, feature=feature, method=method, level=level)
         if len(outline) < 8:
@@ -286,7 +302,7 @@ def particles(a: np.ndarray, *, feature: str = "bright", threshold: str = "mid",
     from skimage.measure import find_contours, regionprops
     from skimage.segmentation import watershed
 
-    a = np.asarray(a, np.float64)
+    a = np.asarray(a, IMAGE_DTYPE)
     sm = ndi.gaussian_filter(a, smooth) if smooth else a
     vals = sm[~mask] if mask is not None and mask.any() else sm.ravel()
     if threshold == "local":
@@ -315,21 +331,16 @@ def particles(a: np.ndarray, *, feature: str = "bright", threshold: str = "mid",
         fg = ndi.binary_fill_holes(fg)
     comp, ncomp = ndi.label(fg)
     if split and ncomp:
-        from skimage.morphology import h_maxima
-
-        dist = ndi.distance_transform_edt(fg)
-        peaks = h_maxima(ndi.gaussian_filter(dist, 1.0), max(1.0, min_diameter / 4))
-        markers, _ = ndi.label(peaks)
-        lab = watershed(-dist, markers, mask=fg)
-        lab[(lab == 0) & fg] = 0
-        lab = _merge_oversplit(lab)
+        lab = _merge_oversplit(_split_touching(fg, comp, max(1.0, min_diameter / 4)))
     else:
         lab = comp
     min_area = math.pi * (min_diameter / 2) ** 2
     per_comp: dict[int, int] = {}
     props = [p for p in regionprops(lab, intensity_image=a) if p.area >= min_area]
-    for p in props:
-        c = int(comp[tuple(p.coords[0])])
+    # the connected blob each object comes from, for all at once (an object's pixel list can be
+    # most of the image when the background itself counts as one object)
+    comp_of = dict(zip((p.label for p in props), (int(v) for v in ndi.maximum(comp, labels=lab, index=[p.label for p in props])))) if props else {}
+    for c in comp_of.values():
         per_comp[c] = per_comp.get(c, 0) + 1
     rows_out, at_border = [], 0
     for p in props:
@@ -344,7 +355,7 @@ def particles(a: np.ndarray, *, feature: str = "bright", threshold: str = "mid",
         _, perim = _polygon(outline) if len(outline) > 2 else (0.0, 0.0)
         area = float(p.area)
         fmax, fmin, fang = feret(outline) if len(outline) > 2 else (0.0, 0.0, 0.0)
-        touching = per_comp.get(int(comp[tuple(p.coords[0])]), 1) > 1
+        touching = per_comp.get(comp_of[p.label], 1) > 1
         solidity, convexity = _hull(outline, area, perim)
         rows_out.append({"x": float(p.centroid[1]), "y": float(p.centroid[0]), "area": area, "eq_diameter": 2 * math.sqrt(area / math.pi),
                          "feret_max": fmax, "feret_min": fmin, "feret_angle": fang, "perimeter": perim,
@@ -366,6 +377,46 @@ def particles(a: np.ndarray, *, feature: str = "bright", threshold: str = "mid",
     if at_border:
         warnings.append(f"{at_border} 个颗粒被区域边界截断，按 ISO 13322-1 不计入统计")
     return {"particles": rows_out, "summary": summary, "warnings": warnings, "threshold": t, "labels": lab}
+
+
+STRIP_PIXELS = 4_000_000  # touching particles of larger images are split strip by strip (memory)
+
+
+def _split_touching(fg: np.ndarray, comp: np.ndarray, h: float) -> np.ndarray:
+    """Touching particles split along the necks: watershed of the distance map from its
+    h-maxima. Images over ``2 * STRIP_PIXELS`` are done in strips of whole particles (each
+    particle in exactly one strip, the others masked out): the h-maxima search needs about ten
+    full-size double-precision arrays, which on a 50 MP image is several GB."""
+    from scipy import ndimage as ndi
+    from skimage.morphology import h_maxima
+    from skimage.segmentation import watershed
+
+    dist = edt(fg)
+    blur = ndi.gaussian_filter(dist, 1.0)
+    rows, cols = fg.shape
+    if fg.size <= 2 * STRIP_PIXELS:
+        markers, _ = ndi.label(h_maxima(blur, h))
+        return watershed(-dist, markers, mask=fg)
+    lab = np.zeros(fg.shape, np.int32)
+    boxes = ndi.find_objects(comp)
+    order = sorted(range(len(boxes)), key=lambda i: boxes[i][0].start if boxes[i] is not None else rows)
+    height = max(256, STRIP_PIXELS // max(cols, 1))
+    offset, i = 0, 0
+    while i < len(order) and boxes[order[i]] is not None:
+        start = boxes[order[i]][0].start
+        end, ids = start, []
+        while i < len(order) and boxes[order[i]] is not None and (not ids or boxes[order[i]][0].start < start + height):
+            ids.append(order[i] + 1)
+            end = max(end, boxes[order[i]][0].stop)
+            i += 1
+        sub = comp[start:end]
+        m = np.isin(sub, ids)
+        markers, n = ndi.label(h_maxima(np.where(m, blur[start:end], 0), h) & m)
+        part = watershed(-dist[start:end], markers, mask=m)
+        sel = part > 0
+        lab[start:end][sel] = part[sel] + offset
+        offset += n
+    return lab
 
 
 def _merge_oversplit(lab: np.ndarray, neck: float = 1.0, solidity: float = 0.93) -> np.ndarray:
@@ -458,7 +509,7 @@ def pores(a: np.ndarray, *, feature: str = "dark", threshold: str = "mid", split
                     solidity_min=0.0, outlier_k=1e9)  # fmt: skip
     from scipy import ndimage as ndi
 
-    sm = ndi.gaussian_filter(np.asarray(a, np.float64), smooth) if smooth else np.asarray(a, np.float64)
+    sm = ndi.gaussian_filter(np.asarray(a, IMAGE_DTYPE), smooth) if smooth else np.asarray(a, IMAGE_DTYPE)
     t = res["threshold"]
     phase = (sm < t) if feature == "dark" else (sm > t)
     if threshold == "local":
@@ -516,7 +567,7 @@ def nested(a: np.ndarray, *, parent: str = "membrane", child: str = "dark", memb
     from skimage.morphology import disk
     from skimage.segmentation import watershed
 
-    a = np.asarray(a, np.float64)
+    a = np.asarray(a, IMAGE_DTYPE)
     rows, cols = a.shape
     d = np.diff(a, axis=1)
     noise = 1.4826 * float(np.median(np.abs(d - np.median(d)))) / math.sqrt(2)
@@ -549,9 +600,19 @@ def nested(a: np.ndarray, *, parent: str = "membrane", child: str = "dark", memb
         # each region grows to the middle of its boundary line: the ridge of the line's curvature (the
         # Hessian's larger eigenvalue at the line's scale), which a brighter side shifts less than
         # the top-hat's peak
-        from skimage.feature import hessian_matrix, hessian_matrix_eigvals
-
-        ridge = hessian_matrix_eigvals(hessian_matrix(a, sigma=max(1.0, membrane / 2), order="rc", use_gaussian_derivatives=True))[0]
+        # the Hessian's larger eigenvalue, from single-precision Gaussian derivatives (the watershed
+        # only uses its order; scikit-image's version holds five double-precision images)
+        sg = max(1.0, membrane / 2)
+        a32 = np.asarray(a, np.float32)
+        hrr = ndi.gaussian_filter(a32, sg, order=(2, 0))
+        hcc = ndi.gaussian_filter(a32, sg, order=(0, 2))
+        hrc = ndi.gaussian_filter(a32, sg, order=(1, 1))
+        ridge = (hrr + hcc) / 2
+        hrr -= hcc
+        hrr /= 2
+        np.hypot(hrr, hrc, out=hrr)
+        ridge += hrr
+        del hcc, hrc, hrr
         lab = watershed(ridge, lab)
     elif parent in ("bright", "dark"):
         t, lo, hi = _mid_threshold(sm if mask is None else sm[~mask])

@@ -1,5 +1,16 @@
 # 更新记录
 
+## Unreleased — 0.8 phase 2: stability
+
+- Safety net (`vexel.ui.crash`): an uncaught error in the desktop app is logged to `~/.vexel/logs/` (paths shortened to file names, no image data) and shown once, instead of a button that silently does nothing; diagnostics bundles include the latest logs. Tests now fail when an error escapes a Qt signal handler (they used to pass).
+- Robustness corpus (`tests/benchmarks/robustness_eval.py`, 101 awkward files through the SEM and droplet windows, each in its own process with a time limit): 0 failures. Fixed what it found: boolean images; images under 16 px a side (refused with a reason; the planner leaves them to the person); a failed data-bar text recognition escaping calibration; files that cannot be opened now say why in a dialog (phase 1 had hidden the message).
+- Animated GIFs and grey + alpha PNGs were read as a one-pixel-wide sliver (and then refused as too small): frames and colour channels are now taken in the right order. The droplet window says in words why a recording cannot be opened (damaged file, no readable images in the folder) instead of decoder error numbers and full paths.
+- LZW- and JPEG-compressed TIFFs could not be opened at all: `imagecodecs` is now a dependency (wheels for macOS arm64 and x86_64, Windows, Linux).
+- SEM window: adding or changing one automatic measurement no longer recomputes all of them; on images over 4 MP they are computed in the background ("计算中…"). Fibres, traces and holes no longer scan the whole image once per segment, pad or hole: on 50 MP fibres 70 → 21 s, traces 233 → 44 s; metrology and materials benchmarks unchanged.
+- Large images, memory and time: whole images are processed and measured in single precision (`IMAGE_DTYPE`; 16-bit data is exact in it); distance maps come from OpenCV's exact transform when installed (single precision, no image-size index arrays); thresholds and display ranges use a regular subsample of large images; touching particles of images over 8 MP are split strip by strip (results identical); profile straightening and flattening work in blocks of rows; the nested ridge and the fibre direction are computed without double-precision intermediates. On 50 MP, compared with before phase 2: particles 18 → 11 s and 8.9 → 4.2 GB, fibres 70 → 13 s and 10.6 → 4.4 GB, lines 4.6 → 2.3 GB, layers 6.3 → 3.5 GB. Benchmarks: metrology 145/145 (one value moved by 0.001 px), materials 67/67 (fibre biases moved by at most 0.01 percentage points), processing 21/21, recognition unchanged.
+- Performance budgets (`tests/benchmarks/performance_eval.py`): opening a 50 MP image 2.0 s; up to 12.6 MP every validated measurement < 10 s and < 4 GB; larger images exceed the memory budget (single precision and tiles belong to the large-image phase). The synthetic SEM generator draws particles locally (identical pictures; 50 MP in 2.7 s instead of hours).
+- Closing an SEM window no longer touches a deleted table (phase 1 regression). `docs/verification_0.8_phase0-2.md`: tests and verification of phases 0–2.
+
 ## Unreleased — 0.8 phase 1: a simple first screen
 
 - SEM window:

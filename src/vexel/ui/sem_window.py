@@ -70,8 +70,14 @@ TAB_CALIBRATION, TAB_PROCESSING, TAB_MEASURE, TAB_AUTO, TAB_3D = range(5)
 
 def _hide_when_empty(table: Any) -> None:
     """A results table shows only when it has rows (no empty boxes on the first screen)."""
+    import shiboken6
+
     model = table.model()
-    update = lambda *_a: table.setVisible(table.rowCount() > 0)  # noqa: E731
+
+    def update(*_a: Any) -> None:
+        if shiboken6.isValid(table):  # the model still signals while the window is being destroyed
+            table.setVisible(table.rowCount() > 0)
+
     for sig in (model.rowsInserted, model.rowsRemoved, model.modelReset):
         sig.connect(update)
     update()
@@ -183,6 +189,30 @@ class _TiltJob(QObject):
             self.done.emit(run_spec(self.spec, self.path), self.key)
         except Exception as e:  # noqa: BLE001 - shown to the person
             self.failed.emit(f"{type(e).__name__}: {e}", self.key)
+
+
+class _AutoJob(QObject):
+    """Automatic measurements of a large image, off the window's thread."""
+
+    done = Signal(object)  # {cache key: Analysis}
+
+    def __init__(self, todo: list[tuple[str, Any]], image: Any, scale: Any, mask: Any, crop: Any) -> None:
+        super().__init__()
+        self.todo, self.image, self.scale, self.mask, self.crop = todo, image, scale, mask, crop
+
+    def run(self) -> None:
+        from vexel.packs.sem.analysis import Analysis, run
+
+        out = {}
+        for k, spec in self.todo:
+            try:
+                out[k] = run(spec, self.image, self.scale, self.mask, self.crop)
+            except Exception as e:  # noqa: BLE001 - shown to the person in the list
+                out[k] = Analysis(spec=spec, error=f"{type(e).__name__}: {e}")
+        self.done.emit(out)
+
+
+BACKGROUND_PIXELS = 4_000_000  # automatic measurements of larger images run off the window's thread
 
 
 class _ProcessJob(QObject):
@@ -904,7 +934,10 @@ class SemWindow(QMainWindow):
         try:
             img = load_image(path)
         except Exception as e:  # noqa: BLE001 - shown to the person
-            self.file_label.setText(tr(f"无法读取：{type(e).__name__}: {e}"))
+            why = str(e) if isinstance(e, ValueError) and str(e) else f"{type(e).__name__}: {e}"  # our refusals say it all
+            self.file_label.setText(tr(f"无法读取：{why}"))
+            self.say(tr(f"无法打开 {path.name}"))
+            QMessageBox.warning(self, tr("无法打开"), tr(f"无法读取这个文件：\n{why}"))
             return False
         self.path, self.image, self.cal, self.ms, self.values = path, img, None, None, {}
         self.processor, self.result, self._result_key = None, None, None
@@ -950,6 +983,7 @@ class SemWindow(QMainWindow):
         if self._proc_thread is not None:
             self._proc_thread.quit()
             self._proc_thread.wait(60000)
+        self._end_auto()
         super().closeEvent(event)
 
     # -- calibration display -----------------------------------------------------------------
@@ -2116,11 +2150,31 @@ class SemWindow(QMainWindow):
         if key != self._auto_key:
             img = res.analysis if res is not None else self.image
             mask = res.mask if res is not None else None
-            QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            try:
-                self.analyses = [run(spec, img, self.ms.scale, mask, self.ms.image.get("crop_rows")) for spec in self.ms.analyses]
-            finally:
-                QGuiApplication.restoreOverrideCursor()
+            # each measurement is recomputed only when its own settings, the processed image or the
+            # scale changed: adding a measurement does not redo the others (on a 50 MP image each
+            # takes seconds)
+            crop = self.ms.image.get("crop_rows")
+            base = json.dumps([self._result_key, self.ms.scale.model_dump(), crop], sort_keys=True, default=str)
+            cache = getattr(self, "_an_cache", {})
+            keys = [(base + json.dumps(spec.model_dump(), sort_keys=True, default=str), spec) for spec in self.ms.analyses]
+            todo = [(k, spec) for k, spec in keys if k not in cache]
+            pending = False
+            if todo and not self._sync and img is not None and img.size > BACKGROUND_PIXELS:
+                self._start_auto(todo, img, mask, crop)  # the list says "计算中…" until it is done
+                pending = True
+            else:
+                QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                try:
+                    for k, spec in todo:
+                        cache[k] = run(spec, img, self.ms.scale, mask, crop)
+                finally:
+                    QGuiApplication.restoreOverrideCursor()
+            from vexel.packs.sem.analysis import Analysis
+
+            self.analyses = [cache.get(k) or Analysis(spec=spec, extra={"pending": True}) for k, spec in keys]
+            self._an_cache = {k: cache[k] for k, _ in keys if k in cache}
+            if pending:
+                key = None  # computed again when the job is done
             self._auto_key = key
             self.view.show_analysis([sh for an in self.analyses if not an.error for sh in an.shapes])
         want = self._auto_select
@@ -2132,6 +2186,8 @@ class SemWindow(QMainWindow):
             main = next(((lab, v, kind) for k, lab, v, kind in an.summary if kind in ("length", "angle") and v is not None), None)
             if an.error:
                 text += tr(f"：{an.error}")
+            elif an.extra.get("pending"):
+                text += tr("：计算中…")
             elif main:
                 text += tr(f"：{tr(main[0])} {self._fmt(main[1], main[2], unit, f)}")
             self.auto_list.addItem(text)
@@ -2767,6 +2823,36 @@ class SemWindow(QMainWindow):
         self._proc_thread.start()
         self.sat_info.setText(tr("图像处理中…"))
         self.say(tr("图像处理中…（完成后数值和图像自动更新）"))
+
+    _auto_thread: QThread | None = None
+    _auto_job: _AutoJob | None = None
+
+    def _start_auto(self, todo: list[tuple[str, Any]], img: Any, mask: Any, crop: Any) -> None:
+        if self._auto_thread is not None:
+            return  # one at a time: when it is done, what is still missing runs next
+        self._auto_thread = QThread()
+        self._auto_job = _AutoJob(todo, img, self.ms.scale.model_copy(deep=True), mask, crop)
+        self._auto_job.moveToThread(self._auto_thread)
+        self._auto_thread.started.connect(self._auto_job.run)
+        self._auto_job.done.connect(self._auto_done)
+        self._auto_thread.start()
+        self.say(tr("自动测量计算中…（大图需要一些时间，窗口可以继续使用）"))
+
+    def _end_auto(self) -> None:
+        if self._auto_thread is not None:
+            self._auto_thread.quit()
+            self._auto_thread.wait()
+            self._auto_thread, self._auto_job = None, None
+
+    def _auto_done(self, results: dict[str, Any]) -> None:
+        self._end_auto()
+        if self.ms is None:
+            return
+        cache = getattr(self, "_an_cache", {})
+        cache.update(results)
+        self._an_cache = cache
+        self._auto_key = None
+        self._refresh()
 
     def _end_processing(self) -> None:
         if self._proc_thread is not None:

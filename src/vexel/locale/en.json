@@ -821,5 +821,13 @@
  "样品台倾斜校正": "Stage tilt correction",
  "用上方工具栏在图上测量；结果列在下面。": "Measure on the image with the toolbar above; the results are listed below.",
  "编辑": "Edit",
- "视图": "View"
+ "视图": "View",
+ "信息栏文字识别失败：{}": "Reading the data bar's text failed: {}",
+ "图像太小（{}×{} 像素）：无法识别，请手动选择测量方法": "The image is too small ({}×{} px) to recognise: choose the measurement yourself",
+ "{}: {} 像素，小于 {}×{}：太小，无法测量": "{}: {} px, under {}×{}: too small to measure",
+ "无法打开 {}": "Cannot open {}",
+ "无法打开": "Cannot open",
+ "无法读取这个文件：\n{}": "This file cannot be read:\n{}",
+ "：计算中…": ": computing…",
+ "自动测量计算中…（大图需要一些时间，窗口可以继续使用）": "Computing the automatic measurements… (large images take a while; the window stays usable)"
 }
