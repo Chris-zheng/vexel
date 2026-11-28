@@ -39,6 +39,7 @@ class GuideBar(QFrame):
         self.body.setText(body)
         for b in self.buttons:
             self._actions.removeWidget(b)
+            b.hide()  # gone at once: deleteLater alone can leave it drawn over the new buttons
             b.deleteLater()
         self.buttons = []
         for i, (label, fn) in enumerate(actions):

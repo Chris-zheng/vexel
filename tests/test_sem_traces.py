@@ -73,6 +73,8 @@ def test_recipe_reports_calibrated_values_and_shapes():
 
 
 def test_sem_api_lists_and_measures_traces():
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
     from fastapi.testclient import TestClient
 
     from vexel.server.api import create_app

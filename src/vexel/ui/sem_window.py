@@ -63,8 +63,18 @@ STATE_COLOURS = {"confirmed": "#16a34a", "pending": "#d97706", "none": "#dc2626"
 TOOLS = [("pan", tr("选择"), "V"), ("line", tr("长度"), "L"), ("polyline", tr("折线"), "Shift+L"), ("polygon", tr("面积"), "A"), ("freehand", tr("自由画"), "F"),
          ("wand", tr("魔棒"), "W"), ("angle", tr("角度"), "G"), ("point", tr("计数"), "N"), ("circle", tr("圆"), "C"), ("ellipse", tr("椭圆"), "E"),
          ("profile", tr("线剖面"), "P")]  # fmt: skip
+CORE_TOOLS = ("pan", "line", "polygon", "point")  # on the toolbar; the others under "更多工具"
 EDGE_METHODS = [("threshold", tr("阈值（50% 等）")), ("gradient", tr("最大梯度")), ("peak", tr("亮边峰值"))]
 TAB_CALIBRATION, TAB_PROCESSING, TAB_MEASURE, TAB_AUTO, TAB_3D = range(5)
+
+
+def _hide_when_empty(table: Any) -> None:
+    """A results table shows only when it has rows (no empty boxes on the first screen)."""
+    model = table.model()
+    update = lambda *_a: table.setVisible(table.rowCount() > 0)  # noqa: E731
+    for sig in (model.rowsInserted, model.rowsRemoved, model.modelReset):
+        sig.connect(update)
+    update()
 
 
 class _CalibrateJob(QObject):
@@ -283,6 +293,23 @@ class SemWindow(QMainWindow):
         self.banner.confirm.connect(self._confirm)
         self.banner.open_calibration.connect(lambda: self.tabs.setCurrentIndex(TAB_CALIBRATION))
         sv.addWidget(self.banner)
+        self.sat_badge = QLabel("")
+        self.sat_badge.setObjectName("notes")
+        self.sat_badge.setWordWrap(True)
+        self.sat_badge.linkActivated.connect(lambda _l: self.sat_show.setChecked(True))
+        self.sat_badge.hide()
+        sv.addWidget(self.sat_badge)
+        self.start_panel = QFrame()
+        spv = QVBoxLayout(self.start_panel)
+        spv.setContentsMargins(16, 24, 16, 16)
+        spv.addWidget(heading(tr("开始")))
+        spv.addWidget(muted(tr("打开一张 SEM 图片：标定会自动完成（仪器元数据或信息栏的比例尺），然后自动规划测量。")))
+        self.start_btn = QPushButton(tr("打开 SEM 图片…"))
+        self.start_btn.setObjectName("primary")
+        self.start_btn.clicked.connect(self._choose)
+        spv.addWidget(self.start_btn)
+        spv.addStretch(1)
+        sv.addWidget(self.start_panel, 1)
         sv.addWidget(self.tabs, 1)
         for title, build in ((tr("标定"), self._build_calibration), (tr("图像处理"), self._build_processing), (tr("测量"), self._build_measurements),
                              (tr("自动测量"), self._build_auto), (tr("三维"), self._build_3d)):  # fmt: skip
@@ -296,6 +323,13 @@ class SemWindow(QMainWindow):
             build(v)
             v.addStretch(1)
             self.tabs.addTab(scroll, title)
+        self.view_menu.addSeparator()
+        self.autoplan_act = self.view_menu.addAction(tr("打开图片时自动规划"))
+        self.autoplan_act.setCheckable(True)
+        self.autoplan_act.setChecked(self.autoplan_on.isChecked())
+        self.autoplan_act.toggled.connect(self.autoplan_on.setChecked)
+        self.autoplan_on.toggled.connect(self.autoplan_act.setChecked)
+        self._update_tabs()
         for box in self.tabs.findChildren(QComboBox):  # long choices must not widen the panel
             box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
             box.setMinimumContentsLength(6)
@@ -307,10 +341,15 @@ class SemWindow(QMainWindow):
     # -- layout ---------------------------------------------------------------------------
 
     def _build_toolbar(self) -> None:
+        """A short toolbar - open, the four everyday tools, the others under "更多工具", undo,
+        export - and menus for everything used now and then (0.8: simple first screen)."""
+        from qtpy.QtWidgets import QMenu, QToolButton
+
         bar = QToolBar(tr("测量工具"))
         bar.setMovable(False)
         self.addToolBar(bar)
-        bar.addAction(tr("打开…"), self._choose)
+        self.open_act = bar.addAction(tr("打开…"), self._choose)
+        self.open_act.setShortcut(QKeySequence.StandardKey.Open)
         bar.addSeparator()
         self.tool_actions: dict[str, QAction] = {}
         group = QActionGroup(self)
@@ -321,26 +360,70 @@ class SemWindow(QMainWindow):
             act.setToolTip(tr(f"{label}（{key}）：{TOOL_HINTS[tool]}"))
             act.triggered.connect(lambda _c=False, t=tool: self.set_tool(t))
             group.addAction(act)
-            bar.addAction(act)
             self.tool_actions[tool] = act
+            if tool in CORE_TOOLS:
+                bar.addAction(act)
+        self.more_menu = QMenu(tr("更多工具"), self)
+        for tool, _label, _key in TOOLS:
+            if tool not in CORE_TOOLS:
+                self.more_menu.addAction(self.tool_actions[tool])
+                self.addAction(self.tool_actions[tool])  # shortcuts work while the menu is closed
+        self.more_btn = QToolButton()
+        self.more_btn.setText(tr("更多工具"))
+        self.more_btn.setMenu(self.more_menu)
+        self.more_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.more_btn.setToolTip(tr("折线、自由画、魔棒、角度、圆、椭圆、线剖面"))
+        bar.addWidget(self.more_btn)
+        group.triggered.connect(self._tool_chosen)
         self.tool_actions["pan"].setChecked(True)
         bar.addSeparator()
         self.undo_act = bar.addAction(tr("撤销"), self.undo)
         self.undo_act.setShortcut(QKeySequence.StandardKey.Undo)
-        self.redo_act = bar.addAction(tr("重做"), self.redo)
-        self.redo_act.setShortcut(QKeySequence.StandardKey.Redo)
-        bar.addAction(tr("适应窗口"), self.view.fit)
-        bar.addSeparator()
         self.export_act = bar.addAction(tr("导出…"), self._export)
-        self.load_act = bar.addAction(tr("载入测量记录…"), self._load_record_file)
-        self.bug_act = bar.addAction(tr("诊断包…"), self._bugreport)
+        self.redo_act = QAction(tr("重做"), self)
+        self.redo_act.triggered.connect(self.redo)
+        self.redo_act.setShortcut(QKeySequence.StandardKey.Redo)
+        self.fit_act = QAction(tr("适应窗口"), self)
+        self.fit_act.triggered.connect(self.view.fit)
+        self.fit_act.setShortcut(QKeySequence("Ctrl+0"))
+        self.load_act = QAction(tr("载入测量记录…"), self)
+        self.load_act.triggered.connect(self._load_record_file)
+        self.bug_act = QAction(tr("诊断包…"), self)
+        self.bug_act.triggered.connect(self._bugreport)
         self.bug_act.setToolTip(tr("报告问题用：版本、系统、这张图的标定与测量记录；不含图像，也不含信息栏上的文字"))
-        bar.addSeparator()
         from vexel.i18n import language
 
         other = "en" if language() == "zh" else "zh"
-        self.lang_act = bar.addAction("English" if other == "en" else "中文", lambda: self.switch_language(other))
+        self.lang_act = QAction("English" if other == "en" else "中文", self)
+        self.lang_act.triggered.connect(lambda: self.switch_language(other))
         self.lang_act.setToolTip("Show the SEM window in English (when it is next opened)" if other == "en" else "下次打开 SEM 窗口时使用中文界面")
+        self.processing_act = QAction(tr("图像处理"), self)
+        self.processing_act.setCheckable(True)
+        self.processing_act.setToolTip(tr("校平、去条纹、背景、去噪、对比度、饱和区与多帧平均"))
+        self.processing_act.toggled.connect(lambda _on: self._update_tabs(show_processing=_on))
+        menus = self.menuBar()
+        m = menus.addMenu(tr("文件"))
+        m.addAction(self.open_act)
+        m.addAction(self.load_act)
+        m.addAction(self.export_act)
+        m = menus.addMenu(tr("编辑"))
+        m.addAction(self.undo_act)
+        m.addAction(self.redo_act)
+        m = menus.addMenu(tr("视图"))
+        self.view_menu = m
+        m.addAction(self.fit_act)
+        m.addAction(self.processing_act)
+        m = menus.addMenu(tr("帮助"))
+        m.addAction(self.bug_act)
+        m.addAction(self.lang_act)
+        self.addAction(self.redo_act)
+        self.addAction(self.fit_act)
+
+    def _tool_chosen(self, act: QAction) -> None:
+        """The "更多工具" button names the tool in use when it is one of its tools."""
+        tool = next((t for t, a in self.tool_actions.items() if a is act), None)
+        self.more_btn.setText(tr("更多工具") if tool in CORE_TOOLS or tool is None else f"{act.text()} ▾")
+        self.more_btn.setDown(False)
 
     def _build_calibration(self, v: QVBoxLayout) -> None:
         self.file_label = muted("")
@@ -372,6 +455,28 @@ class SemWindow(QMainWindow):
         row.addWidget(self.pick_btn)
         row.addWidget(self.size_btn)
         v.addLayout(row)
+        self.cal_change_btn = QPushButton(tr("更改标定…"))
+        self.cal_change_btn.setFlat(True)
+        self.cal_change_btn.setStyleSheet("text-align: left; padding: 2px 0;")
+        self.cal_change_btn.clicked.connect(lambda: (setattr(self, "_cal_edit", True), self._set_buttons()))
+        v.addWidget(self.cal_change_btn)
+        self._cal_edit = False
+        self.tilt_on = QCheckBox(tr("样品台倾斜校正"))
+        self.tilt_on.setToolTip(tr("样品台倾斜时，垂直方向的距离被缩短；勾选后按 1/cos(倾角) 校正（倾转轴为图像水平方向）"))
+        self.tilt = QDoubleSpinBox()
+        self.tilt.setRange(0, 89)
+        self.tilt.setDecimals(1)
+        self.tilt.setSuffix("°")
+        self.tilt.setEnabled(False)
+        self.tilt_on.toggled.connect(lambda on: (self.tilt.setEnabled(on), self._apply_scale()))
+        self.tilt.valueChanged.connect(lambda _v: self._apply_scale())
+        trow = QHBoxLayout()
+        trow.addWidget(self.tilt_on)
+        trow.addWidget(self.tilt)
+        trow.addStretch(1)
+        self.tilt_row = QWidget()
+        self.tilt_row.setLayout(trow)
+        v.addWidget(self.tilt_row)
         self.meta = muted("")
         self.meta.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self.meta)
@@ -400,22 +505,13 @@ class SemWindow(QMainWindow):
         self.edge_level.setValue(50)
         self.edge_level.setSuffix(" %")
         form.addRow(tr("阈值"), self.edge_level)
-        self.tilt_on = QCheckBox(tr("倾斜校正"))
-        self.tilt_on.setToolTip(tr("样品台倾斜时，垂直方向的距离被缩短；勾选后按 1/cos(倾角) 校正（倾转轴为图像水平方向）"))
-        self.tilt = QDoubleSpinBox()
-        self.tilt.setRange(0, 89)
-        self.tilt.setDecimals(1)
-        self.tilt.setSuffix("°")
-        self.tilt.setEnabled(False)
-        self.tilt_on.toggled.connect(lambda on: (self.tilt.setEnabled(on), self._apply_scale()))
-        self.tilt.valueChanged.connect(lambda _v: self._apply_scale())
-        trow = QHBoxLayout()
-        trow.addWidget(self.tilt_on)
-        trow.addWidget(self.tilt)
-        form.addRow(trow)
         for w in (self.edge_method, self.edge_level, self.profile_width):
             (w.currentIndexChanged if isinstance(w, QComboBox) else w.valueChanged).connect(lambda _x: self._profile_settings_changed())
         v.addLayout(form)
+        self.meas_form = form
+        self.tool_hint = muted(tr("用上方工具栏在图上测量；结果列在下面。"))
+        v.addWidget(self.tool_hint)
+        self._update_tool_settings("pan")
 
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["#", tr("工具"), tr("结果"), tr("名称")])
@@ -433,6 +529,7 @@ class SemWindow(QMainWindow):
         self.table.itemSelectionChanged.connect(self._table_selected)
         self.table.itemChanged.connect(self._name_edited)
         v.addWidget(self.table, 1)
+        _hide_when_empty(self.table)
         brow = QHBoxLayout()
         self.delete_btn = QPushButton(tr("删除所选"))
         self.delete_btn.clicked.connect(self.delete_selected)
@@ -491,8 +588,8 @@ class SemWindow(QMainWindow):
         self.sat_on.toggled.connect(lambda on: self.set_saturation(enabled=on))
         v.addWidget(self.sat_on)
         self.sat_show = QCheckBox(tr("在图上显示（红色）"))
-        self.sat_show.setChecked(True)
-        self.sat_show.toggled.connect(lambda _on: self._show_mask())
+        self.sat_show.setChecked(False)  # a warning above the panel offers to show it
+        self.sat_show.toggled.connect(lambda _on: (self._show_mask(), self._show_sat_badge()))
         v.addWidget(self.sat_show)
         self.sat_info = muted("")
         v.addWidget(self.sat_info)
@@ -546,6 +643,7 @@ class SemWindow(QMainWindow):
         self.autoplan_on.setToolTip(tr("图片还没有自动测量时，打开后立即识别、规划并试运行；结果先给你看，采用后才加入记录"))
         self.autoplan_on.setChecked(bool(_config().get("sem_autoplan", True)))
         self.autoplan_on.toggled.connect(lambda on: _set_config("sem_autoplan", bool(on)))
+        self.autoplan_on.hide()  # a preference: 视图 → 打开图片时自动规划
         v.addWidget(self.autoplan_on)
         from vexel.ui.sem_cards import PlanCard
 
@@ -675,6 +773,7 @@ class SemWindow(QMainWindow):
         self.auto_table.setMinimumHeight(180)
         self.auto_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         v.addWidget(self.auto_table)
+        _hide_when_empty(self.auto_table)
         from vexel.ui.sem_charts import DistributionChart
 
         self.auto_chart = DistributionChart()
@@ -791,6 +890,7 @@ class SemWindow(QMainWindow):
         """Open an image: calibrate it and load its record. ``plan``: recognise and plan it
         right away when the record has no automatic measurement (None: the panel's switch;
         with ``wait``, only when asked)."""
+        self._cal_edit = False
         from vexel.packs.sem.calibrate import load_image
 
         self._plan_on_open = plan
@@ -965,17 +1065,27 @@ class SemWindow(QMainWindow):
 
     def _set_buttons(self) -> None:
         has = self.path is not None
+        self.start_panel.setVisible(not has)
+        self.tabs.setVisible(has)
         self.confirm_btn.setVisible(bool(self.cal is not None and self.cal.needs_confirmation))
         self.pick_btn.setEnabled(has)
         self.size_btn.setEnabled(has)
+        settled = self.cal is not None and self.cal.ok and not self.cal.needs_confirmation
+        editing = not settled or self._cal_edit
+        self.pick_btn.setVisible(editing)
+        self.size_btn.setVisible(editing)
+        self.tilt_row.setVisible(editing or self.tilt_on.isChecked())
+        self.cal_change_btn.setVisible(not editing)
         for act in self.tool_actions.values():
             act.setEnabled(has)
+        self.more_btn.setEnabled(has)
         self.undo_act.setEnabled(bool(self._undo))
         self.redo_act.setEnabled(bool(self._redo))
         self.export_act.setEnabled(bool(self.ms and self.ms.items))
         self.load_act.setEnabled(self.ms is not None)
         self.bug_act.setEnabled(self.path is not None)
         self.delete_btn.setEnabled(self.view.selected is not None)
+        self.delete_btn.setVisible(self.table.rowCount() > 0)
         ready = self.ms is not None and self.processor is not None
         row = self.steps.currentRow()
         n = len(self.ms.processing.steps) if self.ms is not None else 0
@@ -991,6 +1101,7 @@ class SemWindow(QMainWindow):
         self.plan_btn.setEnabled(ready and getattr(self, "_plan_thread", None) is None)
         self.plan_card.setEnabled(ready)
         has_tilt = ready and self.ms.tilt3d is not None and bool(self.ms.tilt3d.views)
+        self._update_tabs()
         done = self.tilt_result is not None
         for w in (self.tilt_add_btn, self.tilt_axis, self.tilt_level, self.tilt_smooth, self.tilt_conf):
             w.setEnabled(ready)
@@ -1015,6 +1126,23 @@ class SemWindow(QMainWindow):
         self.method_save_btn.setEnabled(ready and arow >= 0)
         self.method_auto.setEnabled(has_method)
         self.batch_btn.setEnabled(has_method)
+        # what shows: only what can be used now (0.8: controls appear when they have something to act on)
+        any_auto = bool(self.analyses)
+        saved = any(self.method_box.itemData(i) is not None for i in range(self.method_box.count()))
+        self.rerun_btn.setVisible(arow >= 0)
+        for w in (self.auto_list, self.auto_delete, self.auto_show):
+            w.setVisible(any_auto)
+        examples = objects_ok or n_ex > 0 or self.example_btn.isChecked()
+        for w in (self.example_btn, self.tune_btn, self.clear_examples_btn):
+            w.setVisible(examples)
+        self.example_info.setVisible(examples and bool(self.example_info.text()))
+        for w in (self.method_box, self.method_apply_btn, self.method_save_btn):
+            w.setVisible(any_auto or saved)
+        self.method_save_btn.setVisible(any_auto)
+        self.method_apply_btn.setVisible(saved)
+        self.method_auto.setVisible(has_method)
+        self.batch_btn.setVisible(saved)
+        self.pool_btn.setVisible(self.pool_btn.isEnabled())
 
     def switch_language(self, lang: str) -> None:
         """Remember the interface language; it applies when the window is opened again."""
@@ -1070,6 +1198,17 @@ class SemWindow(QMainWindow):
         self._show(cal)
         return True
 
+    def _update_3d_tab(self) -> None:
+        """The 3D tab (tilt 2.5D) is a preview in 0.8: shown with VEXEL_PREVIEW=1, or when the
+        open record already has tilt views (made with an earlier version), so they stay reachable."""
+        from vexel.ui.launcher import preview_enabled
+
+        ms = getattr(self, "ms", None)
+        show = preview_enabled() or (ms is not None and ms.tilt3d is not None)
+        self.tabs.setTabVisible(TAB_3D, show)
+        if not show and self.tabs.currentIndex() == TAB_3D:
+            self.tabs.setCurrentIndex(TAB_MEASURE)
+
     # -- measuring ------------------------------------------------------------------------
 
     def set_tool(self, tool: str) -> None:
@@ -1078,17 +1217,46 @@ class SemWindow(QMainWindow):
         elif tool in ("region", "example"):
             self.tabs.setCurrentIndex(TAB_AUTO)
         elif tool in ("hprofile", "box_lower", "box_upper"):
+            self._update_3d_tab()
             self.tabs.setCurrentIndex(TAB_3D)
         elif tool != "pan":
             self.tabs.setCurrentIndex(TAB_MEASURE)  # the results appear there
         self.view.set_tool(tool)
         if tool in self.tool_actions:
             self.tool_actions[tool].setChecked(True)
+            self._tool_chosen(self.tool_actions[tool])
         else:
             for act in self.tool_actions.values():
                 act.setChecked(False)
+        self._update_tool_settings(tool)
         self.view.setFocus()
         self.say(TOOL_HINTS.get(tool, ""))
+
+    def _update_tool_settings(self, tool: str) -> None:
+        """Only the settings of the tool in use: the count category for counting, width and edge
+        definition for line profiles."""
+        form = self.meas_form
+        form.setRowVisible(self.category, tool == "point")
+        for w in (self.profile_width, self.edge_method, self.edge_level):
+            form.setRowVisible(w, tool == "profile")
+
+    def _update_tabs(self, show_processing: bool | None = None) -> None:
+        """Image processing shows when it is asked for (视图 → 图像处理) or the record has
+        processing steps; 3D as a preview (``_update_3d_tab``)."""
+        ms = getattr(self, "ms", None)
+        has_steps = ms is not None and bool(ms.processing.steps)
+        want = self.processing_act.isChecked() if show_processing is None else show_processing
+        if has_steps and not self.processing_act.isChecked():
+            self.processing_act.blockSignals(True)
+            self.processing_act.setChecked(True)
+            self.processing_act.blockSignals(False)
+            want = True
+        self.tabs.setTabVisible(TAB_PROCESSING, bool(want or has_steps))
+        if not (want or has_steps) and self.tabs.currentIndex() == TAB_PROCESSING:
+            self.tabs.setCurrentIndex(TAB_MEASURE)
+        if show_processing:
+            self.tabs.setCurrentIndex(TAB_PROCESSING)
+        self._update_3d_tab()
 
     def _profile_params(self) -> dict[str, Any]:
         return {"width": int(self.profile_width.value()), "method": self.edge_method.currentData(), "level": self.edge_level.value() / 100}
@@ -2213,6 +2381,7 @@ class SemWindow(QMainWindow):
             spec.views.append(TiltView(file=rel, sha256=file_sha256(p), tilt=float(t) if t is not None else 0.0))
             if t is None:
                 self.say(tr(f"{p.name} 的元数据中没有倾角：请在表中填写"))
+        self._update_3d_tab()
         self.tabs.setCurrentIndex(TAB_3D)
         self._changed()
 
@@ -2347,6 +2516,7 @@ class SemWindow(QMainWindow):
         self.tilt_result, self._tilt_key = res, key
         if self.tilt_show.currentData() == "image":
             self.tilt_show.setCurrentIndex(self.tilt_show.findData("height"))
+        self._update_3d_tab()
         self.tabs.setCurrentIndex(TAB_3D)
         self._refresh()
 
@@ -2645,9 +2815,21 @@ class SemWindow(QMainWindow):
                                   + (tr(f"；暗端 {sat['low']:g}") if sat.get("low") is not None else ""))  # fmt: skip
         else:
             self.sat_info.setText(tr("没有发现饱和区"))
+        self._show_sat_badge()
         notes = [n for n in res.notes if not n.startswith("饱和区")]  # pack notes, still untranslated here
         self.proc_notes.setText("\n".join(f"• {tr(n)}" for n in notes))
         self.proc_notes.setVisible(bool(notes))
+
+    def _show_sat_badge(self) -> None:
+        """A warning above the panel when part of the image is saturated (0.05 % or more) and
+        the red marking is not shown."""
+        res = self.result
+        sat = res.saturation if res is not None else {}
+        frac = float(sat.get("fraction") or 0.0) if self.ms is not None and self.ms.processing.saturation.enabled else 0.0
+        show = frac >= 5e-4 and not self.sat_show.isChecked()
+        if show:
+            self.sat_badge.setText(tr(f"⚠ 图中有饱和区（{frac:.2%}）：那里的信息已经丢失，魔棒和线剖面不使用这些像素。") + f" <a href='show'>{tr('在图上显示')}</a>")
+        self.sat_badge.setVisible(show)
 
     def _show_mask(self) -> None:
         res = self.result
@@ -2715,6 +2897,7 @@ class SemWindow(QMainWindow):
         """Add a processing step (corrections go before the display steps)."""
         from vexel.packs.sem.process import OPS, step
 
+        self.processing_act.setChecked(True)
         self.tabs.setCurrentIndex(TAB_PROCESSING)
         new = step(op, **params)
         steps = self.ms.processing.steps if self.ms is not None else []

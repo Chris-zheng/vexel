@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "note": "Seed cases (synthetic). Phase 3 grows this to about 60 images, half SEM and half droplets, including real images referenced under VEXEL_EVAL_DATA.",
+  "cases": [
+    {"id": "sem-lines", "module": "sem", "source": {"synthetic": "rough_lines", "args": {"seed": 1}}, "goal": "", "expect": {"recipe": "lines"}},
+    {"id": "sem-lines-goal", "module": "sem", "source": {"synthetic": "rough_lines", "args": {"seed": 2, "width": 20.0, "pitch": 50.0}}, "goal": "线宽和粗糙度", "expect": {"recipe": "lines"}},
+    {"id": "sem-lines-vertical-en", "module": "sem", "source": {"synthetic": "rough_lines", "args": {"seed": 3}, "transpose": true}, "goal": "line width", "expect": {"recipe": "lines"}},
+    {"id": "sem-holes", "module": "sem", "source": {"synthetic": "hole_array", "args": {"seed": 1}}, "goal": "", "expect": {"recipe": "holes"}},
+    {"id": "sem-holes-goal", "module": "sem", "source": {"synthetic": "hole_array", "args": {"seed": 2, "diameter": 30.0, "pitch": [60.0, 60.0]}}, "goal": "孔径", "expect": {"recipe": "holes"}},
+    {"id": "sem-particles", "module": "sem", "source": {"synthetic": "particle_field", "args": {"seed": 1}}, "goal": "", "expect": {"recipe": "particles"}},
+    {"id": "sem-particles-touching", "module": "sem", "source": {"synthetic": "particle_field", "args": {"seed": 2, "touching": 0.5}}, "goal": "粒径分布", "expect": {"recipe": "particles"}},
+    {"id": "sem-pores", "module": "sem", "source": {"synthetic": "particle_field", "args": {"seed": 3}, "invert": true}, "goal": "孔隙率", "expect": {"recipe": "pores"}, "accept": ["particles"], "note": "dark discs in a bright matrix: pores when asked for porosity"},
+    {"id": "sem-fibres", "module": "sem", "source": {"synthetic": "fibre_mat", "args": {"seed": 1}}, "goal": "纤维直径", "expect": {"recipe": "fibres"}},
+    {"id": "sem-layers", "module": "sem", "source": {"synthetic": "layer_stack", "args": {"seed": 1}}, "goal": "", "expect": {"recipe": "layers"}},
+    {"id": "sem-layers-bent", "module": "sem", "source": {"synthetic": "bent_layer_stack", "args": {"seed": 1}}, "goal": "层厚", "expect": {"recipe": "layers"}},
+    {"id": "sem-profile", "module": "sem", "source": {"synthetic": "xsection_feature", "args": {"seed": 1}}, "goal": "侧壁角", "expect": {"recipe": "profile"}},
+    {"id": "sem-tip", "module": "sem", "source": {"synthetic": "tip", "args": {}}, "goal": "", "expect": {"recipe": "tip"}},
+    {"id": "sem-nothing", "module": "sem", "source": {"synthetic": "noise", "args": {"seed": 1}}, "goal": "", "expect": {"recipe": null}, "note": "blank frame with noise: nothing to measure"},
+    {"id": "droplet-basic", "module": "droplet", "source": {"synthetic": "droplets", "args": {"seed": 1}}, "goal": "粒径和生成频率", "expect": {"recipe": "droplet_basic"}},
+    {"id": "droplet-basic-unasked", "module": "droplet", "source": {"synthetic": "droplets", "args": {"seed": 4, "noise_sigma": 8.0}}, "goal": "", "expect": {"recipe": "droplet_basic"}},
+    {"id": "droplet-cells", "module": "droplet", "source": {"synthetic": "droplets", "args": {"seed": 6, "cell_lambda": 1.0}}, "goal": "数每个液滴里的细胞", "expect": {"recipe": "droplet_encapsulation"}},
+    {"id": "droplet-cells-unasked", "module": "droplet", "source": {"synthetic": "droplets", "args": {"seed": 7, "cell_lambda": 0.8}}, "goal": "", "expect": {"recipe": "droplet_encapsulation"}},
+    {"id": "droplet-fluo", "module": "droplet", "source": {"synthetic": "droplets", "args": {"seed": 9, "fluorescence": true, "fluo_lambda": 0.5}}, "goal": "ddPCR 阳性比例", "expect": {"recipe": "droplet_fluorescence"}},
+    {"id": "droplet-fluo-cells", "module": "droplet", "source": {"synthetic": "droplets", "args": {"seed": 11, "fluorescence": true, "fluo_lambda": 0.6, "cell_lambda": 1.0}}, "goal": "荧光阳性和每滴细胞数", "expect": {"recipe": "droplet_fluorescence_encapsulation"}},
+    {"id": "droplet-vertical-en", "module": "droplet", "source": {"synthetic": "droplets", "args": {"seed": 12}, "transpose": true}, "goal": "measure droplet size", "expect": {"recipe": "droplet_basic"}}
+  ]
+}

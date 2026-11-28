@@ -155,6 +155,12 @@ class MainWindow(QMainWindow):
         self._previewed = False
         self._has_results = False
         self.sample_dir = Path.home() / "Vexel" / "示例数据"
+        file_menu = self.menuBar().addMenu("文件")
+        file_menu.addAction("选择文件…", self._choose_file)
+        file_menu.addAction("图像序列文件夹…", self._choose_folder)
+        file_menu.addSeparator()
+        file_menu.addAction("在线监控（回放录像 / 监视采集文件夹）…", self.open_live)
+        file_menu.addAction("批量分析（多个文件、分组统计）…", self.open_batch)
         help_menu = self.menuBar().addMenu("帮助")
         help_menu.addAction("显示引导", self.show_guide)
         help_menu.addAction("打开示例数据", self.open_sample)
@@ -192,7 +198,9 @@ class MainWindow(QMainWindow):
         self.plan_btn.clicked.connect(self.auto_plan)
         plan_row.addWidget(self.goal_edit, 1)
         plan_row.addWidget(self.plan_btn)
-        v.addLayout(plan_row)
+        self.plan_box = QWidget()
+        plan_row.setContentsMargins(0, 0, 0, 0)
+        self.plan_box.setLayout(plan_row)
         self.plan_extra: dict[str, Any] = {}  # planned settings that have no control in this window
         self.live_btn = QPushButton("在线监控（回放录像 / 监视采集文件夹）…")
         self.live_btn.setToolTip("边采集（或边回放）边分析：滚动统计、漂移报警、处理帧率与丢帧")
@@ -201,16 +209,23 @@ class MainWindow(QMainWindow):
         self.batch_btn = QPushButton("批量分析（多个文件、分组统计）…")
         self.batch_btn.setToolTip("用当前的设置分析一个文件夹或一张设计表里的所有录像，按组比较结果")
         self.batch_btn.clicked.connect(self.open_batch)
-        v.addWidget(self.batch_btn)
+        self.live_btn.hide()  # 文件 → 在线监控 / 批量分析
+        self.batch_btn.hide()
         self.file_label = QLabel("未选择数据")
         self.file_label.setObjectName("fileName")
         self.file_label.setWordWrap(True)
         self.info_label = muted("也可以直接把文件拖进窗口")
         v.addWidget(self.file_label)
         v.addWidget(self.info_label)
+        v.addWidget(self.plan_box)
 
-        v.addSpacing(10)
-        v.addWidget(heading("2  设置"))
+        # 2 and 3 appear once there is data (0.8: the first screen asks only for data)
+        self.settings_box = QWidget()
+        sv = QVBoxLayout(self.settings_box)
+        sv.setContentsMargins(0, 0, 0, 0)
+        sv.setSpacing(8)
+        sv.addSpacing(10)
+        sv.addWidget(heading("2  设置"))
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
         self.pixel_edit = _number_edit("例如 2.0")
@@ -257,11 +272,11 @@ class MainWindow(QMainWindow):
         self.form = form
         self.cells_check.toggled.connect(self._toggle_cells)
         self.fluo_check.toggled.connect(self._toggle_cells)
-        v.addLayout(form)
+        sv.addLayout(form)
         self.calib_note = muted("")
-        v.addWidget(self.calib_note)
+        sv.addWidget(self.calib_note)
 
-        v.addSpacing(6)
+        sv.addSpacing(6)
         self.adv_toggle = QToolButton()
         self.adv_toggle.setText("高级设置")
         self.adv_toggle.setCheckable(True)
@@ -269,7 +284,7 @@ class MainWindow(QMainWindow):
         self.adv_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.adv_toggle.setAutoRaise(True)
         self.adv_toggle.toggled.connect(self._toggle_advanced)
-        v.addWidget(self.adv_toggle)
+        sv.addWidget(self.adv_toggle)
         self.adv_box = QWidget()
         adv = QFormLayout(self.adv_box)
         adv.setContentsMargins(0, 0, 0, 0)
@@ -294,10 +309,11 @@ class MainWindow(QMainWindow):
         reset.clicked.connect(self.reset_advanced)
         adv.addRow("", reset)
         self.adv_box.setVisible(False)
-        v.addWidget(self.adv_box)
+        sv.addWidget(self.adv_box)
         self.reset_advanced()
         self._fill_channels(1, None)
         self._toggle_cells(False)
+        v.addWidget(self.settings_box)
 
         v.addStretch(1)
         self.progress = QProgressBar()
@@ -308,7 +324,10 @@ class MainWindow(QMainWindow):
         self.status = muted("")
         v.addWidget(self.progress)
         v.addWidget(self.status)
-        v.addWidget(heading("3  分析"))
+        self.analyse_box = QWidget()
+        av = QVBoxLayout(self.analyse_box)
+        av.setContentsMargins(0, 0, 0, 0)
+        av.addWidget(heading("3  分析"))
         row = QHBoxLayout()
         self.preview_btn = QPushButton("快速预览")
         self.preview_btn.setToolTip(f"只分析前 {PREVIEW_FRAMES} 帧，用来检查设置是否合适；结果不保存")
@@ -322,7 +341,8 @@ class MainWindow(QMainWindow):
         row.addWidget(self.preview_btn)
         row.addWidget(self.run_btn, 1)
         row.addWidget(self.cancel_btn, 1)
-        v.addLayout(row)
+        av.addLayout(row)
+        v.addWidget(self.analyse_box)
         return panel
 
     def _build_results(self) -> QWidget:
@@ -748,6 +768,9 @@ class MainWindow(QMainWindow):
             self.update_guide()
 
     def _set_ready(self, ready: bool) -> None:
+        has = self.path is not None
+        for w in (self.settings_box, self.analyse_box, self.plan_box):
+            w.setVisible(has)
         self.preview_btn.setEnabled(ready)
         self.run_btn.setEnabled(ready)
         self.plan_btn.setEnabled(ready)

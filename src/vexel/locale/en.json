@@ -808,5 +808,18 @@
  "没有可测宽度的走线段（焊盘、交叉、端点和区域边界附近不测）：只给出焊盘与间距": "No trace segment to measure the width on (none near pads, junctions, ends and the region's edge): only pads and clearances are given",
  "{} 个导体没有可测宽度的走线段（走线太短，或全在焊盘、交叉与边界附近）：最窄走线只在其余导体中找": "{} conductors have no trace segment to measure the width on (too short, or all near pads, junctions and the edge): the narrowest trace is found among the others",
  "只有一个相连的导体：没有不同网络之间的间距可测（两条走线相碰时会被当成一个网络）": "Only one connected conductor: there is no clearance between different nets to measure (two traces that touch count as one net)",
- "导体占了区域的 {}：检查“导体是”的亮暗设置": "Conductors cover {} of the region: check the \"Conductors are\" setting"
+ "导体占了区域的 {}：检查“导体是”的亮暗设置": "Conductors cover {} of the region: check the \"Conductors are\" setting",
+ "⚠ 图中有饱和区（{}）：那里的信息已经丢失，魔棒和线剖面不使用这些像素。": "⚠ Part of the image is saturated ({}): its information is lost; the magic wand and line profiles do not use these pixels.",
+ "帮助": "Help",
+ "开始": "Start",
+ "打开 SEM 图片…": "Open an SEM image…",
+ "打开一张 SEM 图片：标定会自动完成（仪器元数据或信息栏的比例尺），然后自动规划测量。": "Open an SEM image: it is calibrated automatically (instrument metadata or the data bar's scale bar), then its measurement is planned.",
+ "折线、自由画、魔棒、角度、圆、椭圆、线剖面": "Polyline, freehand, magic wand, angle, circle, ellipse, line profile",
+ "更多工具": "More tools",
+ "更改标定…": "Change calibration…",
+ "校平、去条纹、背景、去噪、对比度、饱和区与多帧平均": "Levelling, destriping, background, denoising, contrast, saturation and frame averaging",
+ "样品台倾斜校正": "Stage tilt correction",
+ "用上方工具栏在图上测量；结果列在下面。": "Measure on the image with the toolbar above; the results are listed below.",
+ "编辑": "Edit",
+ "视图": "View"
 }

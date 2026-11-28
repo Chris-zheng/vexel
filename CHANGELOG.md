@@ -1,5 +1,26 @@
 # 更新记录
 
+## Unreleased — 0.8 phase 1: a simple first screen
+
+- SEM window:
+  - The toolbar keeps open, select, length, area, count, "更多工具" (the other seven tools; the button names the one in use), undo and export. Redo, fit, load record, diagnostics and the language moved to new menus (文件, 编辑, 视图, 帮助).
+  - Before an image only "打开 SEM 图片…" shows. After it, three tabs (标定, 测量, 自动测量): image processing appears from 视图 → 图像处理 or when the record has processing steps.
+  - Controls appear when they have something to act on: the two ways to calibrate fold behind "更改标定…" once confirmed (stage tilt correction moved to the calibration tab); the measure tab shows only the current tool's settings; on the auto tab the list, correct-by-example and "存为方案" appear with a result, "应用方案" and batch with a saved method; empty result tables are hidden.
+  - Saturation is still marked (the wand and profiles skip it) but no longer drawn in red by default: a warning above the panel offers to show it.
+  - Visible controls: first screen with an image 26 → 12, auto tab 44 → 18, measure tab 35 → 11 (before/after in `docs/screenshots/0.8/`).
+- Droplet window: the first screen asks only for data (20 → 5 controls); the goal and auto-plan row, settings and analysis appear once data is loaded. Live monitoring and batch analysis moved to a new 文件 menu.
+- Guide bar: buttons of the previous step no longer linger under the new ones.
+- GUI tests for the new behaviour, including a guard that the SEM first screen keeps at most 12 controls; manual and tester guides updated.
+
+## Unreleased — 0.8 plan, phase 0: feature audit, evaluation sets, CI
+
+- `docs/plan_0.8.md`: the confirmed 0.8 plan (desktop app is the product; UI simplification, stability, AI gateway and agent, training on rented GPUs, ONNX models imported locally), six phases with verification gates. `docs/feature_audit_0.8.md`: every desktop feature, its evidence and a proposed grade.
+- SEM window: the 3D (tilt 2.5D) tab is a preview, shown with `VEXEL_PREVIEW=1` or when the open record already has tilt views; 3D work and large image data move to the next phase.
+- Web workbench frozen (README, manual 11.11).
+- Evaluation sets (`evalsets/`): planning cases (21 synthetic seeds; offline rules 21/21) scored by `tests/benchmarks/plan_eval.py`, red-team prompts for the gateway (35 seeds), the segmentation set's format.
+- CI installs the `web` extra, so the SEM HTTP API tests run instead of being skipped; the traces API test skips cleanly without FastAPI (it failed CI on the last push). The two pushes before that failed CI too: the every-recipe test lacked an image for the nested recipe (fixed in the traces commit).
+- Known issues updated (droplet and platform list was still 0.6.0b1).
+
 ## Unreleased — traces and pads (PCB, metal on a die) in Python (step 4, first port)
 
 - New SEM recipe `traces` (导线与焊盘): conductors seen from above. Trace width along the centre lines (the fibre method, away from pads, junctions, ends and the edge; the board's own threshold), the narrowest trace (smallest segment median, and how many conductors had no measurable trace), round pads (circle fitted to edge points, trace junctions left out), wide areas that are not round (square pads, sharp bends) listed apart, the minimum clearance between neighbouring conductors (shortest distance between their outlines at the threshold), coverage. Opens and shorts are not judged.

@@ -1114,6 +1114,25 @@ def test_sem_window_plan_card_banner_and_panel(app, tmp_path, monkeypatch):
     _dispose(w)
 
 
+def test_sem_window_3d_tab_is_a_preview(app, tmp_path, monkeypatch):
+    """0.8: tilt 3D is deferred to the next phase - its tab only shows in preview mode."""
+    from vexel.synthetic.sem import write_sem
+    from vexel.ui.sem_window import TAB_3D, SemWindow
+
+    monkeypatch.setenv("VEXEL_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("VEXEL_PREVIEW", raising=False)
+    p = tmp_path / "a.tif"
+    write_sem(p, "thermo", pixel_size=4e-9, rows=200, cols=300)
+    w = SemWindow()
+    assert w.open_path(p, wait=True)
+    assert not w.tabs.isTabVisible(TAB_3D)
+    _dispose(w)
+    monkeypatch.setenv("VEXEL_PREVIEW", "1")
+    w = SemWindow()
+    assert w.tabs.isTabVisible(TAB_3D)
+    _dispose(w)
+
+
 def test_sem_window_tilt_3d(app, tmp_path, monkeypatch):
     import tifffile
 
@@ -1213,3 +1232,97 @@ def test_language_setting(tmp_path, monkeypatch):
         i18n.set_language("fr")
     i18n.set_language("zh")
     assert i18n.tr("标定") == "标定"
+
+
+# -- 0.8 phase 1: a simple first screen ---------------------------------------------------
+
+
+def _visible_controls(w) -> int:
+    """Interactive controls a person sees: buttons (toolbar ones too), inputs, visible tabs."""
+    from qtpy.QtWidgets import QAbstractButton, QAbstractSpinBox, QComboBox, QLineEdit, QSlider, QTabBar, QToolButton
+
+    n = sum(c.isVisible() and not (isinstance(c, QToolButton) and isinstance(c.parent(), QTabBar))
+            for cls in (QAbstractButton, QComboBox, QLineEdit, QAbstractSpinBox, QSlider) for c in w.findChildren(cls))  # fmt: skip
+    return n + sum(tb.isTabVisible(i) for tb in w.findChildren(QTabBar) if tb.isVisible() for i in range(tb.count()))
+
+
+def test_sem_window_shows_what_the_step_needs(app, tmp_path, monkeypatch):
+    from vexel.synthetic.sem import write_sem
+    from vexel.ui.sem_window import CORE_TOOLS, TAB_3D, TAB_AUTO, TAB_PROCESSING, SemWindow
+
+    monkeypatch.setenv("VEXEL_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("VEXEL_PREVIEW", raising=False)
+    w = SemWindow()
+    w.resize(1440, 900)
+    w.show()
+    app.processEvents()
+    # before an image: only "open"
+    assert w.start_panel.isVisible() and not w.tabs.isVisible() and not w.more_btn.isEnabled()
+    from qtpy.QtWidgets import QToolBar
+
+    bar_tools = [t for t, a in w.tool_actions.items() if any(a in tb.actions() for tb in w.findChildren(QToolBar))]
+    assert set(bar_tools) == set(CORE_TOOLS)
+    p = tmp_path / "a.tif"
+    write_sem(p, "thermo", pixel_size=4e-9, rows=300, cols=400)
+    assert w.open_path(p, wait=True)
+    app.processEvents()
+    assert not w.start_panel.isVisible() and w.tabs.isVisible()
+    assert _visible_controls(w) <= 12  # was 26 before 0.8 (gate 1: at least half fewer)
+    # calibration settled: one "change" button instead of the two ways to calibrate
+    assert w.cal_change_btn.isVisible() and not w.pick_btn.isVisible()
+    w.cal_change_btn.click()
+    assert w.pick_btn.isVisible() and w.size_btn.isVisible()
+    # image processing and 3D: only when asked for
+    assert not w.tabs.isTabVisible(TAB_PROCESSING) and not w.tabs.isTabVisible(TAB_3D)
+    w.processing_act.setChecked(True)
+    assert w.tabs.isTabVisible(TAB_PROCESSING) and w.tabs.currentIndex() == TAB_PROCESSING
+    w.processing_act.setChecked(False)
+    assert not w.tabs.isTabVisible(TAB_PROCESSING)
+    # a tool from "更多工具" names itself on the button; tool settings follow the tool
+    w.set_tool("profile")
+    assert "线剖面" in w.more_btn.text() and w.profile_width.isVisible() and not w.category.isVisible()
+    w.set_tool("point")
+    assert w.more_btn.text() == "更多工具" and w.category.isVisible() and not w.profile_width.isVisible()
+    # automatic measurement: correction, methods and batch appear with a result
+    w.tabs.setCurrentIndex(TAB_AUTO)
+    app.processEvents()
+    assert not w.example_btn.isVisible() and not w.method_save_btn.isVisible() and not w.auto_list.isVisible()
+    w.recipe.setCurrentIndex(w.recipe.findData("particles"))
+    w.run_analysis()
+    app.processEvents()
+    assert w.analyses and w.auto_list.isVisible() and w.example_btn.isVisible() and w.method_save_btn.isVisible()
+    assert not w.batch_btn.isVisible()  # no saved method yet
+    _dispose(w)
+
+
+def test_sem_saturation_is_a_warning_not_a_red_overlay(app, tmp_path, monkeypatch):
+    from vexel.synthetic.sem import write_sem
+    from vexel.ui.sem_window import SemWindow
+
+    monkeypatch.setenv("VEXEL_HOME", str(tmp_path / "home"))
+    p = tmp_path / "a.tif"
+    write_sem(p, "thermo", pixel_size=4e-9, rows=600, cols=800)  # its brightest particles clip
+    w = SemWindow()
+    w._sync = True
+    w.show()
+    assert w.open_path(p, wait=True)
+    app.processEvents()
+    assert not w.sat_show.isChecked() and w.sat_badge.isVisible() and "饱和" in w.sat_badge.text()
+    w.sat_badge.linkActivated.emit("show")
+    assert w.sat_show.isChecked() and not w.sat_badge.isVisible()
+    _dispose(w)
+
+
+def test_droplet_window_asks_only_for_data_first(window, droplet_dataset, app):
+    window.show()
+    app.processEvents()
+    assert not window.settings_box.isVisible() and not window.analyse_box.isVisible() and not window.plan_box.isVisible()
+    assert not window.live_btn.isVisible() and not window.batch_btn.isVisible()
+    from qtpy.QtWidgets import QMenu
+
+    menu_items = [a.text() for m in window.menuBar().findChildren(QMenu) for a in m.actions()]
+    assert any(t.startswith("在线监控") for t in menu_items) and any(t.startswith("批量分析") for t in menu_items)
+    assert _visible_controls(window) <= 6
+    assert window.open_path(droplet_dataset / "droplets.ome.tif")
+    app.processEvents()
+    assert window.settings_box.isVisible() and window.analyse_box.isVisible() and window.plan_box.isVisible()
