@@ -24,6 +24,8 @@ export const PYTHON_SEM_RECIPE: Record<string, { recipe: string; params: Record<
   // cells bounded by dark membranes, each with a dark nucleus (the web workflow's default)
   nested_cell_nucleus: { recipe: 'nested', params: { parent: 'membrane', child: 'dark' } },
   sem_curved_multilayer: { recipe: 'layers', params: { geometry: 'curved', orientation: 'auto' } },
+  // conductors from above: copper is brighter than the solder mask or laminate in grey
+  pcb_inspection: { recipe: 'traces', params: { feature: 'bright' } },
 };
 
 export interface PythonSummaryItem {
@@ -95,6 +97,8 @@ export const SAME_QUANTITY: Record<string, { web: string; python: (s: PythonSumm
   },
   // mean nucleus / cell area, in percent on both sides (unit-free: compared even uncalibrated)
   nested: { web: 'mean_sub_area_ratio_pct', python: (s) => withUnit(num(s, 'ratio_mean') === null ? null : (num(s, 'ratio_mean') as number) * 100, '%') },
+  // the browser takes area / longest box side per trace: right only for straight traces along an axis
+  traces: { web: 'trace_width_mean', python: (s, u) => withUnit(num(s, 'width_mean'), u) },
 };
 
 /** How many objects each engine found, per Python recipe (browser summary key, Python summary
@@ -104,6 +108,7 @@ export const SAME_COUNT: Record<string, { web: string; python: string }> = {
   particles: { web: 'particles', python: 'particles' },
   layers: { web: 'layer_count', python: 'interfaces' }, // Python counts interfaces: layers = interfaces - 1
   nested: { web: 'parent_count', python: 'parents' },
+  traces: { web: 'pad_count', python: 'pads' },
 };
 
 /** The Python count comparable with the browser's (layers: interfaces - 1). */

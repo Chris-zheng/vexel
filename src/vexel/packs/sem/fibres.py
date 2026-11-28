@@ -77,10 +77,14 @@ def _steepest(prof: np.ndarray, off: np.ndarray, x0: np.ndarray, sgn: int, reach
 
 
 def fibres(a: np.ndarray, *, feature: str = "bright", threshold: str = "mid", method: str = "gradient", smooth: float = 1.0,
-           min_diameter: float = 2.0, mask: np.ndarray | None = None, sx: float = 1.0, sy: float = 1.0) -> dict[str, Any]:  # fmt: skip
+           min_diameter: float = 2.0, mask: np.ndarray | None = None, sx: float = 1.0, sy: float = 1.0,
+           level: float | None = None, mask_margin: float = 2.0) -> dict[str, Any]:  # fmt: skip
     """See the module docstring. ``method``: the edge is the steepest point of the grey profile
     near the threshold crossing (``gradient``: not moved by edge brightening) or the threshold
-    crossing itself (``threshold``)."""
+    crossing itself (``threshold``). ``level``: a threshold found elsewhere (on the
+    brightness-signed image, ``feature`` applied), used instead of the region's own.
+    ``mask_margin``: no samples closer to the mask than this many times the largest nearby
+    fibre radius, plus 3 px."""
     from scipy import ndimage as ndi
     from skimage.morphology import remove_small_holes, remove_small_objects, skeletonize
 
@@ -92,7 +96,10 @@ def fibres(a: np.ndarray, *, feature: str = "bright", threshold: str = "mid", me
     vals = s[~mask] if mask is not None and mask.any() else s.ravel()
     if not np.ptp(vals) > 0:
         raise ValueError("the region has no contrast")
-    if threshold == "local":
+    if level is not None:
+        fg = s > level
+        t_img = np.full_like(s, level)
+    elif threshold == "local":
         from skimage.filters import threshold_local
 
         t_img = threshold_local(s, block_size=2 * (max(a.shape) // 8) + 1, offset=0)
@@ -125,7 +132,7 @@ def fibres(a: np.ndarray, *, feature: str = "bright", threshold: str = "mid", me
     edge = np.minimum.reduce([yy, xx, h - 1 - yy, w - 1 - xx])
     excl |= edge < 2 * dist + 3
     if mask is not None:
-        excl |= _near(mask, 2 * ndi.maximum_filter(dist, 5) + 3, (h, w))
+        excl |= _near(mask, mask_margin * ndi.maximum_filter(dist, 5) + 3, (h, w))
     ux, uy = _direction(fg, dist, max(1.5, 0.75 * r_med))
     sy_, sx_ = np.nonzero(skel & ~excl & (dist >= r_min * 0.5))
     # grey profile across the fibre through each sample, 0.25 px steps

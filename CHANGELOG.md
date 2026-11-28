@@ -1,5 +1,12 @@
 # 更新记录
 
+## Unreleased — traces and pads (PCB, metal on a die) in Python (step 4, first port)
+
+- New SEM recipe `traces` (导线与焊盘): conductors seen from above. Trace width along the centre lines (the fibre method, away from pads, junctions, ends and the edge; the board's own threshold), the narrowest trace (smallest segment median, and how many conductors had no measurable trace), round pads (circle fitted to edge points, trace junctions left out), wide areas that are not round (square pads, sharp bends) listed apart, the minimum clearance between neighbouring conductors (shortest distance between their outlines at the threshold), coverage. Opens and shorts are not judged.
+- Synthetic boards (`pcb_board`, in `sem_metrology_eval.py`): width bias about 0.01 px, worst segment 0.4 px; round pad diameter and minimum clearance within 0.4 px for traces 3-30 px wide; no round pad missed or false, no square pad taken for round. Clearance to a square pad's corner reads up to 1.2 px large: blur rounds the corner in the image.
+- `fibres` takes an outside threshold (`level`) and a narrower no-sample margin around the mask (`mask_margin`); defaults unchanged.
+- Web workbench: the PCB workflow is measured by Python (mean trace width compared with the preview, pad counts compared).
+
 ## Unreleased — web workbench sends the original file; Python's outlines on the canvas (step 3)
 
 - Uploads (TIFF, PNG, JPEG, BMP) go to the Python engine as the original file: full resolution and bit depth, the instrument's metadata and data bar read by Python (the workbench shows uploads at most 960 px and 8 bits). The person's calibration is converted to file pixels; a confirmed data-bar crop is passed on (bottom bar: rows above it; top bar: the region below it). Built-in samples and DM3/DM4 still go as the shown pixels; a file Python cannot read falls back to the shown pixels and the card says why. The card names what was measured.

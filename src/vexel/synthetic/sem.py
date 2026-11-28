@@ -572,6 +572,114 @@ def _disks(rows: int, cols: int, discs: list[tuple[float, float, float]], ss: in
     return cov.reshape(rows, ss, cols, ss).mean(axis=(1, 3))
 
 
+def _seg_dist(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Distance from points ``p`` (..., 2) to the segment a-b."""
+    ab = b - a
+    t = np.clip(((p - a) @ ab) / max(float(ab @ ab), 1e-12), 0.0, 1.0)
+    return np.linalg.norm(p - (a + t[..., None] * ab), axis=-1)
+
+
+def _seg_seg(a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray) -> float:
+    """Distance between segments a-b and c-d (0 if they cross)."""
+
+    def orient(p, q, r):
+        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+
+    if orient(a, b, c) * orient(a, b, d) < 0 and orient(c, d, a) * orient(c, d, b) < 0:
+        return 0.0
+    return float(min(_seg_dist(a, c, d), _seg_dist(b, c, d), _seg_dist(c, a, b), _seg_dist(d, a, b)))
+
+
+def pcb_board(rows: int = 420, cols: int = 560, *, nets: int = 7, width: tuple[float, float] = (6.0, 14.0), pad: tuple[float, float] = (2.3, 3.2),
+              clearance: float = 7.0, levels: tuple[float, float] = (0.25, 0.8), blur: float = 1.0, noise: float = 0.03,
+              square: float = 0.0, seed: int = 0) -> tuple[np.ndarray, dict]:  # fmt: skip
+    """Conductors on a board (PCB, or metal lines on a die): each net is a trace of one width
+    (Manhattan and 45° runs, round joints) between two round pads of ``pad`` (min, max) times
+    the trace width (a share ``square`` of the nets has square pads, side = that diameter).
+    Nets are placed at least ``clearance`` px apart. ``levels``: substrate, copper. Drawn 4 x 4
+    supersampled, then blurred, with noise.
+
+    Returns the image and the truth: per net its width, pads (x, y, diameter) and centre line;
+    the clearance (edge to edge) between every two nets closer than 4 widths, and the minimum
+    with its net pair; the copper coverage."""
+    from scipy import ndimage as ndi
+
+    rng = np.random.default_rng(seed)
+    ss = 4
+    margin = 12.0
+    caps: list[tuple[int, np.ndarray, np.ndarray, float]] = []  # net, a, b, radius (round pads: a == b; square pads: 4 edges, radius 0)
+    squares: list[tuple[float, float, float]] = []  # x, y, half side
+    out_nets = []
+    tries = 0
+    while len(out_nets) < nets and tries < 4000:
+        tries += 1
+        w = float(rng.uniform(*width))
+        rp = float(rng.uniform(*pad)) * w / 2
+        m = margin + rp
+        start = np.array([rng.uniform(m, cols - m), rng.uniform(m, rows - m)])
+        pts = [start]
+        for _ in range(int(rng.integers(1, 4))):
+            ang = math.radians(45 * int(rng.integers(0, 8)))
+            ln = float(rng.uniform(40, 160))
+            pts.append(pts[-1] + ln * np.array([math.cos(ang), math.sin(ang)]))
+        P = np.array(pts)
+        if (P[:, 0] < m).any() or (P[:, 0] > cols - m).any() or (P[:, 1] < m).any() or (P[:, 1] > rows - m).any():
+            continue
+        if np.linalg.norm(P[-1] - P[0]) < 4 * rp:
+            continue
+        sq = bool(rng.random() < square)
+        mine = [(len(out_nets), P[i], P[i + 1], w / 2) for i in range(len(P) - 1)]
+        for c in (P[0], P[-1]):
+            if sq:
+                k = [c + rp * np.array(v) for v in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+                mine += [(len(out_nets), k[i], k[(i + 1) % 4], 0.0) for i in range(4)]
+            else:
+                mine.append((len(out_nets), c, c, rp))
+        # a trace must not fold back over itself: its own segments that are not adjacent stay apart
+        segs = mine[: len(P) - 1]
+        if any(_seg_seg(segs[i][1], segs[i][2], segs[j][1], segs[j][2]) < w * 1.5 for i in range(len(segs)) for j in range(i + 2, len(segs))):
+            continue
+        # nor run back over its own pads (only the first and last segment touch them)
+        if any(_seg_dist(c, segs[i][1], segs[i][2]) < rp + w for c, skip in ((P[0], 0), (P[-1], len(segs) - 1)) for i in range(len(segs)) if i != skip):
+            continue
+        if any(_seg_seg(a1, b1, a2, b2) - r1 - r2 < clearance for _, a1, b1, r1 in mine for _, a2, b2, r2 in caps):
+            continue
+        caps += mine
+        if sq:
+            squares += [(float(P[0][0]), float(P[0][1]), rp), (float(P[-1][0]), float(P[-1][1]), rp)]
+        out_nets.append({"net": len(out_nets) + 1, "width": w, "pad_shape": "square" if sq else "round",
+                         "pads": [(float(P[0][0]), float(P[0][1]), 2 * rp), (float(P[-1][0]), float(P[-1][1]), 2 * rp)],
+                         "centre_line": P.tolist(), "length": float(np.linalg.norm(np.diff(P, axis=0), axis=1).sum())})  # fmt: skip
+    off = (np.arange(ss) + 0.5) / ss
+    yy = (np.arange(rows)[:, None] + off[None, :]).reshape(-1)
+    xx = (np.arange(cols)[:, None] + off[None, :]).reshape(-1)
+    cov = np.zeros((rows * ss, cols * ss), bool)
+    for _, a, b, r in caps:
+        y0, y1 = max(int((min(a[1], b[1]) - r - 1) * ss), 0), min(int((max(a[1], b[1]) + r + 1) * ss) + 1, rows * ss)
+        x0, x1 = max(int((min(a[0], b[0]) - r - 1) * ss), 0), min(int((max(a[0], b[0]) + r + 1) * ss) + 1, cols * ss)
+        gx, gy = np.meshgrid(xx[x0:x1], yy[y0:y1])
+        cov[y0:y1, x0:x1] |= _seg_dist(np.stack([gx, gy], -1), a, b) <= r
+    for cx, cy, hs in squares:
+        y0, y1 = max(int((cy - hs - 1) * ss), 0), min(int((cy + hs + 1) * ss) + 1, rows * ss)
+        x0, x1 = max(int((cx - hs - 1) * ss), 0), min(int((cx + hs + 1) * ss) + 1, cols * ss)
+        cov[y0:y1, x0:x1] |= (np.abs(yy[y0:y1, None] - cy) <= hs) & (np.abs(xx[None, x0:x1] - cx) <= hs)
+    frac = cov.reshape(rows, ss, cols, ss).mean(axis=(1, 3))
+    lo, hi = levels
+    img = lo + (hi - lo) * frac
+    if blur:
+        img = ndi.gaussian_filter(img, blur)
+    img = img + rng.normal(0, noise, img.shape)
+    pairs = []
+    for i in range(len(out_nets)):
+        for j in range(i + 1, len(out_nets)):
+            g = min(_seg_seg(a1, b1, a2, b2) - r1 - r2 for n1, a1, b1, r1 in caps if n1 == i for n2, a2, b2, r2 in caps if n2 == j)
+            if g < 4 * max(out_nets[i]["width"], out_nets[j]["width"]):
+                pairs.append({"nets": (i + 1, j + 1), "clearance": float(g)})
+    best = min(pairs, key=lambda q: q["clearance"]) if pairs else None
+    return img.astype(np.float64), {"nets": out_nets, "pairs": pairs, "clearance_min": best and best["clearance"],
+                                    "clearance_nets": best and best["nets"], "coverage": float(frac.mean())}  # fmt: skip
+
+
 def hole_array(rows: int = 400, cols: int = 500, *, pitch: tuple[float, float] = (48.3, 48.3), diameter: float = 24.6, sd: float = 0.0,
                missing: int = 3, blur: float = 1.2, noise: float = 0.03, rim: bool = True,
                seed: int = 0, noise_seed: int | None = None) -> tuple[np.ndarray, dict]:  # fmt: skip

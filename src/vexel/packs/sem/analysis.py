@@ -23,6 +23,8 @@ profile     one line or trench in cross-section: height, top/middle/bottom width
 tip         apex radius of curvature (with its uncertainty) and cone angle (``tips.tip``)
 nested      regions inside regions - cells and nuclei: areas, area ratio, N/C
             (``objects.nested``)
+traces      conductors seen from above (PCB, metal on a die): trace width along the centre
+            lines, round pads, the minimum clearance between conductors (``traces.traces``)
 ==========  ===============================================================================
 
 An ``AnalysisSpec`` (recipe, region ``[x0, y0, x1, y1]`` in image pixels, settings) is
@@ -306,6 +308,63 @@ def _fibres(a: np.ndarray, mask: np.ndarray | None, X0: int, Y0: int, sx: float,
     return an
 
 
+def _traces(a: np.ndarray, mask: np.ndarray | None, X0: int, Y0: int, sx: float, sy: float, p: dict[str, Any], spec: AnalysisSpec) -> Analysis:
+    from vexel.packs.sem.traces import traces
+
+    res = traces(a, feature=p["feature"], method=p["method"], smooth=p["smooth"], min_width=p["min_width"], pad_factor=p["pad_factor"],
+                 mask=mask, sx=sx, sy=sy)  # fmt: skip
+    an = Analysis(spec=spec, warnings=list(res["warnings"]))
+    sm = res["summary"]
+    an.summary = [("nets", "导体（相连的网络）数", sm["nets"], "count"), ("pads", "圆形焊盘数", sm["pads"], "count")]
+    if sm.get("width_mean") is not None:
+        an.summary += [("width_mean", "走线宽度（平均，按长度）", sm["width_mean"], "length"), ("width_sd", "走线宽度（标准差）", sm["width_sd"], "length"),
+                       ("width_median", "走线宽度（中位数）", sm["width_median"], "length"),
+                       ("narrowest", "最窄走线（段中位数）", sm.get("narrowest"), "length"), ("samples", "宽度测量点数", sm["samples"], "count")]  # fmt: skip
+    if sm.get("clearance_min") is not None:
+        an.summary += [("clearance_min", "最小间距（不同导体之间）", sm["clearance_min"], "length"),
+                       ("clearance_median", "相邻导体间距（中位数）", sm["clearance_median"], "length"),
+                       ("clearance_pairs", "相邻导体对数", sm["clearance_pairs"], "count")]  # fmt: skip
+    if sm.get("pad_diameter_mean") is not None:
+        an.summary += [("pad_diameter_mean", "焊盘直径（平均）", sm["pad_diameter_mean"], "length"), ("pad_diameter_min", "焊盘直径（最小）", sm["pad_diameter_min"], "length"),
+                       ("pad_diameter_max", "焊盘直径（最大）", sm["pad_diameter_max"], "length")]  # fmt: skip
+    if sm["wide_areas"]:
+        an.summary.append(("wide_areas", "非圆形的宽区域（方焊盘、锐角拐弯）", sm["wide_areas"], "count"))
+    an.summary.append(("coverage", "导体覆盖率", sm["coverage"], "ratio"))
+    rows: list[dict[str, Any]] = []
+    for q in res["pads"]:
+        rows.append({"kind": "pad", "net": q["net"], "x": (q["x"] + X0) * sx, "y": (q["y"] + Y0) * sy, "diameter": q["diameter"],
+                     "roundness_rms": q["roundness_rms"], "at_border": q["at_border"]})  # fmt: skip
+        an.shapes.append(("polygon", _circle(q["x"] + X0, q["y"] + Y0, q["diameter_px"] / 2), COLOURS["fit"], (q["x"] + X0, q["y"] + Y0), ""))
+    for q in res["wide"]:
+        rows.append({"kind": "wide", "net": q["net"], "x": (q["x"] + X0) * sx, "y": (q["y"] + Y0) * sy, "eq_diameter": q["eq_diameter"],
+                     "area": q["area"], "width_box": q["width_box"], "height_box": q["height_box"], "at_border": q["at_border"]})  # fmt: skip
+        if len(q["_outline"]) > 2:
+            o = q["_outline"][:: max(1, len(q["_outline"]) // 120)] + [X0, Y0]
+            an.shapes.append(("polygon", o.tolist(), COLOURS["edge_r"], tuple(o[0]), ""))
+    for g in res["segments"]:
+        xs_, ys_ = g.pop("_pts")
+        rows.append({"kind": "trace", "net": g["net"], "x": (g["x"] + X0) * sx, "y": (g["y"] + Y0) * sy, "width": g["diameter"], "sd": g["diameter_sd"],
+                     "length_along": g["length"], "angle": g["angle"], "samples": g["samples"]})  # fmt: skip
+        if len(xs_) > 1 and sum(r["kind"] == "trace" for r in rows) <= 400:
+            c = np.column_stack([xs_, ys_]).astype(float)
+            u = c - c.mean(0)
+            ax = np.linalg.svd(u, full_matrices=False)[2][0]
+            o = np.argsort(u @ ax)
+            pts = (c[o][:: max(1, len(o) // 40)] + [X0, Y0]).tolist()
+            an.shapes.append(("polyline", pts, COLOURS["object"], tuple(pts[len(pts) // 2]), ""))
+    for i, q in enumerate(res["clearances"]):
+        rows.append({"kind": "clearance", "net": q["nets"][0], "net_b": q["nets"][1], "x": (q["x1"] + X0) * sx, "y": (q["y1"] + Y0) * sy,
+                     "x2": (q["x2"] + X0) * sx, "y2": (q["y2"] + Y0) * sy, "clearance": q["clearance"]})  # fmt: skip
+        if i < 5 or q["clearance"] <= 1.5 * res["clearances"][0]["clearance"]:  # the closest gaps only: all are in the table
+            seg = [[q["x1"] + X0, q["y1"] + Y0], [q["x2"] + X0, q["y2"] + Y0]]
+            an.shapes.append(("polyline", seg, COLOURS["missing"] if i == 0 else COLOURS["edge_l"], tuple(seg[1]), "S min" if i == 0 else ""))
+    if sm.get("narrowest") is not None:
+        an.shapes.append(("points", [[sm["narrowest_x"] + X0, sm["narrowest_y"] + Y0]], COLOURS["missing"], (sm["narrowest_x"] + X0, sm["narrowest_y"] + Y0), "W min"))
+    an.objects = pd.DataFrame(rows)
+    an.extra["samples"] = {"width": np.asarray(res["samples"]["diameter"]).tolist()}
+    return an
+
+
 def _layers(a: np.ndarray, mask: np.ndarray | None, X0: int, Y0: int, sx: float, sy: float, p: dict[str, Any], spec: AnalysisSpec) -> Analysis:
     from vexel.packs.sem.metrology import stack_layers
 
@@ -469,6 +528,13 @@ RECIPES: dict[str, Recipe] = {
             Param("smooth", "平滑（像素）", "float", 1.0, lo=0, hi=10, step=0.5, help="纤维细于 8 像素时用 0.5"),
             Param("min_diameter", "最小直径（像素）", "float", 2.0, lo=1, hi=1000, step=1),
         ], "沿每根纤维的中心线测直径（避开交叉、端点和边界）、取向分布、纤维间的缝隙", _fibres),  # fmt: skip
+        Recipe("traces", "导线与焊盘（PCB、芯片金属层）", [
+            Param("feature", "导体是", "choice", "bright", (("bright", "比基底亮"), ("dark", "比基底暗"))),
+            Param("method", "边缘定义", "choice", "threshold", (("threshold", "阈值（与焊盘、间距同一边缘）"), ("gradient", "最大梯度"))),
+            Param("smooth", "平滑（像素）", "float", 1.0, lo=0, hi=10, step=0.5, help="线宽小于 8 像素时用 0.5"),
+            Param("min_width", "最小线宽（像素）", "float", 3.0, lo=1, hi=1000, step=1),
+            Param("pad_factor", "焊盘：比走线宽（倍）", "float", 1.5, lo=1.1, hi=10, step=0.1, help="比同一导体走线半宽的这个倍数还宽的部分当作焊盘"),
+        ], "俯视的导体：沿中心线测走线宽度（避开焊盘、交叉、端点和边界）、圆形焊盘直径、不同导体之间的最小间距、导体覆盖率；不判断开路短路（没有设计图可比）", _traces),  # fmt: skip
         Recipe("layers", "截面层厚", [
             Param("method", "边缘定义", "choice", "gradient", (("gradient", "最大梯度"), ("threshold", "阈值"))), LEVEL,
             Param("smooth", "平滑（像素）", "float", 1.5, lo=0, hi=10, step=0.5), Param("average", "列平均", "int", 1, lo=1, hi=32),
@@ -558,7 +624,7 @@ def summary_table(analyses: list[Analysis], unit: str, f: float) -> pd.DataFrame
 LENGTH_COLUMNS = {"position", "cd", "cd_sd_along", "ler_left_3sigma", "ler_left_3sigma_unbiased", "ler_right_3sigma", "ler_right_3sigma_unbiased",
                   "lwr_3sigma", "lwr_3sigma_unbiased", "x", "y", "diameter", "eq_diameter", "major", "minor", "fit_residual", "feret_max",
                   "feret_min", "top", "bottom", "thickness", "sd", "min", "max", "length_along", "roughness_3sigma", "roughness_3sigma_unbiased", "depth",
-                  "width"}  # fmt: skip
+                  "width", "clearance", "x2", "y2", "width_box", "height_box"}  # fmt: skip
 
 
 def objects_table(analyses: list[Analysis], unit: str, f: float) -> pd.DataFrame:

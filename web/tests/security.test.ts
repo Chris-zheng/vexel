@@ -566,7 +566,8 @@ describe('Workflow fit and the Python engine request', () => {
     const drawn = measureRequest({ ...(spec as object), calibration: { pixelSize: 2, spaceUnit: 'nm', source: 'manual', confirmed: true } } as never, 'lines', 'zh');
     expect(drawn.pixel_size).toBe(2);
     expect(pythonRecipeFor('sem_lines')).toBe('lines');
-    expect(pythonRecipeFor('pcb_inspection')).toBeNull();
+    expect(pythonRecipeFor('pcb_inspection')).toBe('traces');
+    expect(pythonRecipeFor('cells_count')).toBeNull();
     expect(pythonRecipeFor('sem_curved_multilayer')).toBe('layers');
     expect(pythonParamsFor('sem_curved_multilayer')).toEqual({ geometry: 'curved', orientation: 'auto' });
     const { SAME_QUANTITY } = await import('../src/engine/pythonEngine');

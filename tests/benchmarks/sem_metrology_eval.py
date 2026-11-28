@@ -3,14 +3,16 @@
     uv run python tests/benchmarks/sem_metrology_eval.py [--out table.md]
 
 Synthetic images with exact geometry (``vexel.synthetic.sem``): rough line/space
-patterns, contact-hole arrays, particle fields, layer stacks, line and trench cross-sections
-and tips. Each recipe is compared with the truth; repeatability is the 3σ of a result over
+patterns, contact-hole arrays, particle fields, layer stacks, line and trench cross-sections,
+tips and boards of conductors (traces, pads, clearances). Each recipe is compared with the truth; repeatability is the 3σ of a result over
 10 images of the same pattern with fresh noise (what repeated shots of one place give).
 
 Requirements: CD ≤ 0.5 px, pitch ≤ 0.2 px; noise-corrected LER and LWR within 10 % of the
 same pattern measured without noise; hole diameter ≤ 0.3 px (no rim), missing holes all
 found; particle diameter < 2 % (median) and count within 5 %; layer thickness ≤ 0.5 px;
-sidewall angle ≤ 0.5°, widths ≤ 0.5 px; tip radius < 5 %, cone angle ≤ 0.5°.
+sidewall angle ≤ 0.5°, widths ≤ 0.5 px; tip radius < 5 %, cone angle ≤ 0.5°; trace width bias
+≤ 0.15 px, worst segment, narrowest trace, round pad diameter and minimum clearance ≤ 0.5 px,
+no round pad missed or false, coverage ≤ 0.3 %.
 """
 
 from __future__ import annotations
@@ -180,11 +182,74 @@ def tips() -> None:
             check("tips", f"R {radius:.0f} px, half-angle {half:.0f}°: cone angle error", max(cones), 0.5, "°")
 
 
+def _board(kw: dict, mk: dict) -> dict:
+    """One synthetic board: per width segment its error (px), per round pad its diameter error,
+    the minimum clearance's error, pads missed / false / square taken for round, coverage error."""
+    from vexel.packs.sem.traces import traces
+
+    img, tr = S.pcb_board(**kw)
+    r = traces(img, **mk)
+    out: dict = {"width": [], "pad": [], "missed": 0, "false": 0, "square": 0}
+    measured = set()
+    for g in r["segments"]:
+        if g["samples"] < 5:
+            continue
+        p = np.array([g["x"], g["y"]])
+        net = min(tr["nets"], key=lambda n: min(float(S._seg_dist(p, np.array(a), np.array(b))) for a, b in zip(n["centre_line"][:-1], n["centre_line"][1:])))
+        out["width"].append(g["diameter"] - net["width"])
+        measured.add(net["net"])
+    pads = [(pp, n["pad_shape"]) for n in tr["nets"] for pp in n["pads"]]
+    hit = set()
+    for q in r["pads"]:
+        i = min(range(len(pads)), key=lambda k: math.hypot(pads[k][0][0] - q["x"], pads[k][0][1] - q["y"]))
+        (x, y, d), shape = pads[i]
+        if math.hypot(x - q["x"], y - q["y"]) > 2:
+            out["false"] += 1
+        elif shape == "square":
+            out["square"] += 1
+        else:
+            hit.add(i)
+            out["pad"].append(q["diameter"] - d)
+    out["missed"] = sum(1 for i, (_, shape) in enumerate(pads) if shape == "round" and i not in hit)
+    out["clearance"] = r["summary"].get("clearance_min", math.inf) - (tr["clearance_min"] or math.inf)
+    # the narrowest among the nets with a measurable trace (one or two widths long between pads: none)
+    out["narrowest"] = r["summary"].get("narrowest", math.inf) - min(n["width"] for n in tr["nets"] if n["net"] in measured)
+    out["unmeasured"] = len(tr["nets"]) - len(measured)
+    out["said"] = r["summary"].get("nets_unmeasured", 0)
+    out["coverage"] = r["summary"]["coverage"] - tr["coverage"]
+    return out
+
+
+def boards() -> None:
+    """Conductors from above (PCB, metal on a die): 7 boards per case, round pads only for the
+    clearance (blur rounds a square pad's corner, so the image's gap there is larger than the
+    drawing's: recorded separately)."""
+    cases = (("traces 6-14 px", {"width": (6.0, 14.0)}, {}),
+             ("traces 6-14 px, blur 1.5, noise 0.08", {"width": (6.0, 14.0), "blur": 1.5, "noise": 0.08}, {}),
+             ("traces 3-5 px (smooth 0.5)", {"width": (3.0, 5.0)}, {"smooth": 0.5, "min_width": 2.0}),
+             ("traces 20-30 px", {"width": (20.0, 30.0)}, {}))  # fmt: skip
+    for label, kw, mk in cases:
+        res = [_board({"nets": 8, "clearance": 4.0, "seed": seed, **kw}, mk) for seed in range(1, 8)]
+        w = np.concatenate([r["width"] for r in res])
+        pd_ = np.concatenate([r["pad"] for r in res])
+        check("traces", f"{label}: width bias (mean)", abs(float(w.mean())), 0.15)
+        check("traces", f"{label}: width, worst segment", float(np.abs(w).max()), 0.5)
+        check("traces", f"{label}: narrowest trace error (worst, among nets measured)", max(abs(r["narrowest"]) for r in res), 0.5)
+        check("traces", f"{label}: nets without a measurable trace, not reported", sum(max(0, r["unmeasured"] - r["said"]) for r in res), 0, "")
+        check("traces", f"{label}: round pad diameter error (worst)", float(np.abs(pd_).max()), 0.5)
+        check("traces", f"{label}: round pads missed / false", sum(r["missed"] + r["false"] for r in res), 0, "")
+        check("traces", f"{label}: minimum clearance error (worst)", max(abs(r["clearance"]) for r in res), 0.5)
+        check("traces", f"{label}: coverage error (worst)", max(abs(r["coverage"]) for r in res) * 100, 0.3, "%")
+    res = [_board({"nets": 8, "clearance": 4.0, "seed": seed, "square": 0.4}, {}) for seed in range(1, 8)]
+    check("traces", "with square pads: taken for round", sum(r["square"] for r in res), 0, "")
+    check("traces", "with square pads: minimum clearance error (worst; corners rounded by blur)", max(abs(r["clearance"]) for r in res), 1.5)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
-    for f in (lines, holes, particles, cross_sections, tips):
+    for f in (lines, holes, particles, cross_sections, tips, boards):
         f()
     out = ["| 项目 | 检查 | 结果 | 要求 | |", "| :-- | :-- | --: | --: | :-- |"]
     for r in ROWS:

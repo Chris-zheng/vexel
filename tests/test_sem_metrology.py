@@ -253,7 +253,8 @@ def test_every_recipe_runs_with_its_defaults():
     pics = {"lines": S.rough_lines(rows=200, cols=300)[0], "holes": S.hole_array(rows=200, cols=300)[0],
             "particles": S.particle_field(rows=200, cols=300, n=20)[0], "layers": S.layer_stack()[0],
             "profile": S.xsection_feature()[0], "tip": S.tip()[0], "pores": 1 - S.particle_field(rows=200, cols=300, n=20)[0],
-            "fibres": S.fibre_mat((200, 300), n=5)[0]}  # fmt: skip
+            "fibres": S.fibre_mat((200, 300), n=5)[0], "nested": S.nested_cells(layout="tissue", rows=300, cols=360, n=10)[0],
+            "traces": S.pcb_board(rows=240, cols=320, nets=4)[0]}  # fmt: skip
     assert set(pics) == set(RECIPES)
     for name, img in pics.items():
         an = run(AnalysisSpec(id=1, recipe=name), img, Scale(pixel_size=1e-9))
